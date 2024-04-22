@@ -15,15 +15,15 @@
 ​	所以要在 MasterGo 里装上插件 SendToFigma ，然后到 Figma 转上插件 ReceiveFromMasterGo。
 ​	在 MasterGo 里选中一个图层，比如一个“联集”，也就是布尔图层。然后运行插件，会得到一个文本图层。
 
-![image-20240422234655227](/Users/xuweinan/Documents/GitHub/MasterGo2Figma/README/image-20240422234655227.png)
+![image-20240422234655227](README/image-20240422234655227.png)
 
 ​	不用看懂。直接把这个复制到 Figma 里，直接复制就行换不换行影响不大。
 
-![image-20240422234756970](/Users/xuweinan/Documents/GitHub/MasterGo2Figma/README/image-20240422234756970.png)
+![image-20240422234756970](README/image-20240422234756970.png)
 
 然后运行 ReceiveFromMasterGo 插件，神奇的事情就发生了。
 
-![image-20240422234821868](/Users/xuweinan/Documents/GitHub/MasterGo2Figma/README/image-20240422234821868.png)
+![image-20240422234821868](README/image-20240422234821868.png)
 
 名字，填充，描边什么的都会还原。
 
@@ -32,7 +32,7 @@
 https://linear.app/comicandmanga/team/MAS/active  (不知道陌生人能不能看)
 总之目前是这个进度：
 
-![image-20240422234949289](/Users/xuweinan/Documents/GitHub/MasterGo2Figma/README/image-20240422234949289.png)
+![image-20240422234949289](README/image-20240422234949289.png)
 
 
 
