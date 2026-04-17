@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "target": "ES6",
+    "lib": ["ES6", "DOM"],
+    "strict": true,
+    "typeRoots": [
+      "./node_modules/@types",
+      "./node_modules/@mastergo"
+    ],
+    "noImplicitAny": false,
+    "skipLibCheck": true,
+    "esModuleInterop": true
+  }
+}

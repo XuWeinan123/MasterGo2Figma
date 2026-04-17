@@ -1,0 +1,16 @@
+{
+  "name": "SendToFigma",
+  "version": "1.0.0",
+  "description": "MasterGo plugin to export layers to JSON for Figma",
+  "main": "code.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "watch": "npm run build -- --watch"
+  },
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@mastergo/plugin-typings": "latest",
+    "typescript": "^5.0.0"
+  }
+}

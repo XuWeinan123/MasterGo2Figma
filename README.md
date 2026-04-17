@@ -1,5 +1,9 @@
 # MasterGo2Figma
 
+截止 2026-04-17，把之前的计划发给 AI，现在实现的差不多了。
+
+---
+
 ​	最近要把设计稿都从 MasterGo 转去 Figma 了，MasterGo 很多功能没有。
 
 ​	之前的设计稿转移起来还挺麻烦的，的确可以从 MasterGo 导出 Sketch 然后在 Figma 导入，但是效果太差了啊。

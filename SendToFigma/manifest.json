@@ -1,5 +1,6 @@
 {
   "name": "SendToFigma",
-  "id": 81135562896982,
-  "main": "index.js"
+  "id": "1182281861962366883",
+  "api": "1.0.0",
+  "main": "code.js"
 }
