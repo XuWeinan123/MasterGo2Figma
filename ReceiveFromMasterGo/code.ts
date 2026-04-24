@@ -100,6 +100,15 @@ async function createNodeFromData(data: any): Promise<SceneNode | null> {
     case "COMPONENT_SET":
       node = figma.createFrame();
       break;
+    case "GROUP":
+      // Group creation requires children. In this workflow, we usually apply properties
+      // to an existing group pasted from MasterGo. If we must create one, we start
+      // with a dummy frame and then we might need to regroup later, but for now
+      // let's create a frame as a placeholder if it's a leaf node.
+      // However, groups are usually containers.
+      node = figma.createFrame();
+      node.name = "GROUP_PLACEHOLDER";
+      break;
     default:
       console.log("Unsupported type:", type);
       break;
@@ -125,7 +134,10 @@ async function applyProperties(node: any, data: any) {
     if (data.blend.effects) node.effects = data.blend.effects;
   }
 
-  if (data.corner && node.type !== "LINE" && node.type !== "TEXT") {
+  // Groups in Figma do not support corner radius or geometry (fills/strokes)
+  const isGroup = node.type === "GROUP";
+
+  if (!isGroup && data.corner && node.type !== "LINE" && node.type !== "TEXT") {
     if (data.corner.cornerRadius === -1) {
       if ("topLeftRadius" in node) {
         node.topLeftRadius = data.corner.topLeftRadius || 0;
@@ -139,7 +151,7 @@ async function applyProperties(node: any, data: any) {
     if ("cornerSmoothing" in node) node.cornerSmoothing = data.corner.cornerSmoothing || 0;
   }
 
-  if (data.geometry) {
+  if (!isGroup && data.geometry) {
     if (data.geometry.fills) node.fills = data.geometry.fills;
     if (data.geometry.strokes) node.strokes = data.geometry.strokes;
     if (data.geometry.strokeWeight !== undefined) node.strokeWeight = data.geometry.strokeWeight;
@@ -152,8 +164,33 @@ async function applyProperties(node: any, data: any) {
   if (data.layout) {
     if (data.layout.relativeTransform) node.relativeTransform = data.layout.relativeTransform;
     if (data.layout.width !== undefined && data.layout.height !== undefined) {
-      node.resize(data.layout.width, data.layout.height);
+      if (isGroup) {
+        // Group resize is different, but for now we trust relativeTransform
+      } else {
+        node.resize(data.layout.width, data.layout.height);
+      }
     }
+
+    // Auto layout properties
+    if (!isGroup && "layoutMode" in node) {
+      if (data.layout.layoutMode) node.layoutMode = data.layout.layoutMode;
+      if (data.layout.itemSpacing !== undefined) node.itemSpacing = data.layout.itemSpacing;
+      if (data.layout.paddingLeft !== undefined) node.paddingLeft = data.layout.paddingLeft;
+      if (data.layout.paddingRight !== undefined) node.paddingRight = data.layout.paddingRight;
+      if (data.layout.paddingTop !== undefined) node.paddingTop = data.layout.paddingTop;
+      if (data.layout.paddingBottom !== undefined) node.paddingBottom = data.layout.paddingBottom;
+      if (data.layout.primaryAxisAlignItems) node.primaryAxisAlignItems = data.layout.primaryAxisAlignItems;
+      if (data.layout.counterAxisAlignItems) node.counterAxisAlignItems = data.layout.counterAxisAlignItems;
+      if (data.layout.primaryAxisSizingMode) node.primaryAxisSizingMode = data.layout.primaryAxisSizingMode;
+      if (data.layout.counterAxisSizingMode) node.counterAxisSizingMode = data.layout.counterAxisSizingMode;
+      if (data.layout.itemReverseZIndex !== undefined) node.itemReverseZIndex = data.layout.itemReverseZIndex;
+      if (data.layout.strokesIncludedInLayout !== undefined) node.strokesIncludedInLayout = data.layout.strokesIncludedInLayout;
+    }
+
+    // Individual layout properties for children
+    if ("layoutAlign" in node && data.layout.layoutAlign) node.layoutAlign = data.layout.layoutAlign;
+    if ("layoutGrow" in node && data.layout.layoutGrow !== undefined) node.layoutGrow = data.layout.layoutGrow;
+    if ("layoutPositioning" in node && data.layout.layoutPositioning) node.layoutPositioning = data.layout.layoutPositioning;
   }
 
   if ('clipsContent' in node && data.clipsContent !== undefined) {

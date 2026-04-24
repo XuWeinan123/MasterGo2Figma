@@ -269,7 +269,7 @@ function transFrameNode(selection: FrameNode | InstanceNode | ComponentNode) {
 
 function transGroupNode(selection: GroupNode) {
     const universalStruct = getUniversalProperty(selection)
-    universalStruct.type = "FRAME"
+    universalStruct.type = "GROUP"
     const otherStruct = { "clipsContent": false }
     return Object.assign(otherStruct, universalStruct)
 }
@@ -493,7 +493,22 @@ function getUniversalProperty(selection: SceneNode) {
             "relativeTransform": selection.relativeTransform,
             "x": selection.x, "y": selection.y,
             "rotation": -(selection as any).rotation || 0,
-            "width": selection.width, "height": selection.height
+            "width": selection.width, "height": selection.height,
+            "layoutMode": (selection as any).layoutMode || "NONE",
+            "itemSpacing": (selection as any).itemSpacing || 0,
+            "paddingLeft": (selection as any).paddingLeft || 0,
+            "paddingRight": (selection as any).paddingRight || 0,
+            "paddingTop": (selection as any).paddingTop || 0,
+            "paddingBottom": (selection as any).paddingBottom || 0,
+            "primaryAxisAlignItems": (selection as any).primaryAxisAlignItems || "MIN",
+            "counterAxisAlignItems": (selection as any).counterAxisAlignItems || "MIN",
+            "primaryAxisSizingMode": (selection as any).primaryAxisSizingMode || "FIXED",
+            "counterAxisSizingMode": (selection as any).counterAxisSizingMode || "FIXED",
+            "itemReverseZIndex": (selection as any).itemReverseZIndex || false,
+            "strokesIncludedInLayout": (selection as any).strokesIncludedInLayout || false,
+            "layoutAlign": (selection as any).layoutAlign || "INHERIT",
+            "layoutGrow": (selection as any).layoutGrow || 0,
+            "layoutPositioning": (selection as any).layoutPositioning || "AUTO"
         }
     }
 }

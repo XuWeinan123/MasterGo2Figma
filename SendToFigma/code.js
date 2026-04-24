@@ -185,7 +185,12 @@ function analyseNodes(node) {
 }
 function transBONode(node) {
     const clone = node.clone();
-    var flattedShapeNode = mg.flatten([clone]);
+    const flattedShapeNode = mg.flatten([clone]);
+    if (!flattedShapeNode) {
+        if (!clone.removed)
+            clone.remove();
+        return transBooleanNode(node);
+    }
     const json = transPenNode(flattedShapeNode);
     flattedShapeNode.remove();
     return json;
@@ -262,7 +267,7 @@ function transFrameNode(selection) {
 }
 function transGroupNode(selection) {
     const universalStruct = getUniversalProperty(selection);
-    universalStruct.type = "FRAME";
+    universalStruct.type = "GROUP";
     const otherStruct = { "clipsContent": false };
     return Object.assign(otherStruct, universalStruct);
 }
@@ -477,7 +482,22 @@ function getUniversalProperty(selection) {
             "relativeTransform": selection.relativeTransform,
             "x": selection.x, "y": selection.y,
             "rotation": -selection.rotation || 0,
-            "width": selection.width, "height": selection.height
+            "width": selection.width, "height": selection.height,
+            "layoutMode": selection.layoutMode || "NONE",
+            "itemSpacing": selection.itemSpacing || 0,
+            "paddingLeft": selection.paddingLeft || 0,
+            "paddingRight": selection.paddingRight || 0,
+            "paddingTop": selection.paddingTop || 0,
+            "paddingBottom": selection.paddingBottom || 0,
+            "primaryAxisAlignItems": selection.primaryAxisAlignItems || "MIN",
+            "counterAxisAlignItems": selection.counterAxisAlignItems || "MIN",
+            "primaryAxisSizingMode": selection.primaryAxisSizingMode || "FIXED",
+            "counterAxisSizingMode": selection.counterAxisSizingMode || "FIXED",
+            "itemReverseZIndex": selection.itemReverseZIndex || false,
+            "strokesIncludedInLayout": selection.strokesIncludedInLayout || false,
+            "layoutAlign": selection.layoutAlign || "INHERIT",
+            "layoutGrow": selection.layoutGrow || 0,
+            "layoutPositioning": selection.layoutPositioning || "AUTO"
         }
     };
 }
