@@ -12,6 +12,9 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 let totalNodes = 0;
 let processedNodes = 0;
 let fontLoaded = false;
+const INTERNAL_PROPS_PREFIX = "[PROPS]";
+const SIBLING_PROPS_PREFIX = "[PROPS_SIBLING]";
+const VISUAL_FRAME_SOURCE_TYPES = ["COMPONENT", "COMPONENT_SET", "INSTANCE"];
 processAllPages();
 function countNodes(node) {
     totalNodes++;
@@ -60,7 +63,7 @@ function transformNodeRecursive(node) {
                 console.log(`Progress: ${Math.round((processedNodes / totalNodes) * 100)}% (${processedNodes}/${totalNodes}) - Current: ${node.name}`);
             }
             // Skip our own generated layers if we rerun or process similar names
-            if (node.name.startsWith("[PROPS]"))
+            if (node.name.startsWith(INTERNAL_PROPS_PREFIX) || node.name.startsWith(SIBLING_PROPS_PREFIX))
                 return;
             const isContainer = node.type === "FRAME" ||
                 node.type === "GROUP" ||
@@ -69,30 +72,42 @@ function transformNodeRecursive(node) {
                 node.type === "COMPONENT_SET" ||
                 node.type === "SECTION";
             if (isContainer) {
+                const sourceType = node.type;
                 let containerNode = node;
-                // Only detach instances. Do NOT detach components as it breaks their instances on the same page.
+                let nodeJson = null;
+                // Instances are intentionally downgraded to visual frames in this iteration.
                 if (node.type === "INSTANCE") {
                     containerNode = node.detachInstance();
                 }
+                else if (sourceType === "COMPONENT_SET") {
+                    nodeJson = analyseNodes(node, sourceType);
+                    containerNode = replaceComponentSetWithFrame(node);
+                }
                 // Generate PROPS node for container to preserve styles and type
-                const nodeJson = analyseNodes(containerNode);
-                const jsonString = JSON.stringify([nodeJson, []]);
-                const textNode = yield initTextNodeByChar(jsonString);
-                textNode.name = "[PROPS]" + containerNode.name;
-                textNode.isVisible = false;
-                if ('insertChild' in containerNode) {
-                    containerNode.insertChild(0, textNode);
+                if (!nodeJson)
+                    nodeJson = analyseNodes(containerNode, sourceType);
+                if (shouldUseSiblingProps(sourceType, containerNode)) {
+                    yield insertSiblingPropsMarker(containerNode, nodeJson);
                 }
                 else {
-                    containerNode.appendChild(textNode);
+                    const jsonString = JSON.stringify([nodeJson, []]);
+                    const textNode = yield initTextNodeByChar(jsonString);
+                    textNode.name = INTERNAL_PROPS_PREFIX + containerNode.name;
+                    textNode.isVisible = false;
+                    if ('insertChild' in containerNode) {
+                        containerNode.insertChild(0, textNode);
+                    }
+                    else {
+                        containerNode.appendChild(textNode);
+                    }
+                    textNode.width = 1;
+                    textNode.height = 1;
+                    textNode.x = 0;
+                    textNode.y = 0;
                 }
-                textNode.width = 1;
-                textNode.height = 1;
-                textNode.x = 0;
-                textNode.y = 0;
                 const children = [...containerNode.children];
                 for (const child of children) {
-                    if (child === textNode)
+                    if (child.name.startsWith(INTERNAL_PROPS_PREFIX) || child.name.startsWith(SIBLING_PROPS_PREFIX))
                         continue;
                     yield transformNodeRecursive(child);
                 }
@@ -137,16 +152,103 @@ function transformNodeRecursive(node) {
         }
     });
 }
-function analyseNodes(node) {
+function insertSiblingPropsMarker(node, nodeJson) {
+    return __awaiter(this, void 0, void 0, function* () {
+        const nodeParent = node.parent;
+        if (!nodeParent || !('insertChild' in nodeParent))
+            return;
+        const textNode = yield initTextNodeByChar(JSON.stringify([nodeJson, []]));
+        textNode.name = SIBLING_PROPS_PREFIX + node.name;
+        textNode.isVisible = false;
+        const childrenList = nodeParent.children;
+        let index = -1;
+        for (let i = 0; i < childrenList.length; i++) {
+            if (childrenList[i].id === node.id) {
+                index = i;
+                break;
+            }
+        }
+        if (index !== -1) {
+            nodeParent.insertChild(index, textNode);
+        }
+        else {
+            nodeParent.appendChild(textNode);
+        }
+        textNode.width = 1;
+        textNode.height = 1;
+        textNode.relativeTransform = node.relativeTransform;
+    });
+}
+function shouldUseSiblingProps(sourceType, node) {
+    return !('insertChild' in node);
+}
+function replaceComponentSetWithFrame(node) {
+    const parent = node.parent;
+    if (!parent || !('insertChild' in parent))
+        return node;
+    const frame = mg.createFrame();
+    frame.name = node.name;
+    frame.isVisible = node.isVisible;
+    frame.isLocked = node.isLocked;
+    frame.relativeTransform = node.relativeTransform;
+    frame.x = node.x;
+    frame.y = node.y;
+    frame.width = node.width;
+    frame.height = node.height;
+    const childrenList = parent.children;
+    let index = -1;
+    for (let i = 0; i < childrenList.length; i++) {
+        if (childrenList[i].id === node.id) {
+            index = i;
+            break;
+        }
+    }
+    parent.insertChild(index !== -1 ? index : childrenList.length, frame);
+    const nodeAbsoluteTransform = cloneTransform(node.absoluteTransform);
+    const nodeInverseTransform = invertTransform(nodeAbsoluteTransform);
+    const children = [...(node.children || [])].map((child) => ({
+        node: child,
+        originalX: child.x,
+        originalY: child.y,
+        relativeTransform: multiplyTransform(nodeInverseTransform, cloneTransform(child.absoluteTransform))
+    }));
+    let movedChildren = 0;
+    for (const child of children) {
+        try {
+            frame.appendChild(child.node);
+            child.node.relativeTransform = cloneTransform(child.relativeTransform);
+            child.node.x = child.relativeTransform[0][2];
+            child.node.y = child.relativeTransform[1][2];
+            console.log(`[Component->Frame] ${node.name} / ${child.node.name}: ` +
+                `before=(${child.originalX}, ${child.originalY}) ` +
+                `after=(${child.node.x}, ${child.node.y}) ` +
+                `target=(${child.relativeTransform[0][2]}, ${child.relativeTransform[1][2]})`);
+            movedChildren++;
+        }
+        catch (error) {
+            console.error("Unable to move component child into visual frame:", child.node.name, error);
+        }
+    }
+    if (children.length > 0 && movedChildren === 0) {
+        if (!frame.removed)
+            frame.remove();
+        return node;
+    }
+    if (!node.removed)
+        node.remove();
+    return frame;
+}
+function analyseNodes(node, sourceType) {
+    const resolvedSourceType = sourceType || node.type;
     var finalNodeJson = "";
-    if (node.type == "BOOLEAN_OPERATION") {
+    if (resolvedSourceType == "BOOLEAN_OPERATION" && node.type == "BOOLEAN_OPERATION") {
         finalNodeJson = transBONode(node);
     }
-    else if (node.type == "COMPONENT") {
-        finalNodeJson = transFrameNode(node);
+    else if (resolvedSourceType == "COMPONENT") {
+        finalNodeJson = transFrameNode(node, resolvedSourceType);
     }
-    else if (node.type == "COMPONENT_SET") {
-        finalNodeJson = transFrameNode(node);
+    else if (resolvedSourceType == "COMPONENT_SET") {
+        finalNodeJson = transFrameNode(node, resolvedSourceType);
     }
     else if (node.type == "ELLIPSE") {
         finalNodeJson = transEllipseNode(node);
@@ -170,13 +272,19 @@ function analyseNodes(node) {
         finalNodeJson = transPolygonNode(node);
     }
     else if (node.type == "FRAME") {
-        finalNodeJson = transFrameNode(node);
+        finalNodeJson = transFrameNode(node, resolvedSourceType);
     }
     else if (node.type == "GROUP") {
         finalNodeJson = transGroupNode(node);
     }
-    else if (node.type == "INSTANCE") {
-        finalNodeJson = transFrameNode(node);
+    else if (resolvedSourceType == "INSTANCE") {
+        finalNodeJson = transFrameNode(node, resolvedSourceType);
+    }
+    else if (node.type == "SECTION") {
+        finalNodeJson = transSectionNode(node);
+    }
+    else if (node.type == "SLICE") {
+        finalNodeJson = transSliceNode(node);
     }
     else {
         finalNodeJson = {};
@@ -191,12 +299,14 @@ function transBONode(node) {
             clone.remove();
         return transBooleanNode(node);
     }
-    const json = transPenNode(flattedShapeNode);
+    // Boolean source children are intentionally not serialized in this iteration.
+    const json = transPenNode(flattedShapeNode, "BOOLEAN_OPERATION", "PEN");
+    json.booleanOperation = node.booleanOperation;
     flattedShapeNode.remove();
     return json;
 }
-function transPenNode(selection) {
-    const universalStruct = getUniversalProperty(selection);
+function transPenNode(selection, sourceType, restoreType) {
+    const universalStruct = getUniversalProperty(selection, sourceType, restoreType);
     const originJson = selection.penNetwork;
     const originCtrlNodes = originJson.ctrlNodes;
     const originNodes = originJson.nodes;
@@ -260,16 +370,23 @@ function transPolygonNode(selection) {
     const otherStruct = { "pointCount": selection.pointCount };
     return Object.assign(otherStruct, universalStruct);
 }
-function transFrameNode(selection) {
-    const universalStruct = getUniversalProperty(selection);
+function transFrameNode(selection, sourceType) {
+    const universalStruct = getUniversalProperty(selection, sourceType);
+    const otherStruct = { "clipsContent": selection.clipsContent };
+    return Object.assign(otherStruct, universalStruct);
+}
+function transSectionNode(selection) {
+    const universalStruct = getUniversalProperty(selection, "SECTION", "SECTION");
     const otherStruct = { "clipsContent": selection.clipsContent };
     return Object.assign(otherStruct, universalStruct);
 }
 function transGroupNode(selection) {
-    const universalStruct = getUniversalProperty(selection);
-    universalStruct.type = "GROUP";
+    const universalStruct = getUniversalProperty(selection, "GROUP", "GROUP");
     const otherStruct = { "clipsContent": false };
     return Object.assign(otherStruct, universalStruct);
+}
+function transSliceNode(selection) {
+    return getUniversalProperty(selection, "SLICE", "SLICE");
 }
 function transTextNode(selection) {
     var _a, _b, _c, _d, _e;
@@ -349,7 +466,8 @@ function fillsAndStrokes2Json(fills, strokes) {
                     "visible": fill.isVisible
                 };
             }
-            resultFills.push(tempResultFill);
+            if (tempResultFill.type)
+                resultFills.push(tempResultFill);
         }
     }
     const resultStrokes = [];
@@ -385,7 +503,8 @@ function fillsAndStrokes2Json(fills, strokes) {
                     "gradientTransform": [[0, 1, 0], [-1, 0, 1]]
                 };
             }
-            resultStrokes.push(tempResultStroke);
+            if (tempResultStroke.type)
+                resultStrokes.push(tempResultStroke);
         }
     }
     return { fills: resultFills, strokes: resultStrokes };
@@ -425,8 +544,11 @@ function getResultArrayByTwoPoint(points) {
         return res;
     }
 }
-function getUniversalProperty(selection) {
-    var _a, _b;
+function getUniversalProperty(selection, sourceType, restoreType) {
+    var _a, _b, _c, _d;
+    const resolvedSourceType = sourceType || selection.type;
+    const resolvedRestoreType = restoreType || getRestoreType(resolvedSourceType);
+    const layoutTransform = getRelativeLayoutTransform(selection);
     const fills = selection.fills || [];
     const strokes = selection.strokes || [];
     var tFS = fillsAndStrokes2Json(fills, strokes);
@@ -454,10 +576,14 @@ function getUniversalProperty(selection) {
         }
     }
     return {
-        "type": selection.type,
+        "type": resolvedRestoreType,
+        "sourceType": resolvedSourceType,
+        "restoreType": resolvedRestoreType,
         "id": selection.id,
         "name": selection.name,
         "parentID": (selection.parent && selection.parent.type == "PAGE" ? null : (_a = selection.parent) === null || _a === void 0 ? void 0 : _a.id),
+        "constraints": selection.constraints,
+        "exportSettings": selection.exportSettings || [],
         "scence": { "visible": selection.isVisible, "locked": selection.isLocked },
         "blend": {
             "opacity": (_b = selection.opacity) !== null && _b !== void 0 ? _b : 1,
@@ -479,27 +605,99 @@ function getUniversalProperty(selection) {
             "strokeCap": selection.strokeCap || 'NONE',
         },
         "layout": {
-            "relativeTransform": selection.relativeTransform,
-            "x": selection.x, "y": selection.y,
+            "relativeTransform": layoutTransform,
+            "x": layoutTransform[0][2], "y": layoutTransform[1][2],
             "rotation": -selection.rotation || 0,
             "width": selection.width, "height": selection.height,
-            "layoutMode": selection.layoutMode || "NONE",
+            "constrainProportions": selection.constrainProportions || false,
+            "layoutMode": getLayoutMode(selection),
             "itemSpacing": selection.itemSpacing || 0,
             "paddingLeft": selection.paddingLeft || 0,
             "paddingRight": selection.paddingRight || 0,
             "paddingTop": selection.paddingTop || 0,
             "paddingBottom": selection.paddingBottom || 0,
-            "primaryAxisAlignItems": selection.primaryAxisAlignItems || "MIN",
-            "counterAxisAlignItems": selection.counterAxisAlignItems || "MIN",
-            "primaryAxisSizingMode": selection.primaryAxisSizingMode || "FIXED",
-            "counterAxisSizingMode": selection.counterAxisSizingMode || "FIXED",
+            "primaryAxisAlignItems": getAxisAlign(selection.primaryAxisAlignItems || selection.mainAxisAlignItems || "MIN"),
+            "counterAxisAlignItems": getAxisAlign(selection.counterAxisAlignItems || selection.crossAxisAlignItems || "MIN"),
+            "primaryAxisSizingMode": selection.primaryAxisSizingMode || selection.mainAxisSizingMode || "FIXED",
+            "counterAxisSizingMode": selection.counterAxisSizingMode || selection.crossAxisSizingMode || "FIXED",
             "itemReverseZIndex": selection.itemReverseZIndex || false,
             "strokesIncludedInLayout": selection.strokesIncludedInLayout || false,
-            "layoutAlign": selection.layoutAlign || "INHERIT",
-            "layoutGrow": selection.layoutGrow || 0,
+            "layoutAlign": getLayoutAlign(selection.layoutAlign || selection.alignSelf || "INHERIT"),
+            "layoutGrow": (_d = (_c = selection.layoutGrow) !== null && _c !== void 0 ? _c : selection.flexGrow) !== null && _d !== void 0 ? _d : 0,
             "layoutPositioning": selection.layoutPositioning || "AUTO"
         }
     };
+}
+function getRelativeLayoutTransform(selection) {
+    const parent = selection.parent;
+    if (parent && parent.type !== "PAGE" && selection.absoluteTransform && parent.absoluteTransform) {
+        return multiplyTransform(invertTransform(parent.absoluteTransform), selection.absoluteTransform);
+    }
+    return selection.relativeTransform;
+}
+function cloneTransform(transform) {
+    return [
+        [transform[0][0], transform[0][1], transform[0][2]],
+        [transform[1][0], transform[1][1], transform[1][2]]
+    ];
+}
+function getRestoreType(sourceType) {
+    if (VISUAL_FRAME_SOURCE_TYPES.indexOf(sourceType) !== -1)
+        return "FRAME";
+    if (sourceType === "BOOLEAN_OPERATION")
+        return "VECTOR";
+    return sourceType;
+}
+function getLayoutMode(selection) {
+    const layoutMode = selection.layoutMode || selection.flexMode || "NONE";
+    if (layoutMode === "ROW")
+        return "HORIZONTAL";
+    if (layoutMode === "COLUMN")
+        return "VERTICAL";
+    return layoutMode;
+}
+function getAxisAlign(value) {
+    if (value === "FLEX_START")
+        return "MIN";
+    if (value === "FLEX_END")
+        return "MAX";
+    if (value === "SPACING_BETWEEN")
+        return "SPACE_BETWEEN";
+    return value;
+}
+function getLayoutAlign(value) {
+    if (value === "STRETCH" || value === "INHERIT")
+        return value;
+    return getAxisAlign(value);
+}
+function multiplyTransform(a, b) {
+    return [
+        [
+            a[0][0] * b[0][0] + a[0][1] * b[1][0],
+            a[0][0] * b[0][1] + a[0][1] * b[1][1],
+            a[0][0] * b[0][2] + a[0][1] * b[1][2] + a[0][2]
+        ],
+        [
+            a[1][0] * b[0][0] + a[1][1] * b[1][0],
+            a[1][0] * b[0][1] + a[1][1] * b[1][1],
+            a[1][0] * b[0][2] + a[1][1] * b[1][2] + a[1][2]
+        ]
+    ];
+}
+function invertTransform(transform) {
+    const a = transform[0][0];
+    const b = transform[0][1];
+    const c = transform[0][2];
+    const d = transform[1][0];
+    const e = transform[1][1];
+    const f = transform[1][2];
+    const det = a * e - b * d;
+    if (Math.abs(det) < 0.000001)
+        return [[1, 0, 0], [0, 1, 0]];
+    return [
+        [e / det, -b / det, (b * f - e * c) / det],
+        [-d / det, a / det, (d * c - a * f) / det]
+    ];
 }
 function initTextNodeByChar(characters) {
     return __awaiter(this, void 0, void 0, function* () {

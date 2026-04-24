@@ -4,6 +4,10 @@ let totalNodes = 0;
 let processedNodes = 0;
 let fontLoaded = false;
 
+const INTERNAL_PROPS_PREFIX = "[PROPS]";
+const SIBLING_PROPS_PREFIX = "[PROPS_SIBLING]";
+const VISUAL_FRAME_SOURCE_TYPES = ["COMPONENT", "COMPONENT_SET", "INSTANCE"];
+
 processAllPages();
 
 function countNodes(node: any) {
@@ -53,7 +57,7 @@ async function transformNodeRecursive(node: SceneNode) {
         }
 
         // Skip our own generated layers if we rerun or process similar names
-        if (node.name.startsWith("[PROPS]")) return;
+        if (node.name.startsWith(INTERNAL_PROPS_PREFIX) || node.name.startsWith(SIBLING_PROPS_PREFIX)) return;
 
         const isContainer = node.type === "FRAME" ||
             node.type === "GROUP" ||
@@ -63,35 +67,45 @@ async function transformNodeRecursive(node: SceneNode) {
             node.type === "SECTION";
 
         if (isContainer) {
+            const sourceType = node.type;
             let containerNode = node as any;
+            let nodeJson: any = null;
             
-            // Only detach instances. Do NOT detach components as it breaks their instances on the same page.
+            // Instances are intentionally downgraded to visual frames in this iteration.
             if (node.type === "INSTANCE") {
                 containerNode = (node as InstanceNode).detachInstance();
+            } else if (sourceType === "COMPONENT_SET") {
+                nodeJson = analyseNodes(node, sourceType);
+                containerNode = replaceComponentSetWithFrame(node as any);
             }
             
             // Generate PROPS node for container to preserve styles and type
-            const nodeJson = analyseNodes(containerNode);
-            const jsonString = JSON.stringify([nodeJson, []]);
-            const textNode = await initTextNodeByChar(jsonString);
+            if (!nodeJson) nodeJson = analyseNodes(containerNode, sourceType);
             
-            textNode.name = "[PROPS]" + containerNode.name;
-            textNode.isVisible = false;
-            
-            if ('insertChild' in containerNode) {
-                containerNode.insertChild(0, textNode);
+            if (shouldUseSiblingProps(sourceType, containerNode)) {
+                await insertSiblingPropsMarker(containerNode, nodeJson);
             } else {
-                containerNode.appendChild(textNode);
+                const jsonString = JSON.stringify([nodeJson, []]);
+                const textNode = await initTextNodeByChar(jsonString);
+
+                textNode.name = INTERNAL_PROPS_PREFIX + containerNode.name;
+                textNode.isVisible = false;
+
+                if ('insertChild' in containerNode) {
+                    containerNode.insertChild(0, textNode);
+                } else {
+                    containerNode.appendChild(textNode);
+                }
+
+                textNode.width = 1;
+                textNode.height = 1;
+                textNode.x = 0;
+                textNode.y = 0;
             }
-            
-            textNode.width = 1;
-            textNode.height = 1;
-            textNode.x = 0;
-            textNode.y = 0;
 
             const children = [...containerNode.children];
             for (const child of children) {
-                if (child === textNode) continue;
+                if (child.name.startsWith(INTERNAL_PROPS_PREFIX) || child.name.startsWith(SIBLING_PROPS_PREFIX)) continue;
                 await transformNodeRecursive(child as SceneNode);
             }
         } else {
@@ -137,14 +151,108 @@ async function transformNodeRecursive(node: SceneNode) {
     }
 }
 
-function analyseNodes(node: SceneNode): any {
+async function insertSiblingPropsMarker(node: SceneNode, nodeJson: any) {
+    const nodeParent = node.parent;
+    if (!nodeParent || !('insertChild' in nodeParent)) return;
+
+    const textNode = await initTextNodeByChar(JSON.stringify([nodeJson, []]));
+    textNode.name = SIBLING_PROPS_PREFIX + node.name;
+    textNode.isVisible = false;
+
+    const childrenList = nodeParent.children;
+    let index = -1;
+    for (let i = 0; i < childrenList.length; i++) {
+        if (childrenList[i].id === node.id) {
+            index = i;
+            break;
+        }
+    }
+
+    if (index !== -1) {
+        (nodeParent as any).insertChild(index, textNode);
+    } else {
+        (nodeParent as any).appendChild(textNode);
+    }
+
+    textNode.width = 1;
+    textNode.height = 1;
+    textNode.relativeTransform = node.relativeTransform;
+}
+
+function shouldUseSiblingProps(sourceType: string, node: any) {
+    return !('insertChild' in node);
+}
+
+function replaceComponentSetWithFrame(node: SceneNode) {
+    const parent = node.parent as any;
+    if (!parent || !('insertChild' in parent)) return node as any;
+
+    const frame = mg.createFrame();
+    frame.name = node.name;
+    frame.isVisible = node.isVisible;
+    frame.isLocked = node.isLocked;
+    frame.relativeTransform = node.relativeTransform;
+    (frame as any).x = node.x;
+    (frame as any).y = node.y;
+    (frame as any).width = node.width;
+    (frame as any).height = node.height;
+
+    const childrenList = parent.children;
+    let index = -1;
+    for (let i = 0; i < childrenList.length; i++) {
+        if (childrenList[i].id === node.id) {
+            index = i;
+            break;
+        }
+    }
+
+    parent.insertChild(index !== -1 ? index : childrenList.length, frame);
+
+    const nodeAbsoluteTransform = cloneTransform(node.absoluteTransform);
+    const nodeInverseTransform = invertTransform(nodeAbsoluteTransform);
+    const children = [...((node as any).children || [])].map((child: SceneNode) => ({
+        node: child,
+        originalX: child.x,
+        originalY: child.y,
+        relativeTransform: multiplyTransform(nodeInverseTransform, cloneTransform(child.absoluteTransform))
+    }));
+    let movedChildren = 0;
+    for (const child of children) {
+        try {
+            frame.appendChild(child.node);
+            (child.node as any).relativeTransform = cloneTransform(child.relativeTransform);
+            (child.node as any).x = child.relativeTransform[0][2];
+            (child.node as any).y = child.relativeTransform[1][2];
+            console.log(
+                `[Component->Frame] ${node.name} / ${child.node.name}: ` +
+                `before=(${child.originalX}, ${child.originalY}) ` +
+                `after=(${child.node.x}, ${child.node.y}) ` +
+                `target=(${child.relativeTransform[0][2]}, ${child.relativeTransform[1][2]})`
+            );
+            movedChildren++;
+        } catch (error) {
+            console.error("Unable to move component child into visual frame:", child.node.name, error);
+        }
+    }
+
+    if (children.length > 0 && movedChildren === 0) {
+        if (!frame.removed) frame.remove();
+        return node as any;
+    }
+
+    if (!node.removed) node.remove();
+    return frame;
+}
+
+function analyseNodes(node: SceneNode, sourceType?: string): any {
+    const resolvedSourceType = sourceType || node.type;
     var finalNodeJson: any = ""
-    if (node.type == "BOOLEAN_OPERATION") {
+    if (resolvedSourceType == "BOOLEAN_OPERATION" && node.type == "BOOLEAN_OPERATION") {
         finalNodeJson = transBONode(node)
-    } else if (node.type == "COMPONENT") {
-        finalNodeJson = transFrameNode(node as ComponentNode)
-    } else if (node.type == "COMPONENT_SET") {
-        finalNodeJson = transFrameNode(node as any)
+    } else if (resolvedSourceType == "COMPONENT") {
+        finalNodeJson = transFrameNode(node as ComponentNode, resolvedSourceType)
+    } else if (resolvedSourceType == "COMPONENT_SET") {
+        finalNodeJson = transFrameNode(node as any, resolvedSourceType)
     } else if (node.type == "ELLIPSE") {
         finalNodeJson = transEllipseNode(node as EllipseNode)
     } else if (node.type == "PEN") {
@@ -160,11 +268,15 @@ function analyseNodes(node: SceneNode): any {
     } else if (node.type == "POLYGON") {
         finalNodeJson = transPolygonNode(node as PolygonNode)
     } else if (node.type == "FRAME") {
-        finalNodeJson = transFrameNode(node as FrameNode)
+        finalNodeJson = transFrameNode(node as FrameNode, resolvedSourceType)
     } else if (node.type == "GROUP") {
         finalNodeJson = transGroupNode(node as GroupNode)
-    } else if (node.type == "INSTANCE") {
-        finalNodeJson = transFrameNode(node as InstanceNode)
+    } else if (resolvedSourceType == "INSTANCE") {
+        finalNodeJson = transFrameNode(node as InstanceNode, resolvedSourceType)
+    } else if (node.type == "SECTION") {
+        finalNodeJson = transSectionNode(node as SectionNode)
+    } else if (node.type == "SLICE") {
+        finalNodeJson = transSliceNode(node as SliceNode)
     } else {
         finalNodeJson = {}
     }
@@ -180,13 +292,15 @@ function transBONode(node: BooleanOperationNode) {
         return transBooleanNode(node);
     }
 
-    const json = transPenNode(flattedShapeNode as PenNode);
+    // Boolean source children are intentionally not serialized in this iteration.
+    const json: any = transPenNode(flattedShapeNode as PenNode, "BOOLEAN_OPERATION", "PEN");
+    json.booleanOperation = node.booleanOperation;
     flattedShapeNode.remove();
     return json;
 }
 
-function transPenNode(selection: PenNode) {
-    const universalStruct = getUniversalProperty(selection)
+function transPenNode(selection: PenNode, sourceType?: string, restoreType?: string) {
+    const universalStruct = getUniversalProperty(selection, sourceType, restoreType)
     const originJson = selection.penNetwork
     const originCtrlNodes = originJson.ctrlNodes
     const originNodes = originJson.nodes
@@ -261,17 +375,26 @@ function transPolygonNode(selection: PolygonNode) {
     return Object.assign(otherStruct, universalStruct)
 }
 
-function transFrameNode(selection: FrameNode | InstanceNode | ComponentNode) {
-    const universalStruct = getUniversalProperty(selection)
-    const otherStruct = { "clipsContent": selection.clipsContent }
+function transFrameNode(selection: FrameNode | InstanceNode | ComponentNode, sourceType?: string) {
+    const universalStruct = getUniversalProperty(selection, sourceType)
+    const otherStruct = { "clipsContent": (selection as any).clipsContent }
+    return Object.assign(otherStruct, universalStruct)
+}
+
+function transSectionNode(selection: SectionNode) {
+    const universalStruct = getUniversalProperty(selection, "SECTION", "SECTION")
+    const otherStruct = { "clipsContent": (selection as any).clipsContent }
     return Object.assign(otherStruct, universalStruct)
 }
 
 function transGroupNode(selection: GroupNode) {
-    const universalStruct = getUniversalProperty(selection)
-    universalStruct.type = "GROUP"
+    const universalStruct = getUniversalProperty(selection, "GROUP", "GROUP")
     const otherStruct = { "clipsContent": false }
     return Object.assign(otherStruct, universalStruct)
+}
+
+function transSliceNode(selection: SliceNode) {
+    return getUniversalProperty(selection, "SLICE", "SLICE")
 }
 
 function transTextNode(selection: TextNode) {
@@ -354,7 +477,7 @@ function fillsAndStrokes2Json(fills: readonly Paint[] | typeof mg.mixed, strokes
                     "visible": fill.isVisible
                 }
             }
-            resultFills.push(tempResultFill)
+            if (tempResultFill.type) resultFills.push(tempResultFill)
         }
     }
 
@@ -389,7 +512,7 @@ function fillsAndStrokes2Json(fills: readonly Paint[] | typeof mg.mixed, strokes
                     "gradientTransform": [[0, 1, 0], [-1, 0, 1]]
                 }
             }
-            resultStrokes.push(tempResultStroke)
+            if (tempResultStroke.type) resultStrokes.push(tempResultStroke)
         }
     }
 
@@ -434,7 +557,10 @@ function getResultArrayByTwoPoint(points: readonly Vector[]) {
     }
 }
 
-function getUniversalProperty(selection: SceneNode) {
+function getUniversalProperty(selection: SceneNode, sourceType?: string, restoreType?: string) {
+    const resolvedSourceType = sourceType || selection.type
+    const resolvedRestoreType = restoreType || getRestoreType(resolvedSourceType)
+    const layoutTransform = getRelativeLayoutTransform(selection)
     const fills = (selection as any).fills || []
     const strokes = (selection as any).strokes || []
     var tFS = fillsAndStrokes2Json(fills, strokes)
@@ -465,10 +591,14 @@ function getUniversalProperty(selection: SceneNode) {
     }
 
     return {
-        "type": selection.type,
+        "type": resolvedRestoreType,
+        "sourceType": resolvedSourceType,
+        "restoreType": resolvedRestoreType,
         "id": selection.id,
         "name": selection.name,
         "parentID": (selection.parent && selection.parent.type == "PAGE" ? null : selection.parent?.id),
+        "constraints": (selection as any).constraints,
+        "exportSettings": (selection as any).exportSettings || [],
         "scence": { "visible": selection.isVisible, "locked": selection.isLocked },
         "blend": {
             "opacity": (selection as any).opacity ?? 1,
@@ -490,27 +620,101 @@ function getUniversalProperty(selection: SceneNode) {
             "strokeCap": (selection as any).strokeCap || 'NONE',
         },
         "layout": {
-            "relativeTransform": selection.relativeTransform,
-            "x": selection.x, "y": selection.y,
+            "relativeTransform": layoutTransform,
+            "x": layoutTransform[0][2], "y": layoutTransform[1][2],
             "rotation": -(selection as any).rotation || 0,
             "width": selection.width, "height": selection.height,
-            "layoutMode": (selection as any).layoutMode || "NONE",
+            "constrainProportions": (selection as any).constrainProportions || false,
+            "layoutMode": getLayoutMode(selection as any),
             "itemSpacing": (selection as any).itemSpacing || 0,
             "paddingLeft": (selection as any).paddingLeft || 0,
             "paddingRight": (selection as any).paddingRight || 0,
             "paddingTop": (selection as any).paddingTop || 0,
             "paddingBottom": (selection as any).paddingBottom || 0,
-            "primaryAxisAlignItems": (selection as any).primaryAxisAlignItems || "MIN",
-            "counterAxisAlignItems": (selection as any).counterAxisAlignItems || "MIN",
-            "primaryAxisSizingMode": (selection as any).primaryAxisSizingMode || "FIXED",
-            "counterAxisSizingMode": (selection as any).counterAxisSizingMode || "FIXED",
+            "primaryAxisAlignItems": getAxisAlign((selection as any).primaryAxisAlignItems || (selection as any).mainAxisAlignItems || "MIN"),
+            "counterAxisAlignItems": getAxisAlign((selection as any).counterAxisAlignItems || (selection as any).crossAxisAlignItems || "MIN"),
+            "primaryAxisSizingMode": (selection as any).primaryAxisSizingMode || (selection as any).mainAxisSizingMode || "FIXED",
+            "counterAxisSizingMode": (selection as any).counterAxisSizingMode || (selection as any).crossAxisSizingMode || "FIXED",
             "itemReverseZIndex": (selection as any).itemReverseZIndex || false,
             "strokesIncludedInLayout": (selection as any).strokesIncludedInLayout || false,
-            "layoutAlign": (selection as any).layoutAlign || "INHERIT",
-            "layoutGrow": (selection as any).layoutGrow || 0,
+            "layoutAlign": getLayoutAlign((selection as any).layoutAlign || (selection as any).alignSelf || "INHERIT"),
+            "layoutGrow": (selection as any).layoutGrow ?? (selection as any).flexGrow ?? 0,
             "layoutPositioning": (selection as any).layoutPositioning || "AUTO"
         }
     }
+}
+
+function getRelativeLayoutTransform(selection: SceneNode) {
+    const parent = selection.parent as any;
+    if (parent && parent.type !== "PAGE" && selection.absoluteTransform && parent.absoluteTransform) {
+        return multiplyTransform(invertTransform(parent.absoluteTransform), selection.absoluteTransform);
+    }
+
+    return selection.relativeTransform;
+}
+
+function cloneTransform(transform: Transform): Transform {
+    return [
+        [transform[0][0], transform[0][1], transform[0][2]],
+        [transform[1][0], transform[1][1], transform[1][2]]
+    ];
+}
+
+function getRestoreType(sourceType: string) {
+    if (VISUAL_FRAME_SOURCE_TYPES.indexOf(sourceType) !== -1) return "FRAME";
+    if (sourceType === "BOOLEAN_OPERATION") return "VECTOR";
+    return sourceType;
+}
+
+function getLayoutMode(selection: any) {
+    const layoutMode = selection.layoutMode || selection.flexMode || "NONE";
+    if (layoutMode === "ROW") return "HORIZONTAL";
+    if (layoutMode === "COLUMN") return "VERTICAL";
+    return layoutMode;
+}
+
+function getAxisAlign(value: string) {
+    if (value === "FLEX_START") return "MIN";
+    if (value === "FLEX_END") return "MAX";
+    if (value === "SPACING_BETWEEN") return "SPACE_BETWEEN";
+    return value;
+}
+
+function getLayoutAlign(value: string) {
+    if (value === "STRETCH" || value === "INHERIT") return value;
+    return getAxisAlign(value);
+}
+
+function multiplyTransform(a: Transform, b: Transform): Transform {
+    return [
+        [
+            a[0][0] * b[0][0] + a[0][1] * b[1][0],
+            a[0][0] * b[0][1] + a[0][1] * b[1][1],
+            a[0][0] * b[0][2] + a[0][1] * b[1][2] + a[0][2]
+        ],
+        [
+            a[1][0] * b[0][0] + a[1][1] * b[1][0],
+            a[1][0] * b[0][1] + a[1][1] * b[1][1],
+            a[1][0] * b[0][2] + a[1][1] * b[1][2] + a[1][2]
+        ]
+    ];
+}
+
+function invertTransform(transform: Transform): Transform {
+    const a = transform[0][0];
+    const b = transform[0][1];
+    const c = transform[0][2];
+    const d = transform[1][0];
+    const e = transform[1][1];
+    const f = transform[1][2];
+    const det = a * e - b * d;
+
+    if (Math.abs(det) < 0.000001) return [[1, 0, 0], [0, 1, 0]];
+
+    return [
+        [e / det, -b / det, (b * f - e * c) / det],
+        [-d / det, a / det, (d * c - a * f) / det]
+    ];
 }
 
 async function initTextNodeByChar(characters: string) {
