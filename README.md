@@ -46,26 +46,26 @@
 
 这是原来的：
 
-![image-20260427135954947](/Users/wally/Library/Application Support/typora-user-images/image-20260427135954947.png)
+![image-20260427135954947](assets/image-20260427135954947.png)
 
 转换后的图层后面会加上"_Processed"新生成一个 Page。同时差不多长这样：
 
-![image-20260427135920726](/Users/wally/Library/Application Support/typora-user-images/image-20260427135920726.png)
+![image-20260427135920726](assets/image-20260427135920726.png)
 
 可以看到所有需要转换的图层都变成了 Frame，然后属性则用图层名称承载了。
 
 接下来将这个文件导出 Sketch，然后导入 Figma，因为只是简单的 Frame，Sketch 和 Figma 也未对图层名称做长度限制，所以可以预想到的是所有的信息都会被原封不动地保留到 Figma 中，长这样：
 
-![image-20260427140252663](/Users/wally/Library/Application Support/typora-user-images/image-20260427140252663.png)
+![image-20260427140252663](assets/image-20260427140252663.png)
 
 其实只需要 _Process 这个 Page 就可以了。接下来使用 ReceiveFromMasterGo 插件，将这一页还原成 Figma。插件会读取放在图层名称中的 json 代码，然后逐个属性还原。
 
 最后效果是这样：
 
-![image-20260427140436708](/Users/wally/Library/Application Support/typora-user-images/image-20260427140436708.png)
+![image-20260427140436708](assets/image-20260427140436708.png)
 
 还原效果会比 Sketch 还原好一些，毕竟后者经过了两层转换。
 
 更重要的是可控了，再碰到什么问题，可以调整转换规则来解决。
 
-![image-20260427140650559](/Users/wally/Library/Application Support/typora-user-images/image-20260427140650559.png)
+![image-20260427140650559](assets/image-20260427140650559.png)
