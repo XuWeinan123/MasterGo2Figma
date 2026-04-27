@@ -12,10 +12,18 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 let totalNodes = 0;
 let processedNodes = 0;
 let fontLoaded = false;
+let loadingNotify = null;
+let lastNotifyAt = 0;
 const INTERNAL_PROPS_PREFIX = "[PROPS]";
 const SIBLING_PROPS_PREFIX = "[PROPS_SIBLING]";
 const VISUAL_FRAME_SOURCE_TYPES = ["COMPONENT", "COMPONENT_SET", "INSTANCE"];
-processAllPages();
+const COMMAND_CURRENT_PAGE = "current-page";
+const COMMAND_ALL_PAGES = "all-pages";
+const COMMAND_SELECTED = "selected";
+const COMMAND_WRITE_LAYER_DATA_TEST = "write-layer-data-test";
+const COMMAND_READ_LAYER_DATA_TEST = "read-layer-data-test";
+const LAYER_DATA_TEST_KEY = "mastergo2figma.layerDataTest";
+processByCommand(mg.command);
 function countNodes(node) {
     totalNodes++;
     if (node.children) {
@@ -23,35 +31,216 @@ function countNodes(node) {
             countNodes(child);
     }
 }
-function processAllPages() {
+function processByCommand(command) {
+    return __awaiter(this, void 0, void 0, function* () {
+        if (command === COMMAND_WRITE_LAYER_DATA_TEST) {
+            writeLayerDataTest();
+            return;
+        }
+        if (command === COMMAND_READ_LAYER_DATA_TEST) {
+            readLayerDataTest();
+            return;
+        }
+        if (command === COMMAND_ALL_PAGES) {
+            yield processPages([...mg.document.children], "all pages");
+            return;
+        }
+        if (command === COMMAND_SELECTED) {
+            yield processSelectedNodes();
+            return;
+        }
+        yield processPages([mg.document.currentPage], "current page");
+    });
+}
+function writeLayerDataTest() {
+    const selectedNodes = getTopLevelSelectedNodes(mg.document.currentPage.selection);
+    if (selectedNodes.length === 0) {
+        mg.notify("请先选择一个 Rectangle 和一个 Component", {
+            position: "bottom",
+            timeout: 3000,
+            type: "warning"
+        });
+        return;
+    }
+    const writtenAt = new Date().toISOString();
+    let rectangleCount = 0;
+    let componentCount = 0;
+    for (const node of selectedNodes) {
+        if (node.type === "RECTANGLE" || node.type === "FRAME") {
+            const payload = JSON.stringify(createLayerDataTestPayload(node, "rectangle-plugin-data", writtenAt));
+            try {
+                node.setPluginData(LAYER_DATA_TEST_KEY, "这是通过插件写入的内容：\n" + payload);
+                rectangleCount++;
+                console.log("[LayerDataTest][MasterGo write][rectangle pluginData]", node.name, payload);
+            }
+            catch (error) {
+                console.warn("Unable to write rectangle plugin data:", node.name, error);
+            }
+            continue;
+        }
+        if (node.type === "COMPONENT") {
+            const description = JSON.stringify(createLayerDataTestPayload(node, "component-description", writtenAt));
+            try {
+                node.description = "这是通过插件写入的内容：\n" + description;
+                componentCount++;
+                console.log("[LayerDataTest][MasterGo write][component description]", node.name, description);
+            }
+            catch (error) {
+                console.warn("Unable to write component description:", node.name, error);
+            }
+        }
+    }
+    mg.notify(`测试数据已写入：Rectangle pluginData ${rectangleCount}，Component description ${componentCount}`, {
+        position: "bottom",
+        timeout: 5000,
+        type: rectangleCount > 0 || componentCount > 0 ? "success" : "warning"
+    });
+}
+function readLayerDataTest() {
+    const selectedNodes = getTopLevelSelectedNodes(mg.document.currentPage.selection);
+    if (selectedNodes.length === 0) {
+        mg.notify("请先选择要读取的 Rectangle 或 Component", {
+            position: "bottom",
+            timeout: 3000,
+            type: "warning"
+        });
+        return;
+    }
+    let readableCount = 0;
+    for (const node of selectedNodes) {
+        if (node.type === "RECTANGLE") {
+            const value = node.getPluginData(LAYER_DATA_TEST_KEY);
+            if (value)
+                readableCount++;
+            console.log("[LayerDataTest][MasterGo read][rectangle pluginData]", {
+                nodeName: node.name,
+                nodeType: node.type,
+                pluginDataKeys: node.getPluginDataKeys(),
+                pluginDataValue: value
+            });
+            continue;
+        }
+        if (node.type === "COMPONENT") {
+            const description = node.description || "";
+            if (description)
+                readableCount++;
+            console.log("[LayerDataTest][MasterGo read][component description]", {
+                nodeName: node.name,
+                nodeType: node.type,
+                description
+            });
+        }
+    }
+    mg.notify(`读取完成：${readableCount}/${selectedNodes.length} 个选中图层有测试数据，请看控制台`, {
+        position: "bottom",
+        timeout: 5000,
+        type: readableCount > 0 ? "success" : "warning"
+    });
+}
+function createLayerDataTestPayload(node, target, writtenAt) {
+    return {
+        version: 1,
+        writtenBy: "MasterGo SendToFigma",
+        writtenAt,
+        target,
+        key: LAYER_DATA_TEST_KEY,
+        node: {
+            id: node.id,
+            name: node.name,
+            type: node.type
+        },
+        message: "MasterGo to Sketch to Figma retention test"
+    };
+}
+function processSelectedNodes() {
     return __awaiter(this, void 0, void 0, function* () {
         try {
             totalNodes = 0;
             processedNodes = 0;
-            const pages = mg.document.children;
+            const selectedNodes = getTopLevelSelectedNodes(mg.document.currentPage.selection);
+            if (selectedNodes.length === 0) {
+                mg.notify("请先选择要转换的图层", {
+                    position: "bottom",
+                    timeout: 3000,
+                    type: "warning"
+                });
+                return;
+            }
+            setLoading(`准备转换已选中图层 (${selectedNodes.length})...`, true);
+            for (const node of selectedNodes)
+                countNodes(node);
+            const processPage = mg.createPage();
+            processPage.name = `${mg.document.currentPage.name}_Process_Selected_${selectedNodes.length}`;
+            copyPageProperties(mg.document.currentPage, processPage);
+            yield transformSelectedNodesIncrementally(selectedNodes, processPage);
+            finishLoading("转换完成", "success");
+        }
+        catch (error) {
+            console.error("Error processing selected nodes:", error);
+            finishLoading("转换失败，请查看控制台", "error");
+        }
+    });
+}
+function processPages(pages, label) {
+    return __awaiter(this, void 0, void 0, function* () {
+        try {
+            totalNodes = 0;
+            processedNodes = 0;
+            setLoading(`准备转换 ${label === "all pages" ? "所有页面" : "当前页"}...`, true);
             for (const page of pages) {
                 if (page.name.endsWith("_Process"))
                     continue;
                 countNodes(page);
             }
-            for (const page of pages) {
+            const sourcePages = pages.filter(page => !page.name.endsWith("_Process"));
+            for (let pageIndex = 0; pageIndex < sourcePages.length; pageIndex++) {
+                const page = sourcePages[pageIndex];
                 if (page.name.endsWith("_Process"))
                     continue;
-                const processPage = page.clone();
+                setLoading(`正在创建处理页 ${pageIndex + 1}/${sourcePages.length}: ${page.name}`, true);
+                const processPage = mg.createPage();
                 processPage.name = page.name + "_Process";
-                yield transformPageNodes(processPage);
+                copyPageProperties(page, processPage);
+                yield transformPageNodesIncrementally(page, processPage, pageIndex + 1, sourcePages.length);
             }
+            finishLoading("转换完成", "success");
         }
         catch (error) {
-            console.error("Error in processAllPages:", error);
+            console.error(`Error processing ${label}:`, error);
+            finishLoading("转换失败，请查看控制台", "error");
         }
     });
 }
-function transformPageNodes(container) {
+function transformPageNodesIncrementally(sourcePage, processPage, pageIndex, pageCount) {
     return __awaiter(this, void 0, void 0, function* () {
-        const children = [...container.children];
-        for (const node of children) {
-            yield transformNodeRecursive(node);
+        const children = [...sourcePage.children];
+        for (let nodeIndex = 0; nodeIndex < children.length; nodeIndex++) {
+            const sourceNode = children[nodeIndex];
+            if (sourceNode.name.startsWith(INTERNAL_PROPS_PREFIX) || sourceNode.name.startsWith(SIBLING_PROPS_PREFIX))
+                continue;
+            setLoading(`转换页面 ${pageIndex}/${pageCount}：${sourcePage.name} (${nodeIndex + 1}/${children.length})`);
+            const clonedNode = sourceNode.clone();
+            processPage.appendChild(clonedNode);
+            yield transformNodeRecursive(clonedNode);
+            yield yieldToEventLoop();
+        }
+    });
+}
+function transformSelectedNodesIncrementally(selectedNodes, processPage) {
+    return __awaiter(this, void 0, void 0, function* () {
+        for (let nodeIndex = 0; nodeIndex < selectedNodes.length; nodeIndex++) {
+            const sourceNode = selectedNodes[nodeIndex];
+            if (sourceNode.name.startsWith(INTERNAL_PROPS_PREFIX) || sourceNode.name.startsWith(SIBLING_PROPS_PREFIX))
+                continue;
+            setLoading(`转换已选中图层 (${nodeIndex + 1}/${selectedNodes.length})：${sourceNode.name}`);
+            const sourceTransform = cloneTransform(sourceNode.absoluteTransform || sourceNode.relativeTransform);
+            const clonedNode = sourceNode.clone();
+            processPage.appendChild(clonedNode);
+            clonedNode.relativeTransform = sourceTransform;
+            clonedNode.x = sourceTransform[0][2];
+            clonedNode.y = sourceTransform[1][2];
+            yield transformNodeRecursive(clonedNode);
+            yield yieldToEventLoop();
         }
     });
 }
@@ -60,7 +249,10 @@ function transformNodeRecursive(node) {
         try {
             processedNodes++;
             if (processedNodes % 50 === 0 || processedNodes === totalNodes) {
-                console.log(`Progress: ${Math.round((processedNodes / totalNodes) * 100)}% (${processedNodes}/${totalNodes}) - Current: ${node.name}`);
+                const progress = Math.round((processedNodes / totalNodes) * 100);
+                console.log(`Progress: ${progress}% (${processedNodes}/${totalNodes}) - Current: ${node.name}`);
+                setLoading(`转换中 ${progress}% (${processedNodes}/${totalNodes})`);
+                yield yieldToEventLoop();
             }
             // Skip our own generated layers if we rerun or process similar names
             if (node.name.startsWith(INTERNAL_PROPS_PREFIX) || node.name.startsWith(SIBLING_PROPS_PREFIX))
@@ -78,6 +270,10 @@ function transformNodeRecursive(node) {
                 // Instances are intentionally downgraded to visual frames in this iteration.
                 if (node.type === "INSTANCE") {
                     containerNode = node.detachInstance();
+                }
+                else if (sourceType === "GROUP") {
+                    nodeJson = analyseNodes(node, sourceType);
+                    containerNode = replaceGroupWithFrame(node);
                 }
                 else if (sourceType === "COMPONENT_SET") {
                     nodeJson = analyseNodes(node, sourceType);
@@ -120,6 +316,7 @@ function transformNodeRecursive(node) {
                 const nodeHeight = node.height;
                 const nodeTransform = node.relativeTransform;
                 const nodeJson = analyseNodes(node);
+                overrideLayoutTransform(nodeJson, nodeTransform);
                 const jsonString = JSON.stringify([nodeJson, []]);
                 const textNode = yield initTextNodeByChar(jsonString);
                 textNode.name = nodeName;
@@ -152,6 +349,60 @@ function transformNodeRecursive(node) {
         }
     });
 }
+function copyPageProperties(sourcePage, processPage) {
+    try {
+        processPage.bgColor = sourcePage.bgColor;
+    }
+    catch (error) {
+        console.warn("Unable to copy page background:", sourcePage.name, error);
+    }
+    try {
+        processPage.label = sourcePage.label;
+    }
+    catch (error) {
+        console.warn("Unable to copy page label:", sourcePage.name, error);
+    }
+}
+function setLoading(message, force = false) {
+    const now = Date.now();
+    if (!force && now - lastNotifyAt < 500)
+        return;
+    lastNotifyAt = now;
+    if (loadingNotify)
+        loadingNotify.cancel();
+    loadingNotify = mg.notify(message, {
+        position: "bottom",
+        timeout: 30 * 1000,
+        isLoading: true
+    });
+}
+function finishLoading(message, type) {
+    if (loadingNotify) {
+        loadingNotify.cancel();
+        loadingNotify = null;
+    }
+    mg.notify(message, {
+        position: "bottom",
+        timeout: 3000,
+        type
+    });
+}
+function yieldToEventLoop() {
+    return new Promise(resolve => setTimeout(resolve, 0));
+}
+function getTopLevelSelectedNodes(selection) {
+    const selectedSet = new Set(selection.map(node => node.id));
+    return selection.filter(node => !hasSelectedAncestor(node, selectedSet));
+}
+function hasSelectedAncestor(node, selectedSet) {
+    let parent = node.parent;
+    while (parent && parent.type !== "PAGE" && parent.type !== "DOCUMENT") {
+        if (selectedSet.has(parent.id))
+            return true;
+        parent = parent.parent;
+    }
+    return false;
+}
 function insertSiblingPropsMarker(node, nodeJson) {
     return __awaiter(this, void 0, void 0, function* () {
         const nodeParent = node.parent;
@@ -182,27 +433,47 @@ function insertSiblingPropsMarker(node, nodeJson) {
 function shouldUseSiblingProps(sourceType, node) {
     return !('insertChild' in node);
 }
+function replaceGroupWithFrame(node) {
+    const parent = node.parent;
+    if (!parent || !('insertChild' in parent))
+        return node;
+    const frame = createVisualFrameFromContainer(node);
+    const childrenList = parent.children;
+    const index = getChildIndex(parent, node);
+    parent.insertChild(index !== -1 ? index : childrenList.length, frame);
+    const children = [...(node.children || [])].map((child) => ({
+        node: child,
+        relativeTransform: cloneTransform(child.relativeTransform),
+        x: child.x,
+        y: child.y
+    }));
+    let movedChildren = 0;
+    for (const child of children) {
+        try {
+            frame.appendChild(child.node);
+            restoreLocalTransform(child.node, child.relativeTransform, child.x, child.y);
+            movedChildren++;
+        }
+        catch (error) {
+            console.error("Unable to move group child into visual frame:", child.node.name, error);
+        }
+    }
+    if (children.length > 0 && movedChildren === 0) {
+        if (!frame.removed)
+            frame.remove();
+        return node;
+    }
+    if (!node.removed)
+        node.remove();
+    return frame;
+}
 function replaceComponentSetWithFrame(node) {
     const parent = node.parent;
     if (!parent || !('insertChild' in parent))
         return node;
-    const frame = mg.createFrame();
-    frame.name = node.name;
-    frame.isVisible = node.isVisible;
-    frame.isLocked = node.isLocked;
-    frame.relativeTransform = node.relativeTransform;
-    frame.x = node.x;
-    frame.y = node.y;
-    frame.width = node.width;
-    frame.height = node.height;
+    const frame = createVisualFrameFromContainer(node);
     const childrenList = parent.children;
-    let index = -1;
-    for (let i = 0; i < childrenList.length; i++) {
-        if (childrenList[i].id === node.id) {
-            index = i;
-            break;
-        }
-    }
+    const index = getChildIndex(parent, node);
     parent.insertChild(index !== -1 ? index : childrenList.length, frame);
     const nodeAbsoluteTransform = cloneTransform(node.absoluteTransform);
     const nodeInverseTransform = invertTransform(nodeAbsoluteTransform);
@@ -216,9 +487,7 @@ function replaceComponentSetWithFrame(node) {
     for (const child of children) {
         try {
             frame.appendChild(child.node);
-            child.node.relativeTransform = cloneTransform(child.relativeTransform);
-            child.node.x = child.relativeTransform[0][2];
-            child.node.y = child.relativeTransform[1][2];
+            restoreLocalTransform(child.node, child.relativeTransform, child.relativeTransform[0][2], child.relativeTransform[1][2]);
             console.log(`[Component->Frame] ${node.name} / ${child.node.name}: ` +
                 `before=(${child.originalX}, ${child.originalY}) ` +
                 `after=(${child.node.x}, ${child.node.y}) ` +
@@ -237,6 +506,32 @@ function replaceComponentSetWithFrame(node) {
     if (!node.removed)
         node.remove();
     return frame;
+}
+function createVisualFrameFromContainer(node) {
+    const frame = mg.createFrame();
+    frame.name = node.name;
+    frame.isVisible = node.isVisible;
+    frame.isLocked = node.isLocked;
+    frame.fills = [];
+    frame.relativeTransform = cloneTransform(node.relativeTransform);
+    frame.x = node.x;
+    frame.y = node.y;
+    frame.width = node.width;
+    frame.height = node.height;
+    return frame;
+}
+function getChildIndex(parent, node) {
+    const childrenList = parent.children || [];
+    for (let i = 0; i < childrenList.length; i++) {
+        if (childrenList[i].id === node.id)
+            return i;
+    }
+    return -1;
+}
+function restoreLocalTransform(node, transform, x, y) {
+    node.relativeTransform = cloneTransform(transform);
+    node.x = x !== null && x !== void 0 ? x : transform[0][2];
+    node.y = y !== null && y !== void 0 ? y : transform[1][2];
 }
 function analyseNodes(node, sourceType) {
     const resolvedSourceType = sourceType || node.type;
@@ -618,6 +913,7 @@ function getUniversalProperty(selection, sourceType, restoreType) {
             "paddingBottom": selection.paddingBottom || 0,
             "primaryAxisAlignItems": getAxisAlign(selection.primaryAxisAlignItems || selection.mainAxisAlignItems || "MIN"),
             "counterAxisAlignItems": getAxisAlign(selection.counterAxisAlignItems || selection.crossAxisAlignItems || "MIN"),
+            "counterAxisAlignContent": getCounterAxisAlignContent(selection),
             "primaryAxisSizingMode": selection.primaryAxisSizingMode || selection.mainAxisSizingMode || "FIXED",
             "counterAxisSizingMode": selection.counterAxisSizingMode || selection.crossAxisSizingMode || "FIXED",
             "itemReverseZIndex": selection.itemReverseZIndex || false,
@@ -629,11 +925,18 @@ function getUniversalProperty(selection, sourceType, restoreType) {
     };
 }
 function getRelativeLayoutTransform(selection) {
-    const parent = selection.parent;
-    if (parent && parent.type !== "PAGE" && selection.absoluteTransform && parent.absoluteTransform) {
-        return multiplyTransform(invertTransform(parent.absoluteTransform), selection.absoluteTransform);
-    }
-    return selection.relativeTransform;
+    // MasterGo reports absoluteTransform inconsistently for some grouped node
+    // types. The node's own relativeTransform is the reliable local transform
+    // and is also what we use when replacing the layer with a JSON text marker.
+    return cloneTransform(selection.relativeTransform);
+}
+function overrideLayoutTransform(nodeJson, transform) {
+    if (!nodeJson || !nodeJson.layout || !transform)
+        return;
+    const layoutTransform = cloneTransform(transform);
+    nodeJson.layout.relativeTransform = layoutTransform;
+    nodeJson.layout.x = layoutTransform[0][2];
+    nodeJson.layout.y = layoutTransform[1][2];
 }
 function cloneTransform(transform) {
     return [
@@ -664,6 +967,9 @@ function getAxisAlign(value) {
     if (value === "SPACING_BETWEEN")
         return "SPACE_BETWEEN";
     return value;
+}
+function getCounterAxisAlignContent(selection) {
+    return selection.counterAxisAlignContent || selection.crossAxisAlignContent || "AUTO";
 }
 function getLayoutAlign(value) {
     if (value === "STRETCH" || value === "INHERIT")

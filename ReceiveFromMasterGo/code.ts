@@ -6,19 +6,124 @@ const INTERNAL_PROPS_PREFIX = "[PROPS]";
 const SIBLING_PROPS_PREFIX = "[PROPS_SIBLING]";
 const VISUAL_FRAME_SOURCE_TYPES = ["COMPONENT", "COMPONENT_SET", "INSTANCE"];
 
-receive();
+const COMMAND_CURRENT_PAGE = "current-page";
+const COMMAND_ALL_PAGES = "all-pages";
+const COMMAND_SELECTED = "selected";
+const COMMAND_READ_LAYER_DATA_TEST = "read-layer-data-test";
 
-async function receive() {
-  figma.notify("Restoring layers on current page...", { timeout: 1000 });
+const LAYER_DATA_TEST_KEY = "mastergo2figma.layerDataTest";
 
-  const nodes = [...figma.currentPage.children];
+receive(figma.command);
+
+async function receive(command: string) {
+  if (command === COMMAND_READ_LAYER_DATA_TEST) {
+    readLayerDataTest();
+    return;
+  }
+
+  if (command === COMMAND_SELECTED) {
+    await receiveSelectedNodes();
+    return;
+  }
+
+  const pages = await getPagesToProcess(command);
+  figma.notify(command === COMMAND_ALL_PAGES ? "Restoring layers on all pages..." : "Restoring layers on current page...", { timeout: 1000 });
+
+  for (const page of pages) {
+    const nodes = [...page.children];
+    for (const node of nodes) {
+      await processNodeRecursive(node);
+    }
+    cleanupImportedContainerShells(page);
+    applyDeferredSingleChildAutoSpaceAlignmentFixes(page);
+  }
+
+  figma.notify("Restore complete!");
+  figma.closePlugin();
+}
+
+function readLayerDataTest() {
+  const nodes = getTopLevelSelectedNodes([...figma.currentPage.selection]);
+  if (nodes.length === 0) {
+    figma.notify("Please select a rectangle or component to read test data.", { timeout: 3000, error: true });
+    figma.closePlugin();
+    return;
+  }
+
+  let readableCount = 0;
+
+  for (const node of nodes) {
+    if (node.type === "RECTANGLE" || node.type === "FRAME") {
+      const value = node.getPluginData(LAYER_DATA_TEST_KEY);
+      if (value) readableCount++;
+      console.log("[LayerDataTest][Figma read][rectangle pluginData]", {
+        nodeName: node.name,
+        nodeType: node.type,
+        pluginDataKeys: node.getPluginDataKeys(),
+        pluginDataValue: value
+      });
+      continue;
+    }
+
+    if (node.type === "COMPONENT") {
+      const description = node.description || "";
+      if (description) readableCount++;
+      console.log("[LayerDataTest][Figma read][component description]", {
+        nodeName: node.name,
+        nodeType: node.type,
+        description
+      });
+    }
+  }
+
+  figma.notify(`Layer data read: ${readableCount}/${nodes.length}. See console for values.`, {
+    timeout: 8000,
+    error: readableCount === 0
+  });
+  figma.closePlugin();
+}
+
+async function receiveSelectedNodes() {
+  const nodes = getTopLevelSelectedNodes([...figma.currentPage.selection]);
+  if (nodes.length === 0) {
+    figma.notify("Please select layers to restore.", { timeout: 2000, error: true });
+    figma.closePlugin();
+    return;
+  }
+
+  figma.notify("Restoring selected layers...", { timeout: 1000 });
   for (const node of nodes) {
     await processNodeRecursive(node);
   }
   cleanupImportedContainerShells(figma.currentPage);
+  applyDeferredSingleChildAutoSpaceAlignmentFixes(figma.currentPage);
 
   figma.notify("Restore complete!");
   figma.closePlugin();
+}
+
+async function getPagesToProcess(command: string): Promise<PageNode[]> {
+  if (command !== COMMAND_ALL_PAGES) return [figma.currentPage];
+
+  if (typeof (figma as any).loadAllPagesAsync === "function") {
+    await (figma as any).loadAllPagesAsync();
+  }
+
+  return [...figma.root.children];
+}
+
+function getTopLevelSelectedNodes(selection: SceneNode[]) {
+  const selectedSet = new Set(selection.map(node => node.id));
+  return selection.filter(node => !hasSelectedAncestor(node, selectedSet));
+}
+
+function hasSelectedAncestor(node: SceneNode, selectedSet: Set<string>) {
+  let parent = node.parent as BaseNode | null;
+  while (parent && parent.type !== "PAGE" && parent.type !== "DOCUMENT") {
+    if (selectedSet.has(parent.id)) return true;
+    parent = parent.parent;
+  }
+  return false;
 }
 
 async function processNodeRecursive(node: BaseNode) {
@@ -468,6 +573,8 @@ async function applyProperties(node: any, data: any) {
         if (layout.paddingBottom !== undefined) safeSet(node, "paddingBottom", layout.paddingBottom);
         if (layout.primaryAxisAlignItems) safeSet(node, "primaryAxisAlignItems", normalizeAxisAlign(layout.primaryAxisAlignItems));
         if (layout.counterAxisAlignItems) safeSet(node, "counterAxisAlignItems", normalizeAxisAlign(layout.counterAxisAlignItems));
+        if (layout.counterAxisAlignContent) safeSet(node, "counterAxisAlignContent", layout.counterAxisAlignContent);
+        applySingleChildAutoSpaceAlignmentFix(node, layout);
         if (layout.itemReverseZIndex !== undefined) safeSet(node, "itemReverseZIndex", layout.itemReverseZIndex);
         if (layout.strokesIncludedInLayout !== undefined) safeSet(node, "strokesIncludedInLayout", layout.strokesIncludedInLayout);
       }
@@ -614,6 +721,46 @@ function normalizeAxisSizingMode(value: any) {
 function normalizeLayoutAlign(value: any) {
   if (value === "STRETCH" || value === "INHERIT") return value;
   return normalizeAxisAlign(value);
+}
+
+function applySingleChildAutoSpaceAlignmentFix(node: any, layout: any) {
+  if (!isAutoSpaceAlongPrimaryAxis(layout)) return;
+  if (getRestorableChildCount(node) !== 1) return;
+
+  // IMPORTANT: MasterGo and Figma handle "auto" spacing differently when an
+  // auto-layout container has exactly one child. MasterGo keeps that child at
+  // the start of the primary axis (left in horizontal layout, top in vertical
+  // layout), while Figma centers it for SPACE_BETWEEN. Force MIN here so the
+  // restored layout preserves MasterGo's visual result.
+  safeSet(node, "primaryAxisAlignItems", "MIN");
+}
+
+function applyDeferredSingleChildAutoSpaceAlignmentFixes(root: BaseNode) {
+  if (!("children" in root)) return;
+
+  const children = [...(root as any).children];
+  for (const child of children) {
+    applyDeferredSingleChildAutoSpaceAlignmentFixes(child);
+  }
+
+  if (!isSceneNode(root)) return;
+
+  const layout = restoredLayoutByNodeId[root.id];
+  if (!layout || !hasAutoLayout(root)) return;
+  applySingleChildAutoSpaceAlignmentFix(root, layout);
+}
+
+function isAutoSpaceAlongPrimaryAxis(layout: any) {
+  return normalizeAxisAlign(layout.primaryAxisAlignItems) === "SPACE_BETWEEN" ||
+    normalizeAxisAlign(layout.mainAxisAlignItems) === "SPACE_BETWEEN";
+}
+
+function getRestorableChildCount(node: any) {
+  if (!("children" in node)) return 0;
+
+  return [...node.children].filter((child: BaseNode) => {
+    return !child.name.startsWith(INTERNAL_PROPS_PREFIX) && !child.name.startsWith(SIBLING_PROPS_PREFIX);
+  }).length;
 }
 
 function hasAutoLayout(node: any) {
