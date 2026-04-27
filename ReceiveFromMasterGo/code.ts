@@ -6,21 +6,12 @@ const INTERNAL_PROPS_PREFIX = "[PROPS]";
 const SIBLING_PROPS_PREFIX = "[PROPS_SIBLING]";
 const VISUAL_FRAME_SOURCE_TYPES = ["COMPONENT", "COMPONENT_SET", "INSTANCE"];
 
-const COMMAND_CURRENT_PAGE = "current-page";
 const COMMAND_ALL_PAGES = "all-pages";
 const COMMAND_SELECTED = "selected";
-const COMMAND_READ_LAYER_DATA_TEST = "read-layer-data-test";
-
-const LAYER_DATA_TEST_KEY = "mastergo2figma.layerDataTest";
 
 receive(figma.command);
 
 async function receive(command: string) {
-  if (command === COMMAND_READ_LAYER_DATA_TEST) {
-    readLayerDataTest();
-    return;
-  }
-
   if (command === COMMAND_SELECTED) {
     await receiveSelectedNodes();
     return;
@@ -39,47 +30,6 @@ async function receive(command: string) {
   }
 
   figma.notify("Restore complete!");
-  figma.closePlugin();
-}
-
-function readLayerDataTest() {
-  const nodes = getTopLevelSelectedNodes([...figma.currentPage.selection]);
-  if (nodes.length === 0) {
-    figma.notify("Please select a rectangle or component to read test data.", { timeout: 3000, error: true });
-    figma.closePlugin();
-    return;
-  }
-
-  let readableCount = 0;
-
-  for (const node of nodes) {
-    if (node.type === "RECTANGLE" || node.type === "FRAME") {
-      const value = node.getPluginData(LAYER_DATA_TEST_KEY);
-      if (value) readableCount++;
-      console.log("[LayerDataTest][Figma read][rectangle pluginData]", {
-        nodeName: node.name,
-        nodeType: node.type,
-        pluginDataKeys: node.getPluginDataKeys(),
-        pluginDataValue: value
-      });
-      continue;
-    }
-
-    if (node.type === "COMPONENT") {
-      const description = node.description || "";
-      if (description) readableCount++;
-      console.log("[LayerDataTest][Figma read][component description]", {
-        nodeName: node.name,
-        nodeType: node.type,
-        description
-      });
-    }
-  }
-
-  figma.notify(`Layer data read: ${readableCount}/${nodes.length}. See console for values.`, {
-    timeout: 8000,
-    error: readableCount === 0
-  });
   figma.closePlugin();
 }
 
@@ -129,20 +79,21 @@ function hasSelectedAncestor(node: SceneNode, selectedSet: Set<string>) {
 async function processNodeRecursive(node: BaseNode) {
   if ((node as any).removed) return;
 
-  if (node.type === "TEXT") {
-    const textNode = node as TextNode;
-    const data = parseNodeData(textNode);
-
-    if (!data) return;
-
-    if (textNode.name.startsWith(INTERNAL_PROPS_PREFIX)) {
-      await applyInternalProps(textNode, data);
-    } else if (textNode.name.startsWith(SIBLING_PROPS_PREFIX)) {
-      await applySiblingProps(textNode, data);
-    } else {
-      await replaceDataTextNode(textNode, data);
+  if (isDataCarrierNode(node)) {
+    const data = parseNodeData(node);
+    if (data) {
+      if (node.name.startsWith(INTERNAL_PROPS_PREFIX)) {
+        await applyInternalProps(node, data);
+      } else if (node.name.startsWith(SIBLING_PROPS_PREFIX)) {
+        await applySiblingProps(node, data);
+      } else {
+        await replaceDataCarrierNode(node, data);
+      }
+      return;
     }
-  } else if ("children" in node) {
+  }
+
+  if ("children" in node) {
     const children = [...(node as any).children];
     for (const child of children) {
       await processNodeRecursive(child);
@@ -150,9 +101,10 @@ async function processNodeRecursive(node: BaseNode) {
   }
 }
 
-function parseNodeData(textNode: TextNode) {
+function parseNodeData(node: TextNode | FrameNode) {
   try {
-    const parsed = JSON.parse(textNode.characters);
+    const payload = node.type === "TEXT" ? node.characters : getCarrierFramePayload(node.name);
+    const parsed = JSON.parse(payload);
     if (Array.isArray(parsed) && parsed.length >= 2) {
       return parsed[0];
     }
@@ -163,8 +115,14 @@ function parseNodeData(textNode: TextNode) {
   return null;
 }
 
-async function applyInternalProps(textNode: TextNode, data: any) {
-  const parent = textNode.parent;
+function getCarrierFramePayload(name: string) {
+  if (name.startsWith(INTERNAL_PROPS_PREFIX)) return name.slice(INTERNAL_PROPS_PREFIX.length);
+  if (name.startsWith(SIBLING_PROPS_PREFIX)) return name.slice(SIBLING_PROPS_PREFIX.length);
+  return name;
+}
+
+async function applyInternalProps(carrierNode: TextNode | FrameNode, data: any) {
+  const parent = carrierNode.parent;
   if (!parent || !isSceneNode(parent)) return;
 
   const originalTarget = parent as SceneNode;
@@ -173,18 +131,18 @@ async function applyInternalProps(textNode: TextNode, data: any) {
     await applyProperties(target as any, data);
     removeImportedContainerShell(target, data);
   }
-  safeRemove(textNode);
+  safeRemove(carrierNode);
 
   if (target && (target !== originalTarget || originalTarget.type === "INSTANCE") && "children" in target) {
     await processChildrenRecursive(target);
   }
 }
 
-async function applySiblingProps(textNode: TextNode, data: any) {
-  const parent = textNode.parent;
+async function applySiblingProps(carrierNode: TextNode | FrameNode, data: any) {
+  const parent = carrierNode.parent;
   if (!parent || !("children" in parent)) return;
 
-  const index = parent.children.indexOf(textNode);
+  const index = parent.children.indexOf(carrierNode);
   const sibling = index >= 0 ? parent.children[index + 1] : null;
 
   if (sibling && isSceneNode(sibling)) {
@@ -198,7 +156,7 @@ async function applySiblingProps(textNode: TextNode, data: any) {
     }
   }
 
-  safeRemove(textNode);
+  safeRemove(carrierNode);
 }
 
 async function processChildrenRecursive(node: BaseNode) {
@@ -210,21 +168,21 @@ async function processChildrenRecursive(node: BaseNode) {
   }
 }
 
-async function replaceDataTextNode(textNode: TextNode, data: any) {
-  const parent = textNode.parent;
+async function replaceDataCarrierNode(carrierNode: TextNode | FrameNode, data: any) {
+  const parent = carrierNode.parent;
   if (parent && 'insertChild' in parent) {
-    const index = parent.children.indexOf(textNode);
+    const index = parent.children.indexOf(carrierNode);
     const newNode = await createNodeFromData(data);
     if (newNode) {
       try {
         (parent as any).insertChild(index, newNode);
       } catch (e) {
-        console.log("Unable to insert restored node:", data.name, e);
+        console.warn("Unable to insert restored node:", data.name, e);
         safeRemove(newNode);
         return;
       }
       await applyProperties(newNode, data);
-      safeRemove(textNode);
+      safeRemove(carrierNode);
     }
   }
 }
@@ -263,7 +221,7 @@ function replaceContainerNode(target: SceneNode, replacement: SceneNode): SceneN
   try {
     (parent as any).insertChild(index >= 0 ? index : parent.children.length, replacement);
   } catch (e) {
-    console.log("Unable to insert replacement node:", target.name, e);
+    console.warn("Unable to insert replacement node:", target.name, e);
     safeRemove(replacement);
     return target;
   }
@@ -279,7 +237,7 @@ function replaceContainerNode(target: SceneNode, replacement: SceneNode): SceneN
         (replacement as any).appendChild(child);
         movedChildren++;
       } catch (e) {
-        console.log("Unable to move child into replacement node:", child.name, e);
+        console.warn("Unable to move child into replacement node:", child.name, e);
       }
     }
   }
@@ -370,7 +328,7 @@ function clearMaskFlag(node: SceneNode) {
   try {
     nodeAny.isMask = false;
   } catch (e) {
-    console.log("Unable to clear mask before removing carrier rectangle:", node.name, e);
+    console.warn("Unable to clear mask before removing carrier rectangle:", node.name, e);
   }
 }
 
@@ -382,7 +340,7 @@ function detachInstanceForEdit(node: SceneNode): SceneNode {
   try {
     return (node as any).detachInstance();
   } catch (e) {
-    console.log("Unable to detach instance for restore:", node.name, e);
+    console.warn("Unable to detach instance for restore:", node.name, e);
     return node;
   }
 }
@@ -393,7 +351,7 @@ function safeRemove(node: BaseNode) {
   try {
     node.remove();
   } catch (e) {
-    console.log("Unable to remove node:", node.name, e);
+    console.warn("Unable to remove node:", node.name, e);
   }
 }
 
@@ -416,7 +374,11 @@ function isNearlyEqual(a: number, b: number) {
 }
 
 function isPropsMarker(node: BaseNode) {
-  return node.type === "TEXT" && (node.name.startsWith(INTERNAL_PROPS_PREFIX) || node.name.startsWith(SIBLING_PROPS_PREFIX));
+  return isDataCarrierNode(node) && (node.name.startsWith(INTERNAL_PROPS_PREFIX) || node.name.startsWith(SIBLING_PROPS_PREFIX));
+}
+
+function isDataCarrierNode(node: BaseNode): node is TextNode | FrameNode {
+  return node.type === "TEXT" || node.type === "FRAME";
 }
 
 function isSceneNode(node: BaseNode): node is SceneNode {
@@ -477,16 +439,11 @@ async function createNodeFromData(data: any): Promise<SceneNode | null> {
       node = figma.createFrame();
       break;
     case "GROUP":
-      // Group creation requires children. In this workflow, we usually apply properties
-      // to an existing group pasted from MasterGo. If we must create one, we start
-      // with a dummy frame and then we might need to regroup later, but for now
-      // let's create a frame as a placeholder if it's a leaf node.
-      // However, groups are usually containers.
       node = figma.createFrame();
       node.name = "GROUP_PLACEHOLDER";
       break;
     default:
-      console.log("Unsupported type:", type);
+      console.warn("Unsupported type:", type);
       break;
   }
 
@@ -788,9 +745,7 @@ function applyAspectRatioLock(node: any, shouldLock: boolean) {
       } else if (node.targetAspectRatio) {
         node.unlockAspectRatio();
       }
-    } catch (e) {
-      console.log("Unable to set aspect ratio lock:", node.name, e);
-    }
+    } catch (e) {}
     return;
   }
 
@@ -827,9 +782,7 @@ function safeSet(node: any, property: string, value: any) {
 
   try {
     node[property] = value;
-  } catch (e) {
-    console.log("Unable to set property:", property, node.name, e);
-  }
+  } catch (e) {}
 }
 
 function safeResize(node: any, width: number, height: number) {
@@ -839,9 +792,7 @@ function safeResize(node: any, width: number, height: number) {
     } else if (typeof node.resizeWithoutConstraints === "function") {
       node.resizeWithoutConstraints(width, height);
     }
-  } catch (e) {
-    console.log("Unable to resize node:", node.name, e);
-  }
+  } catch (e) {}
 }
 
 async function applyTextProperties(node: TextNode, data: any) {

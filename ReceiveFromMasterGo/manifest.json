@@ -15,10 +15,6 @@
     {
       "name": "仅转换已选中",
       "command": "selected"
-    },
-    {
-      "name": "读取 Rectangle/Component 测试数据",
-      "command": "read-layer-data-test"
     }
   ],
   "editorType": [

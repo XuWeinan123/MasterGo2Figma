@@ -2,7 +2,6 @@
 
 let totalNodes = 0;
 let processedNodes = 0;
-let fontLoaded = false;
 let loadingNotify: NotificationHandler | null = null;
 let lastNotifyAt = 0;
 
@@ -10,13 +9,8 @@ const INTERNAL_PROPS_PREFIX = "[PROPS]";
 const SIBLING_PROPS_PREFIX = "[PROPS_SIBLING]";
 const VISUAL_FRAME_SOURCE_TYPES = ["COMPONENT", "COMPONENT_SET", "INSTANCE"];
 
-const COMMAND_CURRENT_PAGE = "current-page";
 const COMMAND_ALL_PAGES = "all-pages";
 const COMMAND_SELECTED = "selected";
-const COMMAND_WRITE_LAYER_DATA_TEST = "write-layer-data-test";
-const COMMAND_READ_LAYER_DATA_TEST = "read-layer-data-test";
-
-const LAYER_DATA_TEST_KEY = "mastergo2figma.layerDataTest";
 
 processByCommand(mg.command);
 
@@ -28,16 +22,6 @@ function countNodes(node: any) {
 }
 
 async function processByCommand(command: string) {
-    if (command === COMMAND_WRITE_LAYER_DATA_TEST) {
-        writeLayerDataTest();
-        return;
-    }
-
-    if (command === COMMAND_READ_LAYER_DATA_TEST) {
-        readLayerDataTest();
-        return;
-    }
-
     if (command === COMMAND_ALL_PAGES) {
         await processPages([...mg.document.children], "all pages");
         return;
@@ -49,112 +33,6 @@ async function processByCommand(command: string) {
     }
 
     await processPages([mg.document.currentPage], "current page");
-}
-
-function writeLayerDataTest() {
-    const selectedNodes = getTopLevelSelectedNodes(mg.document.currentPage.selection as SceneNode[]);
-    if (selectedNodes.length === 0) {
-        mg.notify("请先选择一个 Rectangle 和一个 Component", {
-            position: "bottom",
-            timeout: 3000,
-            type: "warning"
-        });
-        return;
-    }
-
-    const writtenAt = new Date().toISOString();
-    let rectangleCount = 0;
-    let componentCount = 0;
-
-    for (const node of selectedNodes) {
-        if (node.type === "RECTANGLE" || node.type === "FRAME") {
-            const payload = JSON.stringify(createLayerDataTestPayload(node, "rectangle-plugin-data", writtenAt));
-            try {
-                node.setPluginData(LAYER_DATA_TEST_KEY, "这是通过插件写入的内容：\n" + payload);
-                rectangleCount++;
-                console.log("[LayerDataTest][MasterGo write][rectangle pluginData]", node.name, payload);
-            } catch (error) {
-                console.warn("Unable to write rectangle plugin data:", node.name, error);
-            }
-            continue;
-        }
-
-        if (node.type === "COMPONENT") {
-            const description = JSON.stringify(createLayerDataTestPayload(node, "component-description", writtenAt));
-            try {
-                (node as any).description = "这是通过插件写入的内容：\n" + description;
-                componentCount++;
-                console.log("[LayerDataTest][MasterGo write][component description]", node.name, description);
-            } catch (error) {
-                console.warn("Unable to write component description:", node.name, error);
-            }
-        }
-    }
-
-    mg.notify(`测试数据已写入：Rectangle pluginData ${rectangleCount}，Component description ${componentCount}`, {
-        position: "bottom",
-        timeout: 5000,
-        type: rectangleCount > 0 || componentCount > 0 ? "success" : "warning"
-    });
-}
-
-function readLayerDataTest() {
-    const selectedNodes = getTopLevelSelectedNodes(mg.document.currentPage.selection as SceneNode[]);
-    if (selectedNodes.length === 0) {
-        mg.notify("请先选择要读取的 Rectangle 或 Component", {
-            position: "bottom",
-            timeout: 3000,
-            type: "warning"
-        });
-        return;
-    }
-
-    let readableCount = 0;
-    for (const node of selectedNodes) {
-        if (node.type === "RECTANGLE") {
-            const value = node.getPluginData(LAYER_DATA_TEST_KEY);
-            if (value) readableCount++;
-            console.log("[LayerDataTest][MasterGo read][rectangle pluginData]", {
-                nodeName: node.name,
-                nodeType: node.type,
-                pluginDataKeys: node.getPluginDataKeys(),
-                pluginDataValue: value
-            });
-            continue;
-        }
-
-        if (node.type === "COMPONENT") {
-            const description = (node as any).description || "";
-            if (description) readableCount++;
-            console.log("[LayerDataTest][MasterGo read][component description]", {
-                nodeName: node.name,
-                nodeType: node.type,
-                description
-            });
-        }
-    }
-
-    mg.notify(`读取完成：${readableCount}/${selectedNodes.length} 个选中图层有测试数据，请看控制台`, {
-        position: "bottom",
-        timeout: 5000,
-        type: readableCount > 0 ? "success" : "warning"
-    });
-}
-
-function createLayerDataTestPayload(node: SceneNode, target: string, writtenAt: string) {
-    return {
-        version: 1,
-        writtenBy: "MasterGo SendToFigma",
-        writtenAt,
-        target,
-        key: LAYER_DATA_TEST_KEY,
-        node: {
-            id: node.id,
-            name: node.name,
-            type: node.type
-        },
-        message: "MasterGo to Sketch to Figma retention test"
-    };
 }
 
 async function processSelectedNodes() {
@@ -257,7 +135,6 @@ async function transformNodeRecursive(node: SceneNode) {
         processedNodes++;
         if (processedNodes % 50 === 0 || processedNodes === totalNodes) {
             const progress = Math.round((processedNodes / totalNodes) * 100);
-            console.log(`Progress: ${progress}% (${processedNodes}/${totalNodes}) - Current: ${node.name}`);
             setLoading(`转换中 ${progress}% (${processedNodes}/${totalNodes})`);
             await yieldToEventLoop();
         }
@@ -291,25 +168,21 @@ async function transformNodeRecursive(node: SceneNode) {
             // Generate PROPS node for container to preserve styles and type
             if (!nodeJson) nodeJson = analyseNodes(containerNode, sourceType);
 
-            if (shouldUseSiblingProps(sourceType, containerNode)) {
+            if (shouldUseSiblingProps(containerNode)) {
                 await insertSiblingPropsMarker(containerNode, nodeJson);
             } else {
-                const jsonString = JSON.stringify([nodeJson, []]);
-                const textNode = await initTextNodeByChar(jsonString);
-
-                textNode.name = INTERNAL_PROPS_PREFIX + containerNode.name;
-                textNode.isVisible = false;
+                const carrierFrame = createJsonCarrierFrame(INTERNAL_PROPS_PREFIX + JSON.stringify([nodeJson, []]));
 
                 if ('insertChild' in containerNode) {
-                    containerNode.insertChild(0, textNode);
+                    containerNode.insertChild(0, carrierFrame);
                 } else {
-                    containerNode.appendChild(textNode);
+                    containerNode.appendChild(carrierFrame);
                 }
 
-                textNode.width = 1;
-                textNode.height = 1;
-                textNode.x = 0;
-                textNode.y = 0;
+                (carrierFrame as any).width = 1;
+                (carrierFrame as any).height = 1;
+                carrierFrame.x = 0;
+                carrierFrame.y = 0;
             }
 
             const children = [...containerNode.children];
@@ -318,8 +191,7 @@ async function transformNodeRecursive(node: SceneNode) {
                 await transformNodeRecursive(child as SceneNode);
             }
         } else {
-            // For leaf nodes, replace with a Text node containing full property JSON.
-            const nodeName = node.name;
+            // For leaf nodes, replace with a Frame node whose name contains full property JSON.
             const nodeParent = node.parent;
             const nodeWidth = node.width;
             const nodeHeight = node.height;
@@ -327,10 +199,7 @@ async function transformNodeRecursive(node: SceneNode) {
 
             const nodeJson = analyseNodes(node);
             overrideLayoutTransform(nodeJson, nodeTransform);
-            const jsonString = JSON.stringify([nodeJson, []]);
-            const textNode = await initTextNodeByChar(jsonString);
-
-            textNode.name = nodeName;
+            const carrierFrame = createJsonCarrierFrame(JSON.stringify([nodeJson, []]));
 
             if (nodeParent && 'insertChild' in nodeParent) {
                 const childrenList = nodeParent.children;
@@ -343,15 +212,15 @@ async function transformNodeRecursive(node: SceneNode) {
                 }
 
                 if (index !== -1) {
-                    (nodeParent as any).insertChild(index, textNode);
+                    (nodeParent as any).insertChild(index, carrierFrame);
                 } else {
-                    (nodeParent as any).appendChild(textNode);
+                    (nodeParent as any).appendChild(carrierFrame);
                 }
 
                 // Set dimensions and position exactly as the original
-                textNode.width = nodeWidth;
-                textNode.height = nodeHeight;
-                textNode.relativeTransform = nodeTransform;
+                (carrierFrame as any).width = nodeWidth;
+                (carrierFrame as any).height = nodeHeight;
+                carrierFrame.relativeTransform = nodeTransform;
 
                 if (!node.removed) node.remove();
             }
@@ -423,9 +292,7 @@ async function insertSiblingPropsMarker(node: SceneNode, nodeJson: any) {
     const nodeParent = node.parent;
     if (!nodeParent || !('insertChild' in nodeParent)) return;
 
-    const textNode = await initTextNodeByChar(JSON.stringify([nodeJson, []]));
-    textNode.name = SIBLING_PROPS_PREFIX + node.name;
-    textNode.isVisible = false;
+    const carrierFrame = createJsonCarrierFrame(SIBLING_PROPS_PREFIX + JSON.stringify([nodeJson, []]));
 
     const childrenList = nodeParent.children;
     let index = -1;
@@ -437,17 +304,17 @@ async function insertSiblingPropsMarker(node: SceneNode, nodeJson: any) {
     }
 
     if (index !== -1) {
-        (nodeParent as any).insertChild(index, textNode);
+        (nodeParent as any).insertChild(index, carrierFrame);
     } else {
-        (nodeParent as any).appendChild(textNode);
+        (nodeParent as any).appendChild(carrierFrame);
     }
 
-    textNode.width = 1;
-    textNode.height = 1;
-    textNode.relativeTransform = node.relativeTransform;
+    (carrierFrame as any).width = 1;
+    (carrierFrame as any).height = 1;
+    carrierFrame.relativeTransform = node.relativeTransform;
 }
 
-function shouldUseSiblingProps(sourceType: string, node: any) {
+function shouldUseSiblingProps(node: any) {
     return !('insertChild' in node);
 }
 
@@ -501,8 +368,6 @@ function replaceComponentSetWithFrame(node: SceneNode) {
     const nodeInverseTransform = invertTransform(nodeAbsoluteTransform);
     const children = [...((node as any).children || [])].map((child: SceneNode) => ({
         node: child,
-        originalX: child.x,
-        originalY: child.y,
         relativeTransform: multiplyTransform(nodeInverseTransform, cloneTransform(child.absoluteTransform))
     }));
     let movedChildren = 0;
@@ -510,12 +375,6 @@ function replaceComponentSetWithFrame(node: SceneNode) {
         try {
             frame.appendChild(child.node);
             restoreLocalTransform(child.node, child.relativeTransform, child.relativeTransform[0][2], child.relativeTransform[1][2]);
-            console.log(
-                `[Component->Frame] ${node.name} / ${child.node.name}: ` +
-                `before=(${child.originalX}, ${child.originalY}) ` +
-                `after=(${child.node.x}, ${child.node.y}) ` +
-                `target=(${child.relativeTransform[0][2]}, ${child.relativeTransform[1][2]})`
-            );
             movedChildren++;
         } catch (error) {
             console.error("Unable to move component child into visual frame:", child.node.name, error);
@@ -1044,16 +903,14 @@ function invertTransform(transform: Transform): Transform {
     ];
 }
 
-async function initTextNodeByChar(characters: string) {
-    if (!fontLoaded) {
-        await mg.loadFontAsync({ family: "Source Han Sans", style: "Regular" });
-        fontLoaded = true;
-    }
-    const tempNode = mg.createText()
-    tempNode.setRangeFontName(0, tempNode.characters.length, { family: "Source Han Sans", style: "Regular" })
-    tempNode.characters = characters
-    tempNode.textAutoResize = "TRUNCATE";
-    return tempNode
+function createJsonCarrierFrame(name: string) {
+    const frame = mg.createFrame();
+    frame.name = name;
+    frame.fills = [{
+        type: "SOLID",
+        color: { r: 0, g: 0, b: 0, a: 0.1 }
+    }];
+    return frame;
 }
 
 function processBlendMode(blendMode: BlendMode | string) {
