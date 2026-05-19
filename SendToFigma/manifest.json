@@ -3,18 +3,5 @@
   "id": "1182281861962366883",
   "api": "1.0.0",
   "main": "code.js",
-  "menu": [
-    {
-      "name": "仅转换当页",
-      "command": "current-page"
-    },
-    {
-      "name": "转换所有页面",
-      "command": "all-pages"
-    },
-    {
-      "name": "仅转换已选中",
-      "command": "selected"
-    }
-  ]
+  "ui": "ui.html"
 }

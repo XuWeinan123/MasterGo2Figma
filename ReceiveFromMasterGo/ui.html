@@ -1,0 +1,1109 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    :root {
+      --background: #ffffff;
+      --foreground: #09090b;
+      --muted: #f4f4f5;
+      --muted-foreground: #71717a;
+      --card: #ffffff;
+      --border: #e4e4e7;
+      --input: #e4e4e7;
+      --primary: #18181b;
+      --primary-foreground: #fafafa;
+      --secondary: #f4f4f5;
+      --secondary-foreground: #18181b;
+      --ring: #a1a1aa;
+      --destructive: #dc2626;
+      --radius: 8px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--foreground);
+      background: var(--background);
+    }
+
+    main {
+      min-height: 100vh;
+      padding: 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    h1, p {
+      margin: 0;
+    }
+
+    h1 {
+      font-size: 18px;
+      line-height: 1.25;
+      letter-spacing: 0;
+    }
+
+    .muted {
+      color: var(--muted-foreground);
+      font-size: 12px;
+    }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px;
+      display: grid;
+      gap: 12px;
+    }
+
+    .card-title {
+      font-size: 13px;
+      font-weight: 650;
+    }
+
+    .file-input {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip: rect(0 0 0 0);
+      white-space: nowrap;
+    }
+
+    .drop-button,
+    .button {
+      height: 36px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--background);
+      color: var(--foreground);
+      padding: 0 14px;
+      font: inherit;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+
+    .drop-button {
+      width: 100%;
+      height: 76px;
+      border-style: dashed;
+      background: var(--muted);
+      flex-direction: column;
+    }
+
+    .button-primary {
+      flex: 1;
+      width: 100%;
+      border-color: var(--primary);
+      background: var(--primary);
+      color: var(--primary-foreground);
+    }
+
+    .button-secondary {
+      background: var(--secondary);
+      color: var(--secondary-foreground);
+    }
+
+    .button:disabled,
+    .button.disabled,
+    .drop-button.disabled,
+    .page-row.disabled {
+      cursor: not-allowed;
+      opacity: 0.55;
+    }
+
+    .page-list {
+      display: none;
+      max-height: 228px;
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--background);
+      align-content: start;
+      grid-auto-rows: max-content;
+    }
+
+    .page-list.visible {
+      display: grid;
+      align-content: start;
+      grid-auto-rows: max-content;
+    }
+
+    .page-card {
+      padding: 0;
+      overflow: hidden;
+      gap: 0;
+    }
+
+    .page-card .page-list {
+      max-height: 326px;
+      border: 0;
+      border-radius: 0;
+    }
+
+    .page-header,
+    .compact-row {
+      min-height: 64px;
+      padding: 0 16px;
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 12px;
+      align-items: center;
+    }
+
+    .page-header {
+      min-height: 48px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .page-row {
+      display: grid;
+      grid-template-columns: 18px 1fr auto;
+      gap: 8px;
+      align-items: center;
+      min-height: 40px;
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .page-row:last-child {
+      border-bottom: 0;
+    }
+
+    .page-row input {
+      width: 14px;
+      height: 14px;
+      margin: 0;
+      accent-color: var(--primary);
+    }
+
+    .checkbox-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 600;
+    }
+
+    .checkbox-label input {
+      width: 14px;
+      height: 14px;
+      margin: 0;
+      accent-color: #0a84ff;
+    }
+
+    .page-name {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      height: 20px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 0 8px;
+      color: var(--muted-foreground);
+      font-size: 11px;
+      white-space: nowrap;
+    }
+
+    .toolbar {
+      display: none;
+      gap: 8px;
+    }
+
+    .toolbar.visible {
+      display: flex;
+    }
+
+    .progress-track {
+      width: 100%;
+      height: 8px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: var(--secondary);
+    }
+
+    .progress-bar {
+      width: 0%;
+      height: 100%;
+      background: var(--primary);
+      transition: width 160ms ease;
+    }
+
+    .status-line {
+      min-height: 20px;
+      color: var(--foreground);
+      overflow-wrap: anywhere;
+    }
+
+    .summary {
+      color: var(--muted-foreground);
+      font-size: 12px;
+    }
+
+    .actions {
+      display: flex;
+      gap: 8px;
+      margin-top: auto;
+    }
+
+    .rule-row {
+      min-height: 36px;
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 12px;
+      align-items: center;
+    }
+
+    .file-name {
+      min-width: 0;
+      color: var(--muted-foreground);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      text-align: right;
+    }
+
+    .icon-button {
+      width: 24px;
+      height: 24px;
+      border: 0;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--muted-foreground);
+      font: inherit;
+      font-size: 18px;
+      line-height: 1;
+      cursor: pointer;
+    }
+
+    .icon-button:hover {
+      background: var(--secondary);
+      color: var(--foreground);
+    }
+
+    .hidden {
+      display: none !important;
+    }
+
+    /* Figma node 30:315 visual spec */
+    :root {
+      --background: #ffffff;
+      --foreground: #1a191a;
+      --muted: #efefef;
+      --muted-foreground: #737879;
+      --card: #ffffff;
+      --border: #dfe2e5;
+      --input: #dfe2e5;
+      --primary: #0186ff;
+      --primary-foreground: #ffffff;
+      --secondary: #efefef;
+      --secondary-foreground: #1a191a;
+      --divider: rgba(0, 0, 0, 0.05);
+      --radius: 8px;
+    }
+
+    body {
+      font: 400 13px/20px "Sarasa UI SC", "Sarasa_UI_SC", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--foreground);
+      background: var(--background);
+    }
+
+    main {
+      width: 400px;
+      height: 100vh;
+      min-height: 0;
+      padding: 16px;
+      gap: 16px;
+      overflow: hidden;
+    }
+
+    .card {
+      border-color: var(--border);
+      border-radius: 8px;
+      padding: 16px;
+      gap: 8px;
+    }
+
+    .import-drop-card {
+      height: 454px;
+      flex: 0 0 454px;
+      padding: 0;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .drop-button {
+      width: 100%;
+      height: 100%;
+      border: 0;
+      border-radius: 8px;
+      background: transparent;
+      flex-direction: column;
+      gap: 8px;
+      font-size: 14px;
+      line-height: 16px;
+      font-weight: 400;
+      color: var(--foreground);
+    }
+
+    .drop-button::before {
+      content: "+";
+      width: 24px;
+      height: 24px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 4px;
+      background: var(--secondary);
+      color: var(--foreground);
+      font-size: 18px;
+      line-height: 20px;
+    }
+
+    #fileHint {
+      display: none;
+    }
+
+    .file-state-card,
+    .rules-card {
+      height: 64px;
+      flex: 0 0 64px;
+      padding: 16px;
+    }
+
+    .page-card {
+      height: 374px;
+      flex: 0 0 374px;
+      padding: 0;
+    }
+
+    .page-header {
+      height: 48px;
+      min-height: 48px;
+      padding: 16px;
+      border-bottom-color: var(--divider);
+      grid-template-columns: minmax(0, 1fr) max-content;
+      column-gap: 12px;
+    }
+
+    .page-list {
+      height: 326px;
+      max-height: 326px;
+      border: 0;
+      border-radius: 0;
+      background: var(--background);
+      align-content: start;
+      grid-auto-rows: max-content;
+    }
+
+    .page-row {
+      height: 44px;
+      min-height: 44px;
+      padding: 12px 16px;
+      grid-template-columns: 16px minmax(0, 1fr) auto;
+      gap: 8px;
+      border-bottom: 0;
+    }
+
+    .page-row:first-child {
+      height: 40px;
+      min-height: 40px;
+    }
+
+    input[type="checkbox"] {
+      appearance: none;
+      -webkit-appearance: none;
+      position: relative;
+      width: 16px;
+      height: 16px;
+      margin: 0;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      background: var(--background);
+      cursor: pointer;
+      flex: 0 0 16px;
+    }
+
+    input[type="checkbox"]:checked {
+      border-color: var(--primary);
+      background: var(--primary);
+    }
+
+    input[type="checkbox"]:checked::after {
+      content: "";
+      position: absolute;
+      left: 4px;
+      top: 1px;
+      width: 5px;
+      height: 9px;
+      border: solid var(--primary-foreground);
+      border-width: 0 2px 2px 0;
+      transform: rotate(45deg);
+    }
+
+    input[type="checkbox"]:indeterminate {
+      border-color: var(--border);
+      background: var(--background);
+    }
+
+    input[type="checkbox"]:indeterminate::after {
+      content: "";
+      position: absolute;
+      left: 3px;
+      top: 3px;
+      width: 8px;
+      height: 8px;
+      border: 0;
+      border-radius: 2px;
+      background: var(--primary);
+      transform: none;
+    }
+
+    input[type="checkbox"]:disabled {
+      cursor: not-allowed;
+    }
+
+    .checkbox-label {
+      gap: 8px;
+      font-size: 14px;
+      line-height: 16px;
+      font-weight: 400;
+      color: var(--foreground);
+    }
+
+    .page-name {
+      font-size: 13px;
+      line-height: 20px;
+      font-weight: 400;
+      color: var(--foreground);
+    }
+
+    .page-row input:checked + .page-name {
+      font-size: 14px;
+      line-height: 16px;
+    }
+
+    .muted,
+    #pageSummary {
+      font-size: 14px;
+      line-height: 16px;
+      color: var(--muted-foreground);
+    }
+
+    .badge {
+      height: 16px;
+      min-width: 0;
+      padding: 0;
+      border: 0;
+      border-radius: 0;
+      font-size: 14px;
+      line-height: 16px;
+      color: var(--muted-foreground);
+      background: transparent;
+    }
+
+    .rule-row,
+    .compact-row {
+      min-height: 32px;
+      display: grid;
+      grid-template-columns: 56px 24px minmax(0, 1fr) 24px;
+      gap: 0;
+      align-items: center;
+      padding: 0;
+    }
+
+    .card-title {
+      grid-column: 1;
+      font-size: 14px;
+      line-height: 16px;
+      font-weight: 400;
+      color: var(--foreground);
+    }
+
+    .button {
+      height: 32px;
+      border: 0;
+      border-radius: 4px;
+      padding: 8px;
+      font-size: 14px;
+      line-height: 16px;
+      font-weight: 400;
+    }
+
+    .button-secondary {
+      grid-column: 3 / 5;
+      justify-self: end;
+      width: 72px;
+      background: var(--secondary);
+      color: var(--secondary-foreground);
+    }
+
+    .file-name {
+      grid-column: 3;
+      width: 100%;
+      text-align: left;
+      font-size: 13px;
+      line-height: 16px;
+      color: var(--muted-foreground);
+    }
+
+    .icon-button {
+      grid-column: 4;
+      width: 24px;
+      height: 24px;
+      border-radius: 4px;
+      color: var(--muted-foreground);
+    }
+
+    .status-card {
+      height: 96px;
+      flex: 0 0 96px;
+      margin-top: 32px;
+      padding: 16px;
+      gap: 8px;
+    }
+
+    .progress-track {
+      height: 8px;
+      margin-bottom: 8px;
+      border-radius: 3.361px;
+      background: var(--secondary);
+    }
+
+    .progress-bar {
+      background: var(--primary);
+    }
+
+    .status-line {
+      min-height: 16px;
+      font-size: 14px;
+      line-height: 16px;
+      font-weight: 600;
+      color: var(--foreground);
+    }
+
+    .summary {
+      font-size: 13px;
+      line-height: 16px;
+      color: var(--muted-foreground);
+    }
+
+    .button-primary {
+      height: 32px;
+      flex: 0 0 32px;
+      width: 100%;
+      min-width: 80px;
+      border: 0;
+      border-radius: 4px;
+      background: var(--primary);
+      color: var(--primary-foreground);
+    }
+
+    .button-primary:disabled {
+      opacity: 0.4;
+      background: var(--primary);
+      color: var(--primary-foreground);
+    }
+
+    .button:disabled,
+    .button.disabled,
+    .drop-button.disabled,
+    .page-row.disabled {
+      cursor: not-allowed;
+      opacity: 0.4;
+    }
+
+    .error {
+      color: var(--destructive);
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="card file-state-card hidden" id="fileState">
+      <div class="compact-row">
+        <div class="card-title">导入文件</div>
+        <span class="file-name" id="fileNameState"></span>
+        <button class="icon-button" id="deleteZip" type="button" title="移除导入文件">×</button>
+      </div>
+    </section>
+
+    <section class="card import-drop-card" id="fileDropCard">
+      <label class="drop-button" id="fileButton" for="zipInput">
+        <span id="fileTitle">选择 zip 文件</span>
+        <span class="muted" id="fileHint">支持 MasterGo2Figma 导出的 JSON zip</span>
+      </label>
+      <input class="file-input" id="zipInput" type="file" accept=".zip,application/zip">
+    </section>
+
+    <section class="card page-card hidden" id="pageCard">
+      <div class="page-header">
+        <label class="checkbox-label">
+          <input id="selectAllPages" type="checkbox">
+          <span>全选</span>
+        </label>
+        <span class="muted" id="pageSummary">0 page, 0 layers</span>
+      </div>
+      <div class="page-list" id="pageList"></div>
+    </section>
+
+    <section class="card rules-card">
+      <div class="rule-row">
+        <div class="card-title">转换规则</div>
+        <label class="button button-secondary" id="rulesButton" for="rulesInput">选择文件</label>
+        <span class="file-name hidden" id="rulesFileName"></span>
+        <button class="icon-button hidden" id="deleteRules" type="button" title="删除转换规则">×</button>
+      </div>
+      <input class="file-input" id="rulesInput" type="file" accept=".json,application/json">
+      <p class="muted hidden" id="rulesStatus">请先导入 layer-conversion-rules.json。</p>
+    </section>
+
+    <section class="card status-card">
+      <div class="progress-track" aria-hidden="true">
+        <div class="progress-bar" id="bar"></div>
+      </div>
+      <div class="status-line" id="status">准备就绪</div>
+      <div class="summary" id="summary">导入会在当前 Figma 文件中新建还原页面。</div>
+    </section>
+
+    <button class="button button-primary" id="restore" disabled>开始</button>
+  </main>
+
+  <script>
+    const zipInput = document.getElementById("zipInput");
+    const fileDropCard = document.getElementById("fileDropCard");
+    const fileState = document.getElementById("fileState");
+    const fileNameState = document.getElementById("fileNameState");
+    const deleteZip = document.getElementById("deleteZip");
+    const fileButton = document.getElementById("fileButton");
+    const fileTitle = document.getElementById("fileTitle");
+    const fileHint = document.getElementById("fileHint");
+    const rulesInput = document.getElementById("rulesInput");
+    const rulesButton = document.getElementById("rulesButton");
+    const rulesStatus = document.getElementById("rulesStatus");
+    const rulesFileName = document.getElementById("rulesFileName");
+    const deleteRules = document.getElementById("deleteRules");
+    const pageCard = document.getElementById("pageCard");
+    const pageList = document.getElementById("pageList");
+    const selectAllPages = document.getElementById("selectAllPages");
+    const pageSummary = document.getElementById("pageSummary");
+    const restore = document.getElementById("restore");
+    const bar = document.getElementById("bar");
+    const status = document.getElementById("status");
+    const summary = document.getElementById("summary");
+
+    let manifest = null;
+    let entries = {};
+    let pages = [];
+    let isBusy = false;
+    let hasRules = false;
+
+    function send(pluginMessage) {
+      parent.postMessage({ pluginMessage }, "*");
+    }
+
+    function setBusy(nextBusy) {
+      isBusy = nextBusy;
+      restore.disabled = nextBusy || !hasRules || !manifest || getSelectedPageIds().length === 0;
+      zipInput.disabled = nextBusy;
+      rulesInput.disabled = nextBusy;
+      deleteZip.disabled = nextBusy;
+      deleteRules.disabled = nextBusy;
+      selectAllPages.disabled = nextBusy || pages.length === 0;
+      fileButton.classList.toggle("disabled", nextBusy);
+      rulesButton.classList.toggle("disabled", nextBusy);
+      pageList.querySelectorAll("input").forEach(input => {
+        input.disabled = nextBusy;
+        input.closest(".page-row").classList.toggle("disabled", nextBusy);
+      });
+    }
+
+    function setRulesStatus(rules, errorMessage) {
+      hasRules = !!(rules && rules.valid);
+      if (errorMessage) {
+        rulesStatus.textContent = hasRules
+          ? `${errorMessage}；继续使用 ${rules.fileName || "已缓存规则"}`
+          : errorMessage;
+        rulesStatus.classList.add("error");
+        rulesStatus.classList.remove("hidden");
+      } else if (hasRules) {
+        rulesFileName.textContent = rules.fileName || "已缓存规则";
+        rulesFileName.title = rules.fileName || "已缓存规则";
+        rulesButton.classList.add("hidden");
+        rulesFileName.classList.remove("hidden");
+        deleteRules.classList.remove("hidden");
+        rulesStatus.textContent = `${rules.ruleCount || 0} 条规则`;
+        rulesStatus.classList.remove("error");
+        rulesStatus.classList.add("hidden");
+      } else {
+        rulesButton.classList.remove("hidden");
+        rulesFileName.classList.add("hidden");
+        deleteRules.classList.add("hidden");
+        rulesFileName.textContent = "";
+        rulesStatus.textContent = "请先导入 layer-conversion-rules.json。";
+        rulesStatus.classList.add("error");
+        rulesStatus.classList.add("hidden");
+      }
+      setBusy(isBusy);
+    }
+
+    function setStatus(message, detail, isError) {
+      status.textContent = message;
+      status.classList.toggle("error", !!isError);
+      if (detail !== undefined) summary.textContent = detail;
+    }
+
+    function setProgress(current, total, label) {
+      const percent = total > 0 ? Math.round((current / total) * 100) : 0;
+      bar.style.width = `${Math.max(0, Math.min(100, percent))}%`;
+      setStatus(label || "处理中...", total > 0 ? `${current}/${total} 个图层，${percent}%` : "", false);
+    }
+
+    rulesInput.onchange = async () => {
+      const file = rulesInput.files && rulesInput.files[0];
+      if (!file) return;
+
+      try {
+        setBusy(true);
+        rulesStatus.textContent = "正在导入规则...";
+        rulesStatus.classList.remove("error");
+        send({
+          type: "import-rules",
+          fileName: file.name,
+          content: await file.text()
+        });
+      } catch (error) {
+        setRulesStatus({ valid: hasRules }, error.message || "规则文件读取失败");
+        setBusy(false);
+      } finally {
+        rulesInput.value = "";
+      }
+    };
+
+    deleteRules.onclick = () => {
+      if (isBusy || !hasRules) return;
+      setBusy(true);
+      send({ type: "delete-rules" });
+    };
+
+    zipInput.onchange = async () => {
+      const file = zipInput.files && zipInput.files[0];
+      if (!file) return;
+
+      try {
+        setBusy(true);
+        setProgress(0, 0, "正在解析 zip...");
+        const buffer = await file.arrayBuffer();
+        entries = await readZipEntries(buffer);
+        if (!entries["manifest.json"]) throw new Error("zip 中没有 manifest.json");
+
+        manifest = JSON.parse(decodeUtf8(entries["manifest.json"]));
+        if (manifest.schema !== "mastergo2figma.package.v2" || manifest.version !== 2) {
+          throw new Error("当前只支持 v2 导出包，请用新版 SendToFigma 重新导出。");
+        }
+        if (!manifest.pages || !Array.isArray(manifest.pages)) throw new Error("manifest.json 格式不正确");
+
+        fileNameState.textContent = file.name;
+        fileNameState.title = file.name;
+        const imageAssetCount = manifest.stats?.imageAssetCount || 0;
+        const missingImageAssetCount = manifest.stats?.missingImageAssetCount || 0;
+        fileHint.textContent = `${manifest.pages.length} 个页面，${manifest.stats?.layerCount || 0} 个图层，${imageAssetCount} 个图片资源${missingImageAssetCount ? `，${missingImageAssetCount} 个图片缺失` : ""}`;
+        fileDropCard.classList.add("hidden");
+        fileState.classList.remove("hidden");
+        renderPages(manifest.pages);
+        bar.style.width = "0%";
+        setStatus("zip 已读取", "请选择需要还原的页面。", false);
+      } catch (error) {
+        resetZipState();
+        setStatus(error.message || "zip 解析失败", "请确认文件来自 SendToFigma 导出。", true);
+      }
+
+      setBusy(false);
+    };
+
+    deleteZip.onclick = () => {
+      if (isBusy) return;
+      resetZipState();
+      setStatus("准备就绪", "导入会在当前 Figma 文件中新建还原页面。", false);
+    };
+
+    function resetZipState() {
+      manifest = null;
+      entries = {};
+      pages = [];
+      zipInput.value = "";
+      fileNameState.textContent = "";
+      fileTitle.textContent = "选择 zip 文件";
+      fileHint.textContent = "支持 MasterGo2Figma 导出的 JSON zip";
+      pageList.innerHTML = "";
+      pageList.classList.remove("visible");
+      pageCard.classList.add("hidden");
+      fileDropCard.classList.remove("hidden");
+      fileState.classList.add("hidden");
+      updatePageSelection();
+    }
+
+    function renderPages(nextPages) {
+      pages = nextPages || [];
+      pageList.innerHTML = "";
+      for (const page of pages) {
+        const row = document.createElement("label");
+        row.className = "page-row";
+        row.innerHTML = `
+          <input type="checkbox" value="${escapeHtml(page.id)}" checked>
+          <span class="page-name" title="${escapeHtml(page.name)}">${escapeHtml(page.name)}</span>
+          <span class="badge">${page.layerCount || 0}</span>
+        `;
+        pageList.appendChild(row);
+      }
+      pageList.classList.add("visible");
+      pageCard.classList.remove("hidden");
+      pageList.querySelectorAll("input").forEach(input => {
+        input.onchange = updatePageSelection;
+      });
+      updatePageSelection();
+    }
+
+    function updatePageSelection() {
+      const selectedIds = getSelectedPageIds();
+      const selectedSet = new Set(selectedIds);
+      const selectedPages = pages.filter(page => selectedSet.has(page.id));
+      const selectedLayerCount = selectedPages.reduce((sum, page) => sum + (page.layerCount || 0), 0);
+      pageSummary.textContent = `${selectedPages.length} page${selectedPages.length === 1 ? "" : "s"}, ${selectedLayerCount} layers`;
+      selectAllPages.checked = pages.length > 0 && selectedIds.length === pages.length;
+      selectAllPages.indeterminate = selectedIds.length > 0 && selectedIds.length < pages.length;
+      setBusy(isBusy);
+    }
+
+    selectAllPages.onchange = () => {
+      pageList.querySelectorAll("input").forEach(input => {
+        input.checked = selectAllPages.checked;
+      });
+      updatePageSelection();
+    };
+
+    restore.onclick = () => {
+      if (isBusy || !manifest) return;
+      if (!hasRules) {
+        setStatus("请先导入转换规则 JSON", "", true);
+        return;
+      }
+
+      const selectedIds = getSelectedPageIds();
+      if (selectedIds.length === 0) {
+        setStatus("请至少选择一个页面", "", true);
+        return;
+      }
+
+      try {
+        setBusy(true);
+        setProgress(0, 0, "正在整理导入数据...");
+        const selectedPages = manifest.pages.filter(page => selectedIds.indexOf(page.id) !== -1);
+        const payload = buildImportPayload(manifest, selectedPages);
+        send({ type: "start-import", payload });
+      } catch (error) {
+        setStatus(error.message || "导入数据整理失败", "", true);
+        setBusy(false);
+      }
+    };
+
+    function getSelectedPageIds() {
+      return [...pageList.querySelectorAll("input:checked")].map(input => input.value);
+    }
+
+    function buildImportPayload(sourceManifest, selectedPages) {
+      const layers = {};
+      const pageIndexes = [];
+      for (const page of selectedPages) {
+        if (!page.pageFile) throw new Error(`页面缺少索引文件：${page.name || page.id}`);
+        const pageBytes = entries[page.pageFile];
+        if (!pageBytes) throw new Error(`缺少页面索引文件：${page.pageFile}`);
+        const pageIndex = JSON.parse(decodeUtf8(pageBytes));
+        if (pageIndex.schema !== "mastergo2figma.page.v2" || pageIndex.version !== 2) {
+          throw new Error(`页面索引格式不正确：${page.pageFile}`);
+        }
+        if (!Array.isArray(pageIndex.layerChunks)) throw new Error(`页面缺少图层分块索引：${page.pageFile}`);
+
+        for (const chunkPath of pageIndex.layerChunks) {
+          const bytes = entries[chunkPath];
+          if (!bytes) throw new Error(`缺少图层分块文件：${chunkPath}`);
+          const chunk = JSON.parse(decodeUtf8(bytes));
+          if (chunk.schema === "mastergo2figma.layers.v2" && Array.isArray(chunk.records)) {
+            for (const record of chunk.records) {
+              if (record && record.id) layers[record.id] = record;
+            }
+            continue;
+          }
+
+          if (chunk && chunk.id && chunk.props) {
+            layers[chunk.id] = chunk;
+            continue;
+          }
+
+          if (chunk && chunk.record && chunk.record.id) {
+            layers[chunk.record.id] = chunk.record;
+            continue;
+          }
+
+          throw new Error(`图层分块格式不正确：${chunkPath}`);
+        }
+        pageIndexes.push(pageIndex);
+      }
+
+      const assets = {};
+      const assetMap = sourceManifest.assets || {};
+      for (const key in assetMap) {
+        const asset = assetMap[key];
+        if (!asset || asset.missing || !asset.path) continue;
+        const bytes = entries[asset.path];
+        if (bytes) assets[key] = Array.from(bytes);
+      }
+
+      return {
+        manifest: sourceManifest,
+        pages: pageIndexes,
+        layers,
+        assets
+      };
+    }
+
+    window.onmessage = (event) => {
+      const message = event.data && event.data.pluginMessage ? event.data.pluginMessage : event.data;
+      if (!message) return;
+
+      if (message.type === "init") {
+        setRulesStatus(message.rules);
+        return;
+      }
+
+      if (message.type === "rules-loaded") {
+        setRulesStatus(message.rules);
+        setStatus("规则已导入", "可以开始还原。", false);
+        setBusy(false);
+        return;
+      }
+
+      if (message.type === "rules-error") {
+        setRulesStatus(message.rules, message.message || "规则配置导入失败");
+        setBusy(false);
+        return;
+      }
+
+      if (message.type === "rules-deleted") {
+        setRulesStatus(message.rules);
+        setStatus("规则已删除", "请重新导入转换规则后再开始。", false);
+        setBusy(false);
+        return;
+      }
+
+      if (message.type === "progress") {
+        setProgress(message.current || 0, message.total || 0, message.label);
+        return;
+      }
+
+      if (message.type === "complete") {
+        bar.style.width = "100%";
+        const missingImageAssetCount = message.missingImageAssetCount || 0;
+        const fallbackConnectorCount = message.fallbackConnectorCount || 0;
+        const details = [];
+        if (missingImageAssetCount) details.push(`${missingImageAssetCount} 个图片缺失`);
+        if (fallbackConnectorCount) details.push(`${fallbackConnectorCount} 个连接线已降级为折线`);
+        setStatus("还原完成", `${message.pageCount} 个页面，${message.layerCount} 个图层${details.length ? `，${details.join("，")}` : ""}`, false);
+        setBusy(false);
+        return;
+      }
+
+      if (message.type === "error") {
+        setStatus(message.message || "还原失败", "请查看插件控制台获取更多信息。", true);
+        setBusy(false);
+      }
+    };
+
+    send({ type: "ui-ready" });
+    setTimeout(() => send({ type: "ui-ready" }), 100);
+
+    function escapeHtml(value) {
+      return String(value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }
+
+    function decodeUtf8(bytes) {
+      return new TextDecoder("utf-8").decode(bytes);
+    }
+
+    async function readZipEntries(buffer) {
+      const bytes = new Uint8Array(buffer);
+      const view = new DataView(buffer);
+      const eocdOffset = findEndOfCentralDirectory(view);
+      if (eocdOffset < 0) throw new Error("不是有效的 zip 文件");
+
+      const entryCount = view.getUint16(eocdOffset + 10, true);
+      const centralOffset = view.getUint32(eocdOffset + 16, true);
+      const result = {};
+      let offset = centralOffset;
+
+      for (let i = 0; i < entryCount; i++) {
+        if (view.getUint32(offset, true) !== 0x02014b50) throw new Error("zip 中央目录损坏");
+        const method = view.getUint16(offset + 10, true);
+        const compressedSize = view.getUint32(offset + 20, true);
+        const nameLength = view.getUint16(offset + 28, true);
+        const extraLength = view.getUint16(offset + 30, true);
+        const commentLength = view.getUint16(offset + 32, true);
+        const localOffset = view.getUint32(offset + 42, true);
+        const name = decodeUtf8(bytes.slice(offset + 46, offset + 46 + nameLength));
+
+        if (!name.endsWith("/")) {
+          result[name] = await readZipFileEntry(bytes, view, localOffset, method, compressedSize);
+        }
+
+        offset += 46 + nameLength + extraLength + commentLength;
+      }
+
+      return result;
+    }
+
+    async function readZipFileEntry(bytes, view, localOffset, method, compressedSize) {
+      if (view.getUint32(localOffset, true) !== 0x04034b50) throw new Error("zip 本地文件头损坏");
+
+      const nameLength = view.getUint16(localOffset + 26, true);
+      const extraLength = view.getUint16(localOffset + 28, true);
+      const dataStart = localOffset + 30 + nameLength + extraLength;
+      const compressed = bytes.slice(dataStart, dataStart + compressedSize);
+
+      if (method === 0) return compressed;
+      if (method === 8 && typeof DecompressionStream === "function") {
+        const stream = new Blob([compressed]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+        return new Uint8Array(await new Response(stream).arrayBuffer());
+      }
+
+      throw new Error("暂不支持此 zip 压缩方式，请使用 SendToFigma 导出的 zip");
+    }
+
+    function findEndOfCentralDirectory(view) {
+      for (let offset = view.byteLength - 22; offset >= 0; offset--) {
+        if (view.getUint32(offset, true) === 0x06054b50) return offset;
+      }
+      return -1;
+    }
+  </script>
+</body>
+</html>
