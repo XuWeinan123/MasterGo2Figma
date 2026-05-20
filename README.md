@@ -1,71 +1,112 @@
 # MasterGo2Figma
 
-最近要把设计稿都从 MasterGo 转去 Figma 了，MasterGo 很多功能没有。
+把 MasterGo 文件中的图层导出为 MasterGo2Figma JSON zip，并在 Figma 中用插件还原为可编辑图层。
 
-之前的设计稿转移起来还挺麻烦的，的确可以从 MasterGo 导出 Sketch 然后在 Figma 导入，但是效果太差了啊。
+当前版本不再使用“转移页 + Sketch 导出”的旧方案。发送端统一生成 JSON 包；接收端统一上传 zip 还原。
 
-所以写了这么一个插件，虽然还有很多东西不支持转移，慢慢来吧。
+## 插件组成
 
-也希望有空的全栈设计师帮忙写一点，我不常上 Github，但是提交的代码我一定会看的
+- `SendToFigma`：运行在 MasterGo 中，读取页面/图层并导出 MasterGo2Figma JSON 包。
+- `ReceiveFromMasterGo`：运行在 Figma 中，上传导出的 zip 并还原图层。
+- `tools/mastergo_relay_server.py`：本地 Python 中继服务，用于大文件流式写入本地并自动打包 zip。
 
-## 更新日志
+## SendToFigma 用法
 
-### 20260427
+1. 在 MasterGo 中安装并运行 `SendToFigma` 插件。
+2. 选择要导出的页面。
+3. 选择传输方式：
+   - `直接生成 zip`：适合小文件，插件 UI 会直接生成并下载 zip。
+   - `流传输到本地`：适合较大的页面，插件 UI 会把 JSON 和图片分块发送到本地 Python 服务，完成后生成 zip。
+4. 点击 `开始`。
 
-1. 之前的思路是将 MasterGo 里的每个图层都变成 Text 然后存到 TextNode 里，但是后来发现一个 TextNode 如果内容过多页面就奔溃了。所幸发现目前图层的名称长度没有限制，所以就改成了转成 Frame 放在图层名字里。
+### 直接生成 zip
 
-所以你现在看到转换后的图层会是一堆 Frame，我还特地将 fill 变成 10% 的黑，这样看着能看清结构。
+这个模式最方便，不需要启动本地服务。导出完成后会直接下载一个 `.zip` 文件。
 
-2. 以防万一我还是加了 Menu，让用户可以只转选中的、转当前 Page 的、转全部。避免一下子转太多结果 MG 卡死。
+注意：直接 zip 会在插件 UI 内存中打包，页面较大时更容易触发内存问题。大文件优先使用本地流式传输。
 
+### 流传输到本地
 
+先在仓库根目录启动本地服务：
 
-**还没做的**
+```bash
+python3 tools/mastergo_relay_server.py
+```
 
-- 组件、组件集、实例在当前版本会按视觉等价降级为普通 Frame/容器恢复，暂不恢复真实组件关系。
+默认服务地址是：
 
-## 用法
+```text
+http://127.0.0.1:8765
+```
 
-整体流程还是借 Sketch 作为中转格式，同时考虑到插件上架可能有些难度而且还未完成，你需要手动在 MG 和 Figma 中导入插件。
+然后在 `SendToFigma` 中选择 `流传输到本地`，确认地址后点击 `开始`。导出完成后，服务会在下面目录生成 zip：
 
-然后是用法：
+```text
+mastergo2figma-relay-output/<transferId>.zip
+```
 
-1. 在 MasterGo 安装并运行 `SendToFigma` 插件。
-2. 插件会把图层属性写入一个临时 Frame 中。这个 Frame 使用 10% 黑色填充，图层名称里保存原图层的 JSON 数据。
-3. 从 MasterGo 导出 Sketch 文件。
-4. 在 Figma 中导入这个 Sketch 文件。
-5. 在 Figma 安装并运行 `ReceiveFromMasterGo` 插件，把临时 Frame 还原成真实图层。
+中继服务会在完成后删除展开的临时文件夹，只保留最终 zip。
 
-在 MasterGo 里可以选择三种转换方式：
+## ReceiveFromMasterGo 用法
 
-- `仅转换当页`：转换当前页面。
-- `转换所有页面`：批量转换文件内所有页面。
-- `仅转换已选中`：只转换当前选中的顶层图层。
+1. 在 Figma 中安装并运行 `ReceiveFromMasterGo` 插件。
+2. 上传 `SendToFigma` 生成的 `.zip` 文件。
+3. 点击开始还原。
 
-### 举例：
+无论发送端使用 `直接生成 zip` 还是 `流传输到本地`，接收端都只需要上传最终 zip。
 
-这是原来的：
+接收端支持两种 zip 结构：
 
-![image-20260427135954947](assets/image-20260427135954947.png)
+- zip 根目录直接包含 `manifest.json`。
+- zip 内有一个顶层目录，顶层目录内包含 `manifest.json`。
 
-转换后的图层后面会加上"_Processed"新生成一个 Page。同时差不多长这样：
+## OOM 和 MasterGo 限制说明
 
-![image-20260427135920726](assets/image-20260427135920726.png)
+本项目已经用本地 Python 中继规避了 UI 侧拼接大 zip / Blob 下载带来的内存峰值，但它不能完全解决 MasterGo 插件主线程的 OOM。
 
-可以看到所有需要转换的图层都变成了 Frame，然后属性则用图层名称承载了。
+当前导出链路是：
 
-接下来将这个文件导出 Sketch，然后导入 Figma，因为只是简单的 Frame，Sketch 和 Figma 也未对图层名称做长度限制，所以可以预想到的是所有的信息都会被原封不动地保留到 Figma 中，长这样：
+```text
+MasterGo 插件主线程 code.ts
+  -> 读取图层
+  -> 转换为 JS record
+  -> JSON.stringify
+  -> mg.ui.postMessage 发送给 ui.html
+  -> ui.html fetch 到本地 Python
+  -> Python 写文件并打 zip
+```
 
-![image-20260427140252663](assets/image-20260427140252663.png)
+实际测试中，MasterGo 插件主线程没有 `fetch` API，无法直接请求本地 Python 服务。因此数据必须经过 `mg.ui.postMessage` 从主线程传到 UI。这个桥接层由 MasterGo 宿主管理，插件 API 没有提供主动释放、零拷贝传输、可写文件句柄或真正的 streaming channel。
 
-其实只需要 _Process 这个 Page 就可以了。接下来使用 ReceiveFromMasterGo 插件，将这一页还原成 Figma。插件会读取放在图层名称中的 json 代码，然后逐个属性还原。
+因此在超大文件或多页面连续导出时，仍可能在下面阶段 OOM：
 
-最后效果是这样：
+- 读取复杂图层对象。
+- 构造或 stringify 大量 JSON record。
+- 通过 `mg.ui.postMessage` 连续发送大量 JSON / 图片 chunk。
 
-![image-20260427140436708](assets/image-20260427140436708.png)
+如果遇到 OOM，可以尝试：
 
-还原效果会比 Sketch 还原好一些，毕竟后者经过了两层转换。
+- 优先使用 `流传输到本地`，不要用直接 zip。
+- 减少单次导出的页面数量。
+- 避免一次导出包含大量复杂矢量、布尔运算、超深层级或大量图片的页面。
+- OOM 后重新打开插件，从较小范围继续导出。
 
-更重要的是可控了，再碰到什么问题，可以调整转换规则来解决。
+如果 MasterGo 后续提供插件主线程网络请求、Transferable / zero-copy postMessage、文件系统写入或官方大文件导出 API，才有机会从架构上彻底解决这个问题。
 
-![image-20260427140650559](assets/image-20260427140650559.png)
+## 开发
+
+两个插件分别编译：
+
+```bash
+cd SendToFigma
+npm install
+npm run build
+```
+
+```bash
+cd ReceiveFromMasterGo
+npm install
+npm run build
+```
+
+本地中继服务只使用 Python 标准库，不需要额外依赖。

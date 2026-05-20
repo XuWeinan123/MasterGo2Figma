@@ -1,40 +1,29 @@
-Below are the steps to get your plugin running. You can also find instructions at:
+# ReceiveFromMasterGo
 
-  https://www.figma.com/plugin-docs/setup/
+Figma 端还原插件。用于上传 `SendToFigma` 导出的 MasterGo2Figma JSON zip，并在当前 Figma 文件中还原页面和图层。
 
-This plugin template uses Typescript and NPM, two standard tools in creating JavaScript applications.
+## 用法
 
-First, download Node.js which comes with NPM. This will allow you to install TypeScript and other
-libraries. You can find the download link here:
+1. 在 Figma 中安装并运行 `ReceiveFromMasterGo`。
+2. 选择 `SendToFigma` 生成的 `.zip` 文件。
+3. 点击开始还原，等待进度完成。
 
-  https://nodejs.org/en/download/
+发送端无论使用 `直接生成 zip` 还是 `流传输到本地`，接收端都使用同一个 zip 上传入口。
 
-Next, install TypeScript using the command:
+## 支持的 zip 结构
 
-  npm install -g typescript
+- zip 根目录直接包含 `manifest.json`。
+- zip 内有一个顶层目录，顶层目录内包含 `manifest.json`。
 
-Finally, in the directory of your plugin, get the latest type definitions for the plugin API by running:
+## 注意事项
 
-  npm install --save-dev @figma/plugin-typings
+- 本插件不读取旧版 Sketch 转移页。
+- 转换规则已内置，不需要上传规则 JSON。
+- 大文件还原可能耗时较长，插件会显示进度和预计剩余时间。
 
-If you are familiar with JavaScript, TypeScript will look very familiar. In fact, valid JavaScript code
-is already valid Typescript code.
+## 开发
 
-TypeScript adds type annotations to variables. This allows code editors such as Visual Studio Code
-to provide information about the Figma API while you are writing code, as well as help catch bugs
-you previously didn't notice.
-
-For more information, visit https://www.typescriptlang.org/
-
-Using TypeScript requires a compiler to convert TypeScript (code.ts) into JavaScript (code.js)
-for the browser to run.
-
-We recommend writing TypeScript code using Visual Studio code:
-
-1. Download Visual Studio Code if you haven't already: https://code.visualstudio.com/.
-2. Open this directory in Visual Studio Code.
-3. Compile TypeScript to JavaScript: Run the "Terminal > Run Build Task..." menu item,
-    then select "npm: watch". You will have to do this again every time
-    you reopen Visual Studio Code.
-
-That's it! Visual Studio Code will regenerate the JavaScript file every time you save.
+```bash
+npm install
+npm run build
+```

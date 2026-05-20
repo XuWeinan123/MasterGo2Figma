@@ -12,29 +12,24 @@ let missingImageAssetCount = 0;
 let placeholderImageHash: string | null = null;
 let restoredNodeIdBySourceId: { [sourceId: string]: string } = {};
 let deferredConnectorRestores: Array<{ node: ConnectorNode; data: any }> = [];
+let deferredLayoutRestores: DeferredLayoutRestore[] = [];
+let fontLoadPromises: { [key: string]: Promise<void> } = {};
+let availableFontKeys: { [key: string]: boolean } = {};
 let fallbackConnectorCount = 0;
+let booleanFallbackCount = 0;
 let connectorFallbackLogged = false;
+let activeRestoreStats: RestorePerformanceStats | null = null;
+let activeProgressState: RestoreProgressState | null = null;
 
 const INTERNAL_PROPS_PREFIX = "[PROPS]";
 const SIBLING_PROPS_PREFIX = "[PROPS_SIBLING]";
 const LAYER_RULES_SCHEMA = "mastergo2figma.layer-conversion-rules.v1";
-const LAYER_RULES_CACHE_KEY = "mastergo2figma.layer-conversion-rules.v1";
-const REQUIRED_LAYER_TYPES = [
-  "BOOLEAN_OPERATION", "PEN", "VECTOR", "ELLIPSE", "RECTANGLE", "STAR",
-  "LINE", "POLYGON", "TEXT", "FRAME", "GROUP", "SECTION", "SLICE",
-  "CONNECTOR", "COMPONENT", "COMPONENT_SET", "INSTANCE"
-];
-const VALID_SEND_STRATEGIES = [
-  "text", "penNetwork", "flattenBoolean", "booleanTree", "frameLike", "groupLike",
-  "ellipseArc", "star", "polygon", "connector", "universalOnly"
-];
 const VALID_RECEIVE_CREATE_TYPES = [
   "VECTOR", "ELLIPSE", "RECTANGLE", "STAR", "LINE", "POLYGON",
   "TEXT", "SECTION", "SLICE", "FRAME", "GROUP", "CONNECTOR", "BOOLEAN_OPERATION"
 ];
-
-const COMMAND_ALL_PAGES = "all-pages";
-const COMMAND_SELECTED = "selected";
+const RESTORE_PROGRESS_NODE_INTERVAL = 100;
+const RESTORE_PROGRESS_TIME_INTERVAL_MS = 500;
 
 type SendStrategy = "text" | "penNetwork" | "flattenBoolean" | "booleanTree" | "frameLike" | "groupLike" | "ellipseArc" | "star" | "polygon" | "connector" | "universalOnly";
 
@@ -59,6 +54,30 @@ type CachedLayerConversionRules = {
   config: LayerConversionConfig;
   fileName: string;
   importedAt: string;
+};
+
+const DEFAULT_LAYER_CONVERSION_CONFIG: LayerConversionConfig = {
+  schema: LAYER_RULES_SCHEMA,
+  version: 1,
+  rules: {
+    BOOLEAN_OPERATION: { sourceType: "BOOLEAN_OPERATION", restoreType: "BOOLEAN_OPERATION", sendStrategy: "booleanTree", receiveCreate: "BOOLEAN_OPERATION", isContainer: true, visualFrameSource: false },
+    PEN: { sourceType: "PEN", restoreType: "VECTOR", sendStrategy: "penNetwork", receiveCreate: "VECTOR", isContainer: false, visualFrameSource: false },
+    VECTOR: { sourceType: "VECTOR", restoreType: "VECTOR", sendStrategy: "penNetwork", receiveCreate: "VECTOR", isContainer: false, visualFrameSource: false },
+    ELLIPSE: { sourceType: "ELLIPSE", restoreType: "ELLIPSE", sendStrategy: "ellipseArc", receiveCreate: "ELLIPSE", isContainer: false, visualFrameSource: false },
+    RECTANGLE: { sourceType: "RECTANGLE", restoreType: "RECTANGLE", sendStrategy: "universalOnly", receiveCreate: "RECTANGLE", isContainer: false, visualFrameSource: false },
+    STAR: { sourceType: "STAR", restoreType: "STAR", sendStrategy: "star", receiveCreate: "STAR", isContainer: false, visualFrameSource: false },
+    LINE: { sourceType: "LINE", restoreType: "LINE", sendStrategy: "universalOnly", receiveCreate: "LINE", isContainer: false, visualFrameSource: false },
+    POLYGON: { sourceType: "POLYGON", restoreType: "POLYGON", sendStrategy: "polygon", receiveCreate: "POLYGON", isContainer: false, visualFrameSource: false },
+    TEXT: { sourceType: "TEXT", restoreType: "TEXT", sendStrategy: "text", receiveCreate: "TEXT", isContainer: false, visualFrameSource: false },
+    FRAME: { sourceType: "FRAME", restoreType: "FRAME", sendStrategy: "frameLike", receiveCreate: "FRAME", isContainer: true, visualFrameSource: false },
+    GROUP: { sourceType: "GROUP", restoreType: "GROUP", sendStrategy: "groupLike", receiveCreate: "GROUP", isContainer: true, visualFrameSource: false },
+    SECTION: { sourceType: "SECTION", restoreType: "SECTION", sendStrategy: "frameLike", receiveCreate: "SECTION", isContainer: true, visualFrameSource: false },
+    SLICE: { sourceType: "SLICE", restoreType: "SLICE", sendStrategy: "universalOnly", receiveCreate: "SLICE", isContainer: false, visualFrameSource: false },
+    CONNECTOR: { sourceType: "CONNECTOR", restoreType: "CONNECTOR", sendStrategy: "connector", receiveCreate: "CONNECTOR", isContainer: false, visualFrameSource: false },
+    COMPONENT: { sourceType: "COMPONENT", restoreType: "FRAME", sendStrategy: "frameLike", receiveCreate: "FRAME", isContainer: true, visualFrameSource: true },
+    COMPONENT_SET: { sourceType: "COMPONENT_SET", restoreType: "FRAME", sendStrategy: "frameLike", receiveCreate: "FRAME", isContainer: true, visualFrameSource: true },
+    INSTANCE: { sourceType: "INSTANCE", restoreType: "FRAME", sendStrategy: "frameLike", receiveCreate: "FRAME", isContainer: true, visualFrameSource: true }
+  }
 };
 
 type ImportLayerRecord = {
@@ -121,6 +140,36 @@ type ImportPayload = {
   assets: { [assetKey: string]: Uint8Array };
 };
 
+type DeferredLayoutRestore = {
+  node: SceneNode;
+  layout: any;
+  isGroup: boolean;
+};
+
+type RestorePerformanceStats = {
+  startedAt: number;
+  totalNodes: number;
+  restoredNodes: number;
+  pageCount: number;
+  textNodeCount: number;
+  fontListLoadCount: number;
+  fontLoadRequestCount: number;
+  fontLoadCacheHitCount: number;
+  fontLoadFailureCount: number;
+  deferredLayoutNodeCount: number;
+  deferredLayoutAppliedCount: number;
+  safeSetWriteCount: number;
+  safeSetSkipCount: number;
+  resizeWriteCount: number;
+  resizeSkipCount: number;
+};
+
+type RestoreProgressState = {
+  total: number;
+  lastCurrent: number;
+  lastPostedAt: number;
+};
+
 showImportUI();
 
 function showImportUI() {
@@ -139,24 +188,17 @@ function showImportUI() {
       return;
     }
 
-    if (message.type === "import-rules") {
-      await handleImportLayerRules(message);
-      return;
-    }
-
-    if (message.type === "delete-rules") {
-      await handleDeleteLayerRules();
-      return;
-    }
-
     if (message.type !== "start-import") return;
     if (importInProgress) return;
 
     importInProgress = true;
     try {
       await ensureLayerRulesLoaded();
-      if (!hasValidLayerRules()) throw new Error("请先导入有效的图层转换规则 JSON");
-      await restoreImportPayload(message.payload as ImportPayload);
+      if (message.payload) {
+        await restoreImportPayload(message.payload as ImportPayload);
+      } else {
+        throw new Error("请先选择有效的 MasterGo2Figma zip");
+      }
     } catch (error) {
       console.error("Import failed:", error);
       figma.ui.postMessage({
@@ -188,95 +230,12 @@ async function ensureLayerRulesLoaded() {
 }
 
 async function loadCachedLayerRules() {
-  try {
-    const cached = await figma.clientStorage.getAsync(LAYER_RULES_CACHE_KEY);
-    if (!cached || !cached.config) {
-      cachedLayerRules = null;
-      layerRulesBySourceType = null;
-      return;
-    }
-
-    const config = validateLayerConversionConfig(cached.config);
-    cachedLayerRules = {
-      config,
-      fileName: String(cached.fileName || "layer-conversion-rules.json"),
-      importedAt: String(cached.importedAt || "")
-    };
-    layerRulesBySourceType = createLayerRuleIndex(config);
-  } catch (error) {
-    console.warn("Unable to load cached layer conversion rules:", error);
-    cachedLayerRules = null;
-    layerRulesBySourceType = null;
-  }
-}
-
-async function handleImportLayerRules(message: any) {
-  try {
-    const status = await importLayerRulesFromText(String(message.fileName || ""), String(message.content || ""));
-    figma.ui.postMessage({ type: "rules-loaded", rules: status });
-  } catch (error) {
-    figma.ui.postMessage({
-      type: "rules-error",
-      message: error instanceof Error ? error.message : "规则配置导入失败",
-      rules: getLayerRuleStatus()
-    });
-  }
-}
-
-async function handleDeleteLayerRules() {
-  try {
-    await figma.clientStorage.deleteAsync(LAYER_RULES_CACHE_KEY);
-    cachedLayerRules = null;
-    layerRulesBySourceType = null;
-    layerRulesLoadPromise = null;
-    figma.ui.postMessage({ type: "rules-deleted", rules: getLayerRuleStatus() });
-  } catch (error) {
-    figma.ui.postMessage({
-      type: "rules-error",
-      message: error instanceof Error ? error.message : "规则配置删除失败",
-      rules: getLayerRuleStatus()
-    });
-  }
-}
-
-async function importLayerRulesFromText(fileName: string, content: string) {
-  let parsed: any;
-  try {
-    parsed = JSON.parse(content);
-  } catch (error) {
-    throw new Error("规则配置不是有效的 JSON");
-  }
-
-  const config = validateLayerConversionConfig(parsed);
-  const cacheRecord: CachedLayerConversionRules = {
-    config,
-    fileName: fileName || "layer-conversion-rules.json",
-    importedAt: new Date().toISOString()
+  cachedLayerRules = {
+    config: DEFAULT_LAYER_CONVERSION_CONFIG,
+    fileName: "内置转换规则",
+    importedAt: ""
   };
-
-  await figma.clientStorage.setAsync(LAYER_RULES_CACHE_KEY, cacheRecord);
-  cachedLayerRules = cacheRecord;
-  layerRulesBySourceType = createLayerRuleIndex(config);
-  return getLayerRuleStatus();
-}
-
-function validateLayerConversionConfig(input: any): LayerConversionConfig {
-  if (!input || typeof input !== "object") throw new Error("规则配置格式不正确");
-  if (input.schema !== LAYER_RULES_SCHEMA) throw new Error("规则配置 schema 不匹配");
-  if (!input.rules || typeof input.rules !== "object") throw new Error("规则配置缺少 rules");
-
-  for (const sourceType of REQUIRED_LAYER_TYPES) {
-    const rule = input.rules[sourceType];
-    if (!rule || typeof rule !== "object") throw new Error(`规则配置缺少 ${sourceType}`);
-    if (rule.sourceType !== sourceType) throw new Error(`${sourceType} 的 sourceType 不匹配`);
-    if (typeof rule.restoreType !== "string" || !rule.restoreType) throw new Error(`${sourceType} 缺少 restoreType`);
-    if (VALID_SEND_STRATEGIES.indexOf(rule.sendStrategy) === -1) throw new Error(`${sourceType} 的 sendStrategy 不支持`);
-    if (VALID_RECEIVE_CREATE_TYPES.indexOf(rule.receiveCreate) === -1) throw new Error(`${sourceType} 的 receiveCreate 不支持`);
-    if (typeof rule.isContainer !== "boolean") throw new Error(`${sourceType} 缺少 isContainer`);
-    if (typeof rule.visualFrameSource !== "boolean") throw new Error(`${sourceType} 缺少 visualFrameSource`);
-  }
-
-  return input as LayerConversionConfig;
+  layerRulesBySourceType = createLayerRuleIndex(DEFAULT_LAYER_CONVERSION_CONFIG);
 }
 
 function createLayerRuleIndex(config: LayerConversionConfig) {
@@ -345,12 +304,16 @@ async function restoreImportPayload(payload: ImportPayload) {
   missingImageAssetCount = 0;
   restoredNodeIdBySourceId = {};
   deferredConnectorRestores = [];
+  deferredLayoutRestores = [];
   fallbackConnectorCount = 0;
+  booleanFallbackCount = 0;
   connectorFallbackLogged = false;
 
   let totalNodes = 0;
   for (const page of payload.pages) totalNodes += page.layerCount || 0;
   if (totalNodes === 0) throw new Error("所选页面没有可还原的图层");
+
+  resetRestoreRuntimeStats(totalNodes, payload.pages.length);
 
   const previousCurrentPage = figma.currentPage;
   let restoredNodes = 0;
@@ -376,6 +339,7 @@ async function restoreImportPayload(payload: ImportPayload) {
         restoredNodes += await restoreImportedNode(rootId, restoredPage, payload.layers, restoredNodes, totalNodes);
       }
 
+      applyDeferredLayoutRestores();
       cleanupImportedContainerShells(restoredPage);
       applyDeferredSingleChildAutoSpaceAlignmentFixes(restoredPage);
     }
@@ -385,6 +349,7 @@ async function restoreImportPayload(payload: ImportPayload) {
   }
 
   applyDeferredConnectorRestores();
+  await maybeReportRestoreProgress(restoredNodes, totalNodes, "正在完成还原...", true);
 
   if (restoredPages.length > 0) {
     figma.currentPage = restoredPages[0];
@@ -401,7 +366,102 @@ async function restoreImportPayload(payload: ImportPayload) {
   const completeDetails: string[] = [];
   if (missingImageAssetCount > 0) completeDetails.push(`Missing images: ${missingImageAssetCount}`);
   if (fallbackConnectorCount > 0) completeDetails.push(`Connectors restored as polylines: ${fallbackConnectorCount}`);
+  logRestorePerformanceSummary(restoredNodes, restoredPages.length);
   figma.notify(completeDetails.length > 0 ? `Restore complete. ${completeDetails.join("; ")}` : "Restore complete!");
+}
+
+function resetRestoreRuntimeStats(totalNodes: number, pageCount: number) {
+  activeRestoreStats = {
+    startedAt: Date.now(),
+    totalNodes,
+    restoredNodes: 0,
+    pageCount,
+    textNodeCount: 0,
+    fontListLoadCount: 0,
+    fontLoadRequestCount: 0,
+    fontLoadCacheHitCount: 0,
+    fontLoadFailureCount: 0,
+    deferredLayoutNodeCount: 0,
+    deferredLayoutAppliedCount: 0,
+    safeSetWriteCount: 0,
+    safeSetSkipCount: 0,
+    resizeWriteCount: 0,
+    resizeSkipCount: 0
+  };
+  activeProgressState = {
+    total: totalNodes,
+    lastCurrent: 0,
+    lastPostedAt: Date.now()
+  };
+}
+
+async function maybeReportRestoreProgress(current: number, total: number, label: string, force = false) {
+  const now = Date.now();
+  const state = activeProgressState || {
+    total,
+    lastCurrent: 0,
+    lastPostedAt: 0
+  };
+  const shouldPost = force ||
+    current >= total ||
+    current - state.lastCurrent >= RESTORE_PROGRESS_NODE_INTERVAL ||
+    now - state.lastPostedAt >= RESTORE_PROGRESS_TIME_INTERVAL_MS;
+
+  if (!shouldPost) return;
+
+  figma.ui.postMessage({
+    type: "progress",
+    current,
+    total,
+    label
+  });
+  state.total = total;
+  state.lastCurrent = current;
+  state.lastPostedAt = now;
+  activeProgressState = state;
+  await yieldToEventLoop();
+}
+
+function noteBooleanFallback() {
+  booleanFallbackCount++;
+}
+
+function logRestorePerformanceSummary(restoredNodes: number, pageCount: number) {
+  if (!activeRestoreStats) return;
+
+  activeRestoreStats.restoredNodes = restoredNodes;
+  activeRestoreStats.pageCount = pageCount;
+  const durationMs = Math.max(Date.now() - activeRestoreStats.startedAt, 1);
+  const nodesPerSecond = Math.round((restoredNodes / durationMs) * 10000) / 10;
+
+  console.log("[MasterGo2Figma] Restore performance", {
+    durationMs,
+    duration: formatDurationMs(durationMs),
+    nodesPerSecond,
+    totalNodes: activeRestoreStats.totalNodes,
+    restoredNodes,
+    pageCount,
+    textNodeCount: activeRestoreStats.textNodeCount,
+    fontListLoadCount: activeRestoreStats.fontListLoadCount,
+    fontLoadRequestCount: activeRestoreStats.fontLoadRequestCount,
+    fontLoadCacheHitCount: activeRestoreStats.fontLoadCacheHitCount,
+    fontLoadFailureCount: activeRestoreStats.fontLoadFailureCount,
+    deferredLayoutNodeCount: activeRestoreStats.deferredLayoutNodeCount,
+    deferredLayoutAppliedCount: activeRestoreStats.deferredLayoutAppliedCount,
+    safeSetWriteCount: activeRestoreStats.safeSetWriteCount,
+    safeSetSkipCount: activeRestoreStats.safeSetSkipCount,
+    resizeWriteCount: activeRestoreStats.resizeWriteCount,
+    resizeSkipCount: activeRestoreStats.resizeSkipCount,
+    booleanFallbackCount,
+    fallbackConnectorCount
+  });
+}
+
+function formatDurationMs(ms: number) {
+  const totalSeconds = Math.round(ms / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}m ${seconds}s`;
 }
 
 async function restoreImportedNode(
@@ -423,6 +483,7 @@ async function restoreImportedNode(
   }
 
   if (shouldRestoreBooleanVectorAsFrame(nodeProps, layerRecord)) {
+    noteBooleanFallback();
     nodeProps = createBooleanFrameFallbackProps(nodeProps);
   }
   nodeProps = prepareConnectorPolylineFallbackProps(nodeProps, parent);
@@ -440,15 +501,7 @@ async function restoreImportedNode(
 
   let restoredCount = 1;
   const currentCount = restoredBefore + restoredCount;
-  if (currentCount % 25 === 0 || currentCount === totalNodes) {
-    figma.ui.postMessage({
-      type: "progress",
-      current: currentCount,
-      total: totalNodes,
-      label: "正在还原：" + (nodeProps.name || layerRecord.name)
-    });
-    await yieldToEventLoop();
-  }
+  await maybeReportRestoreProgress(currentCount, totalNodes, "正在还原：" + (nodeProps.name || layerRecord.name));
 
   const childIds = nodeProps.omitChildrenOnRestore ? [] : (layerRecord.childIds || []);
   for (const childId of childIds) {
@@ -501,15 +554,7 @@ async function restoreBooleanOperationTree(
 
   let restoredCount = 1;
   const currentCount = restoredBefore + restoredCount;
-  if (currentCount % 25 === 0 || currentCount === totalNodes) {
-    figma.ui.postMessage({
-      type: "progress",
-      current: currentCount,
-      total: totalNodes,
-      label: "正在还原：" + (nodeProps.name || layerRecord.name)
-    });
-    await yieldToEventLoop();
-  }
+  await maybeReportRestoreProgress(currentCount, totalNodes, "正在还原：" + (nodeProps.name || layerRecord.name));
 
   const childIds = nodeProps.omitChildrenOnRestore ? [] : (layerRecord.childIds || []);
   for (const childId of childIds) {
@@ -574,6 +619,7 @@ async function restoreBooleanFallbackFromShell(shell: FrameNode, data: any) {
   const parent = shell.parent;
   if (!parent || !("insertChild" in parent)) return;
 
+  noteBooleanFallback();
   const svgNode = createSvgFallbackNode(data);
   if (svgNode) {
     const index = parent.children.indexOf(shell);
@@ -598,6 +644,7 @@ async function restoreBooleanFallbackNode(
   restoredBefore: number,
   totalNodes: number
 ) {
+  noteBooleanFallback();
   const svgNode = createSvgFallbackNode(data);
   const fallbackNode = svgNode || figma.createFrame();
   const fallbackProps = svgNode ? createSvgFallbackProps(data) : createBooleanFrameFallbackProps(data);
@@ -612,15 +659,7 @@ async function restoreBooleanFallbackNode(
   }
 
   const currentCount = restoredBefore + 1;
-  if (currentCount % 25 === 0 || currentCount === totalNodes) {
-    figma.ui.postMessage({
-      type: "progress",
-      current: currentCount,
-      total: totalNodes,
-      label: "正在还原：" + (data.name || layerRecord.name)
-    });
-    await yieldToEventLoop();
-  }
+  await maybeReportRestoreProgress(currentCount, totalNodes, "正在还原：" + (data.name || layerRecord.name));
 
   return 1;
 }
@@ -708,278 +747,138 @@ function yieldToEventLoop() {
   return new Promise<void>(resolve => setTimeout(resolve, 0));
 }
 
-async function receive(command: string) {
-  await ensureLayerRulesLoaded();
-  if (!hasValidLayerRules()) {
-    figma.notify("请先导入有效的图层转换规则 JSON", { timeout: 3000, error: true });
-    figma.closePlugin();
-    return;
-  }
-
-  resetInlineRestoreState();
-
-  if (command === COMMAND_SELECTED) {
-    await receiveSelectedNodes();
-    return;
-  }
-
-  const pages = await getPagesToProcess(command);
-  figma.notify(command === COMMAND_ALL_PAGES ? "Restoring layers on all pages..." : "Restoring layers on current page...", { timeout: 1000 });
-
-  for (const page of pages) {
-    const nodes = [...page.children];
-    for (const node of nodes) {
-      await processNodeRecursive(node);
-    }
-    cleanupImportedContainerShells(page);
-    applyDeferredSingleChildAutoSpaceAlignmentFixes(page);
-  }
-
-  applyDeferredConnectorRestores();
-  figma.notify("Restore complete!");
-  figma.closePlugin();
-}
-
-async function receiveSelectedNodes() {
-  resetInlineRestoreState();
-  const nodes = getTopLevelSelectedNodes([...figma.currentPage.selection]);
-  if (nodes.length === 0) {
-    figma.notify("Please select layers to restore.", { timeout: 2000, error: true });
-    figma.closePlugin();
-    return;
-  }
-
-  figma.notify("Restoring selected layers...", { timeout: 1000 });
-  for (const node of nodes) {
-    await processNodeRecursive(node);
-  }
-  cleanupImportedContainerShells(figma.currentPage);
-  applyDeferredSingleChildAutoSpaceAlignmentFixes(figma.currentPage);
-  applyDeferredConnectorRestores();
-
-  figma.notify("Restore complete!");
-  figma.closePlugin();
-}
-
-async function getPagesToProcess(command: string): Promise<PageNode[]> {
-  if (command !== COMMAND_ALL_PAGES) return [figma.currentPage];
-
-  if (typeof (figma as any).loadAllPagesAsync === "function") {
-    await (figma as any).loadAllPagesAsync();
-  }
-
-  return [...figma.root.children];
-}
-
-function getTopLevelSelectedNodes(selection: SceneNode[]) {
-  const selectedSet = new Set(selection.map(node => node.id));
-  return selection.filter(node => !hasSelectedAncestor(node, selectedSet));
-}
-
-function hasSelectedAncestor(node: SceneNode, selectedSet: Set<string>) {
-  let parent = node.parent as BaseNode | null;
-  while (parent && parent.type !== "PAGE" && parent.type !== "DOCUMENT") {
-    if (selectedSet.has(parent.id)) return true;
-    parent = parent.parent;
-  }
-  return false;
-}
-
-async function processNodeRecursive(node: BaseNode) {
-  if ((node as any).removed) return;
-
-  if (isDataCarrierNode(node)) {
-    const data = parseNodeData(node);
-    if (data) {
-      if (node.name.startsWith(INTERNAL_PROPS_PREFIX)) {
-        await applyInternalProps(node, data);
-      } else if (node.name.startsWith(SIBLING_PROPS_PREFIX)) {
-        await applySiblingProps(node, data);
-      } else {
-        await replaceDataCarrierNode(node, data);
-      }
-      return;
-    }
-  }
-
-  if ("children" in node) {
-    const children = [...(node as any).children];
-    for (const child of children) {
-      await processNodeRecursive(child);
-    }
-  }
-}
-
-function parseNodeData(node: TextNode | FrameNode) {
-  try {
-    const payload = node.type === "TEXT" ? node.characters : getCarrierFramePayload(node.name);
-    const parsed = JSON.parse(payload);
-    if (Array.isArray(parsed) && parsed.length >= 2) {
-      return parsed[0];
-    }
-  } catch (e) {
-    return null;
-  }
-
-  return null;
-}
-
-function getCarrierFramePayload(name: string) {
-  if (name.startsWith(INTERNAL_PROPS_PREFIX)) return name.slice(INTERNAL_PROPS_PREFIX.length);
-  if (name.startsWith(SIBLING_PROPS_PREFIX)) return name.slice(SIBLING_PROPS_PREFIX.length);
-  return name;
-}
-
 function resetInlineRestoreState() {
   restoredNodeIdBySourceId = {};
   deferredConnectorRestores = [];
 }
 
-async function applyInternalProps(carrierNode: TextNode | FrameNode, data: any) {
-  const parent = carrierNode.parent;
-  if (!parent || !isSceneNode(parent)) return;
-
-  const originalTarget = parent as SceneNode;
-  const target = await ensurePropsTarget(parent as SceneNode, data);
-  if (target) {
-    recordRestoredNode(data, target);
-    await applyProperties(target as any, data);
-    removeImportedContainerShell(target, data);
-  }
-  safeRemove(carrierNode);
-
-  if (target && (target !== originalTarget || originalTarget.type === "INSTANCE") && "children" in target) {
-    await processChildrenRecursive(target);
-  }
+function deferLayoutRestore(node: any, layout: any, isGroup: boolean) {
+  if (!node || !layout || !isSceneNode(node)) return;
+  deferredLayoutRestores.push({ node, layout, isGroup });
+  if (activeRestoreStats) activeRestoreStats.deferredLayoutNodeCount++;
 }
 
-async function applySiblingProps(carrierNode: TextNode | FrameNode, data: any) {
-  const parent = carrierNode.parent;
-  if (!parent || !("children" in parent)) return;
+function applyDeferredLayoutRestores() {
+  if (deferredLayoutRestores.length === 0) return;
 
-  const index = parent.children.indexOf(carrierNode);
-  const sibling = index >= 0 ? parent.children[index + 1] : null;
+  const records = deferredLayoutRestores;
+  deferredLayoutRestores = [];
 
-  if (sibling && isSceneNode(sibling)) {
-    const target = await ensurePropsTarget(sibling, data);
-    if (target) {
-      recordRestoredNode(data, target);
-      await applyProperties(target as any, data);
-      removeImportedContainerShell(target, data);
-      if ("children" in target) {
-        await processChildrenRecursive(target);
-      }
+  for (const record of records) applyDeferredNodeAutoLayout(record);
+  for (const record of records) applyDeferredParentAutoLayout(record);
+  for (const record of records) finalizeDeferredAutoLayout(record);
+}
+
+function applyDeferredNodeAutoLayout(record: DeferredLayoutRestore) {
+  const { node, layout, isGroup } = record;
+  if (isRemovedNode(node) || isGroup || !("layoutMode" in node)) return;
+
+  let applied = false;
+  if (layout.layoutMode) {
+    safeSet(node, "layoutMode", normalizeLayoutMode(layout.layoutMode));
+    applied = true;
+  }
+
+  if (hasAutoLayout(node)) {
+    if (layout.primaryAxisSizingMode) {
+      safeSet(node, "primaryAxisSizingMode", normalizeAxisSizingMode(layout.primaryAxisSizingMode));
+      applied = true;
+    }
+    if (layout.counterAxisSizingMode) {
+      safeSet(node, "counterAxisSizingMode", normalizeAxisSizingMode(layout.counterAxisSizingMode));
+      applied = true;
+    }
+    if (layout.itemSpacing !== undefined) {
+      safeSet(node, "itemSpacing", layout.itemSpacing);
+      applied = true;
+    }
+    if (layout.paddingLeft !== undefined) {
+      safeSet(node, "paddingLeft", layout.paddingLeft);
+      applied = true;
+    }
+    if (layout.paddingRight !== undefined) {
+      safeSet(node, "paddingRight", layout.paddingRight);
+      applied = true;
+    }
+    if (layout.paddingTop !== undefined) {
+      safeSet(node, "paddingTop", layout.paddingTop);
+      applied = true;
+    }
+    if (layout.paddingBottom !== undefined) {
+      safeSet(node, "paddingBottom", layout.paddingBottom);
+      applied = true;
+    }
+    if (layout.primaryAxisAlignItems) {
+      safeSet(node, "primaryAxisAlignItems", normalizeAxisAlign(layout.primaryAxisAlignItems));
+      applied = true;
+    }
+    if (layout.counterAxisAlignItems) {
+      safeSet(node, "counterAxisAlignItems", normalizeAxisAlign(layout.counterAxisAlignItems));
+      applied = true;
+    }
+    if (layout.counterAxisAlignContent) {
+      safeSet(node, "counterAxisAlignContent", layout.counterAxisAlignContent);
+      applied = true;
+    }
+    if (layout.itemReverseZIndex !== undefined) {
+      safeSet(node, "itemReverseZIndex", layout.itemReverseZIndex);
+      applied = true;
+    }
+    if (layout.strokesIncludedInLayout !== undefined) {
+      safeSet(node, "strokesIncludedInLayout", layout.strokesIncludedInLayout);
+      applied = true;
     }
   }
 
-  safeRemove(carrierNode);
+  if (applied && activeRestoreStats) activeRestoreStats.deferredLayoutAppliedCount++;
 }
 
-async function processChildrenRecursive(node: BaseNode) {
-  if (!("children" in node)) return;
+function applyDeferredParentAutoLayout(record: DeferredLayoutRestore) {
+  const { node, layout } = record;
+  if (isRemovedNode(node) || !hasAutoLayoutParent(node)) return;
 
-  const children = [...(node as any).children];
-  for (const child of children) {
-    await processNodeRecursive(child);
+  let applied = false;
+  if (layout.layoutPositioning) {
+    safeSet(node, "layoutPositioning", layout.layoutPositioning);
+    applied = true;
   }
+  if (layout.layoutAlign) {
+    safeSet(node, "layoutAlign", normalizeLayoutAlign(layout.layoutAlign));
+    applied = true;
+  }
+  if (layout.layoutGrow !== undefined) {
+    safeSet(node, "layoutGrow", layout.layoutGrow);
+    applied = true;
+  }
+  if (layout.relativeTransform) {
+    safeSet(node, "relativeTransform", layout.relativeTransform);
+    applied = true;
+  }
+  if (layout.x !== undefined) {
+    safeSet(node, "x", layout.x);
+    applied = true;
+  }
+  if (layout.y !== undefined) {
+    safeSet(node, "y", layout.y);
+    applied = true;
+  }
+
+  if (applied && activeRestoreStats) activeRestoreStats.deferredLayoutAppliedCount++;
 }
 
-async function replaceDataCarrierNode(carrierNode: TextNode | FrameNode, data: any) {
-  const parent = carrierNode.parent;
-  if (parent && 'insertChild' in parent) {
-    const index = parent.children.indexOf(carrierNode);
-    const newNode = await createNodeFromData(data);
-    if (newNode) {
-      try {
-        (parent as any).insertChild(index, newNode);
-      } catch (e) {
-        console.warn("Unable to insert restored node:", data.name, e);
-        safeRemove(newNode);
-        return;
-      }
-      recordRestoredNode(data, newNode);
-      await applyProperties(newNode, data);
-      safeRemove(carrierNode);
-    }
-  }
+function finalizeDeferredAutoLayout(record: DeferredLayoutRestore) {
+  const { node, layout, isGroup } = record;
+  if (isRemovedNode(node) || isGroup || !hasAutoLayout(node)) return;
+  if (layout.width === undefined || layout.height === undefined || !shouldRestoreFixedSize(node, layout)) return;
+
+  safeResize(node, layout.width, layout.height);
+  if (layout.relativeTransform) safeSet(node, "relativeTransform", layout.relativeTransform);
+  if (layout.x !== undefined) safeSet(node, "x", layout.x);
+  if (layout.y !== undefined) safeSet(node, "y", layout.y);
 }
 
-async function ensurePropsTarget(target: SceneNode, data: any): Promise<SceneNode | null> {
-  const restoreType = getRestoreType(data);
-  target = detachInstanceForEdit(target);
-
-  if (target.type === restoreType) return target;
-
-  if (restoreType === "SECTION" && "children" in target) {
-    return replaceContainerNode(target, figma.createSection());
-  }
-
-  if (restoreType === "GROUP") {
-    return target;
-  }
-
-  // Component semantics are intentionally downgraded to visual frames for now.
-  if (restoreType === "FRAME" && isVisualFrameSourceType(data.sourceType || data.type) && "children" in target) {
-    return replaceContainerNode(target, figma.createFrame());
-  }
-
-  return target;
-}
-
-function replaceContainerNode(target: SceneNode, replacement: SceneNode): SceneNode {
-  if (target.type === "INSTANCE" || isInsideInstance(target)) {
-    return target;
-  }
-
-  const parent = target.parent;
-  if (!parent || !("insertChild" in parent)) return target;
-
-  const index = parent.children.indexOf(target);
-  try {
-    (parent as any).insertChild(index >= 0 ? index : parent.children.length, replacement);
-  } catch (e) {
-    console.warn("Unable to insert replacement node:", target.name, e);
-    safeRemove(replacement);
-    return target;
-  }
-
-  let movedChildren = 0;
-  let movableChildren = 0;
-  if ("children" in target && "appendChild" in replacement) {
-    const children = [...(target as any).children];
-    for (const child of children) {
-      if (isPropsMarker(child)) continue;
-      movableChildren++;
-      try {
-        (replacement as any).appendChild(child);
-        movedChildren++;
-      } catch (e) {
-        console.warn("Unable to move child into replacement node:", child.name, e);
-      }
-    }
-  }
-
-  if (movableChildren > 0 && movedChildren === 0) {
-    safeRemove(replacement);
-    return target;
-  }
-
-  safeRemove(target);
-  return replacement;
-}
-
-function removeImportedContainerShell(node: SceneNode, data: any) {
-  if (!("children" in node) || !isContainerSource(data)) return;
-  if (node.type === "INSTANCE" || isInsideInstance(node)) return;
-
-  const children = [...(node as any).children] as SceneNode[];
-  for (const child of children) {
-    if (isRedundantContainerRectangle(node, child, data)) {
-      clearMaskFlag(child);
-      safeRemove(child);
-      return;
-    }
-  }
+function isRemovedNode(node: any) {
+  return !node || !!node.removed;
 }
 
 function cleanupImportedContainerShells(root: BaseNode) {
@@ -1012,34 +911,6 @@ function isShellContainer(node: SceneNode) {
     node.type === "COMPONENT_SET";
 }
 
-function isContainerSource(data: any) {
-  const sourceType = data.sourceType || data.type;
-  const rule = getLayerRule(sourceType);
-  if (rule) return rule.isContainer || rule.visualFrameSource;
-
-  return sourceType === "FRAME" ||
-    sourceType === "GROUP" ||
-    sourceType === "SECTION";
-}
-
-function isRedundantContainerRectangle(parent: SceneNode, child: SceneNode, data: any) {
-  if (child.type !== "RECTANGLE" || child.name !== data.name) return false;
-
-  // Sketch import materializes Frame/Group backgrounds as a same-name rectangle child.
-  // Clip content can materialize the same rectangle as a mask carrier.
-  if ((child.parent as any)?.id === parent.id) return true;
-
-  const childAny = child as any;
-  const parentAny = parent as any;
-  const parentWidth = data.layout?.width ?? parentAny.width;
-  const parentHeight = data.layout?.height ?? parentAny.height;
-
-  return isNearlyZero(childAny.x || 0) &&
-    isNearlyZero(childAny.y || 0) &&
-    isNearlyEqual(childAny.width, parentWidth) &&
-    isNearlyEqual(childAny.height, parentHeight);
-}
-
 function clearMaskFlag(node: SceneNode) {
   const nodeAny = node as any;
   if (!("isMask" in nodeAny)) return;
@@ -1047,20 +918,7 @@ function clearMaskFlag(node: SceneNode) {
   try {
     nodeAny.isMask = false;
   } catch (e) {
-    console.warn("Unable to clear mask before removing carrier rectangle:", node.name, e);
-  }
-}
-
-function detachInstanceForEdit(node: SceneNode): SceneNode {
-  if (node.type !== "INSTANCE" || typeof (node as any).detachInstance !== "function") {
-    return node;
-  }
-
-  try {
-    return (node as any).detachInstance();
-  } catch (e) {
-    console.warn("Unable to detach instance for restore:", node.name, e);
-    return node;
+    console.warn("Unable to clear mask before removing imported rectangle:", node.name, e);
   }
 }
 
@@ -1090,14 +948,6 @@ function isNearlyZero(value: number) {
 
 function isNearlyEqual(a: number, b: number) {
   return Math.abs(a - b) < 0.01;
-}
-
-function isPropsMarker(node: BaseNode) {
-  return isDataCarrierNode(node) && (node.name.startsWith(INTERNAL_PROPS_PREFIX) || node.name.startsWith(SIBLING_PROPS_PREFIX));
-}
-
-function isDataCarrierNode(node: BaseNode): node is TextNode | FrameNode {
-  return node.type === "TEXT" || node.type === "FRAME";
 }
 
 function isSceneNode(node: BaseNode): node is SceneNode {
@@ -1248,9 +1098,6 @@ async function applyProperties(node: any, data: any) {
     const layout = normalizeLayoutForParent(node, data.layout);
     restoredLayoutByNodeId[node.id] = layout;
 
-    if (layout.layoutPositioning && hasAutoLayoutParent(node)) {
-      safeSet(node, "layoutPositioning", layout.layoutPositioning);
-    }
     if (layout.relativeTransform) safeSet(node, "relativeTransform", layout.relativeTransform);
     if (layout.x !== undefined) safeSet(node, "x", layout.x);
     if (layout.y !== undefined) safeSet(node, "y", layout.y);
@@ -1265,37 +1112,7 @@ async function applyProperties(node: any, data: any) {
     if (layout.constrainProportions !== undefined) {
       applyAspectRatioLock(node, layout.constrainProportions);
     }
-
-    if (!isGroup && "layoutMode" in node) {
-      if (layout.layoutMode) safeSet(node, "layoutMode", normalizeLayoutMode(layout.layoutMode));
-      if (hasAutoLayout(node)) {
-        if (layout.primaryAxisSizingMode) safeSet(node, "primaryAxisSizingMode", normalizeAxisSizingMode(layout.primaryAxisSizingMode));
-        if (layout.counterAxisSizingMode) safeSet(node, "counterAxisSizingMode", normalizeAxisSizingMode(layout.counterAxisSizingMode));
-        if (layout.itemSpacing !== undefined) safeSet(node, "itemSpacing", layout.itemSpacing);
-        if (layout.paddingLeft !== undefined) safeSet(node, "paddingLeft", layout.paddingLeft);
-        if (layout.paddingRight !== undefined) safeSet(node, "paddingRight", layout.paddingRight);
-        if (layout.paddingTop !== undefined) safeSet(node, "paddingTop", layout.paddingTop);
-        if (layout.paddingBottom !== undefined) safeSet(node, "paddingBottom", layout.paddingBottom);
-        if (layout.primaryAxisAlignItems) safeSet(node, "primaryAxisAlignItems", normalizeAxisAlign(layout.primaryAxisAlignItems));
-        if (layout.counterAxisAlignItems) safeSet(node, "counterAxisAlignItems", normalizeAxisAlign(layout.counterAxisAlignItems));
-        if (layout.counterAxisAlignContent) safeSet(node, "counterAxisAlignContent", layout.counterAxisAlignContent);
-        applySingleChildAutoSpaceAlignmentFix(node, layout);
-        if (layout.itemReverseZIndex !== undefined) safeSet(node, "itemReverseZIndex", layout.itemReverseZIndex);
-        if (layout.strokesIncludedInLayout !== undefined) safeSet(node, "strokesIncludedInLayout", layout.strokesIncludedInLayout);
-      }
-    }
-
-    if (hasAutoLayoutParent(node)) {
-      if (layout.layoutAlign) safeSet(node, "layoutAlign", normalizeLayoutAlign(layout.layoutAlign));
-      if (layout.layoutGrow !== undefined) safeSet(node, "layoutGrow", layout.layoutGrow);
-    }
-
-    if (!isGroup && layout.width !== undefined && layout.height !== undefined && shouldRestoreFixedSize(node, layout)) {
-      safeResize(node, layout.width, layout.height);
-      if (layout.relativeTransform) safeSet(node, "relativeTransform", layout.relativeTransform);
-      if (layout.x !== undefined) safeSet(node, "x", layout.x);
-      if (layout.y !== undefined) safeSet(node, "y", layout.y);
-    }
+    deferLayoutRestore(node, layout, isGroup);
   }
 
   if (data.clipsContent !== undefined) safeSet(node, "clipsContent", data.clipsContent);
@@ -1970,8 +1787,25 @@ function safeSet(node: any, property: string, value: any) {
   if (value === undefined || !(property in node)) return;
 
   try {
+    if (isPrimitiveValue(value) && valuesAreEqual(node[property], value)) {
+      if (activeRestoreStats) activeRestoreStats.safeSetSkipCount++;
+      return;
+    }
     node[property] = value;
+    if (activeRestoreStats) activeRestoreStats.safeSetWriteCount++;
   } catch (e) {}
+}
+
+function isPrimitiveValue(value: any) {
+  return value === null ||
+    typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "boolean";
+}
+
+function valuesAreEqual(current: any, next: any) {
+  return current === next ||
+    (typeof current === "number" && typeof next === "number" && Number.isNaN(current) && Number.isNaN(next));
 }
 
 function safeSetFills(node: any, fills: any[]) {
@@ -2008,25 +1842,30 @@ function stripImageFillExtras(fills: any[]) {
 
 function safeResize(node: any, width: number, height: number) {
   try {
+    if (isNearlyEqual(Number(node.width), width) && isNearlyEqual(Number(node.height), height)) {
+      if (activeRestoreStats) activeRestoreStats.resizeSkipCount++;
+      return;
+    }
     if (typeof node.resize === "function") {
       node.resize(width, height);
+      if (activeRestoreStats) activeRestoreStats.resizeWriteCount++;
     } else if (typeof node.resizeWithoutConstraints === "function") {
       node.resizeWithoutConstraints(width, height);
+      if (activeRestoreStats) activeRestoreStats.resizeWriteCount++;
     }
   } catch (e) {}
 }
 
 async function applyTextProperties(node: TextNode, data: any) {
-  if (documentFonts.length === 0) {
-    documentFonts = await figma.listAvailableFontsAsync();
-  }
+  if (activeRestoreStats) activeRestoreStats.textNodeCount++;
+  await ensureAvailableFontsLoaded();
 
   const family = data.fontName?.family || "Inter";
   const style = data.fontName?.style || "Regular";
-  const isFontExist = documentFonts.some(f => f.fontName.family === family && f.fontName.style === style);
+  const isFontExist = !!availableFontKeys[getFontKey(family, style)];
 
-  await figma.loadFontAsync({ family: "Inter", style: "Regular" });
-  if (isFontExist) await figma.loadFontAsync({ family, style });
+  await loadFontCached({ family: "Inter", style: "Regular" });
+  if (isFontExist) await loadFontCached({ family, style });
   else node.name = "[Font Missing][" + family + "][" + style + "] " + node.name;
 
   node.textAlignHorizontal = data.textAlignHorizontal || "LEFT";
@@ -2042,4 +1881,47 @@ async function applyTextProperties(node: TextNode, data: any) {
   if (data.textDecoration) node.textDecoration = data.textDecoration;
   if (data.letterSpacing !== undefined) node.letterSpacing = data.letterSpacing;
   if (data.lineHeight !== undefined) node.lineHeight = data.lineHeight;
+}
+
+async function ensureAvailableFontsLoaded() {
+  if (documentFonts.length === 0) {
+    if (activeRestoreStats) activeRestoreStats.fontListLoadCount++;
+    documentFonts = await figma.listAvailableFontsAsync();
+    rebuildAvailableFontIndex();
+    return;
+  }
+
+  if (Object.keys(availableFontKeys).length === 0) {
+    rebuildAvailableFontIndex();
+  }
+}
+
+function rebuildAvailableFontIndex() {
+  availableFontKeys = {};
+  for (const font of documentFonts) {
+    availableFontKeys[getFontKey(font.fontName.family, font.fontName.style)] = true;
+  }
+}
+
+function getFontKey(family: string, style: string) {
+  return `${family}\n${style}`;
+}
+
+async function loadFontCached(fontName: FontName) {
+  const key = getFontKey(fontName.family, fontName.style);
+  const existing = fontLoadPromises[key];
+  if (existing) {
+    if (activeRestoreStats) activeRestoreStats.fontLoadCacheHitCount++;
+    await existing;
+    return;
+  }
+
+  if (activeRestoreStats) activeRestoreStats.fontLoadRequestCount++;
+  const promise = figma.loadFontAsync(fontName).catch(error => {
+    delete fontLoadPromises[key];
+    if (activeRestoreStats) activeRestoreStats.fontLoadFailureCount++;
+    throw error;
+  });
+  fontLoadPromises[key] = promise;
+  await promise;
 }

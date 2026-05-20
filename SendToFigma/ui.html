@@ -219,6 +219,77 @@
       align-items: center;
     }
 
+    .mode-card {
+      gap: 10px;
+    }
+
+    .segmented {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+    }
+
+    .segment {
+      min-width: 0;
+      min-height: 32px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      background: var(--background);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0 8px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .segment input {
+      position: absolute;
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .segment:has(input:checked) {
+      border-color: var(--primary);
+      background: var(--primary);
+      color: var(--primary-foreground);
+    }
+
+    .relay-row {
+      display: grid;
+      gap: 6px;
+    }
+
+    .relay-test-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .relay-test-row .button {
+      white-space: nowrap;
+    }
+
+    .text-input {
+      width: 100%;
+      height: 32px;
+      border: 1px solid var(--input);
+      border-radius: 4px;
+      background: var(--background);
+      color: var(--foreground);
+      padding: 0 10px;
+      font: inherit;
+      outline: none;
+    }
+
+    .text-input:focus {
+      border-color: var(--ring);
+      box-shadow: 0 0 0 2px rgba(161, 161, 170, 0.25);
+    }
+
     .file-name {
       min-width: 0;
       color: var(--muted-foreground);
@@ -492,6 +563,13 @@
       color: var(--secondary-foreground);
     }
 
+    .relay-test-row .button-secondary {
+      grid-column: auto;
+      justify-self: stretch;
+      width: auto;
+      min-width: 88px;
+    }
+
     .file-name {
       grid-column: 3;
       width: 100%;
@@ -581,6 +659,27 @@
 </head>
 <body>
   <main>
+    <section class="card mode-card">
+      <div class="card-title">传输方式</div>
+      <div class="segmented" id="transferModeGroup">
+        <label class="segment">
+          <input type="radio" name="transferMode" value="direct-zip" checked>
+          <span>直接生成 zip</span>
+        </label>
+        <label class="segment">
+          <input type="radio" name="transferMode" value="local-json-stream">
+          <span>流传输到本地</span>
+        </label>
+      </div>
+      <div class="relay-row hidden" id="relayConfig">
+        <div class="relay-test-row">
+          <input class="text-input" id="relayUrlInput" type="url" value="http://127.0.0.1:8765" spellcheck="false">
+          <button class="button button-secondary" id="testMainRelay" type="button">主线程测试</button>
+        </div>
+        <p class="muted" id="relayDiagnostic">先启动本地 Python 中继服务，再开始流传输。</p>
+      </div>
+    </section>
+
     <section class="card page-card">
       <div class="page-header">
         <label class="checkbox-label">
@@ -592,23 +691,12 @@
       <div class="page-list" id="pageList"></div>
     </section>
 
-    <section class="card rules-card">
-      <div class="rule-row">
-        <div class="card-title">转换规则</div>
-        <label class="button button-secondary" for="rulesInput" id="rulesButton">选择文件</label>
-        <span class="file-name hidden" id="rulesFileName"></span>
-        <button class="icon-button hidden" id="deleteRules" type="button" title="删除转换规则">×</button>
-      </div>
-      <input class="file-input" id="rulesInput" type="file" accept=".json,application/json">
-      <p class="muted hidden" id="rulesStatus">请先导入 layer-conversion-rules.json。</p>
-    </section>
-
     <section class="card status-card">
       <div class="progress-track" aria-hidden="true">
         <div class="progress-bar" id="bar"></div>
       </div>
       <div class="status-line" id="status">准备就绪</div>
-      <div class="summary" id="summary">zip 内包含 manifest.json 和独立图层 JSON。</div>
+      <div class="summary" id="summary">选择页面后可导出 MasterGo2Figma JSON zip。</div>
     </section>
 
     <button class="button button-primary" id="start" disabled>开始</button>
@@ -619,20 +707,31 @@
     const pageList = document.getElementById("pageList");
     const pageSummary = document.getElementById("pageSummary");
     const start = document.getElementById("start");
-    const rulesInput = document.getElementById("rulesInput");
-    const rulesButton = document.getElementById("rulesButton");
-    const rulesStatus = document.getElementById("rulesStatus");
-    const rulesFileName = document.getElementById("rulesFileName");
-    const deleteRules = document.getElementById("deleteRules");
     const bar = document.getElementById("bar");
     const status = document.getElementById("status");
     const summary = document.getElementById("summary");
+    const transferModeInputs = [...document.querySelectorAll("input[name='transferMode']")];
+    const relayConfig = document.getElementById("relayConfig");
+    const relayUrlInput = document.getElementById("relayUrlInput");
+    const testMainRelay = document.getElementById("testMainRelay");
+    const relayDiagnostic = document.getElementById("relayDiagnostic");
 
+    const TRANSFER_MODE_DIRECT_ZIP = "direct-zip";
+    const TRANSFER_MODE_LOCAL_JSON_STREAM = "local-json-stream";
+    const EXPORT_TARGET_LOCAL_RELAY = "local-relay";
+    const DEFAULT_RELAY_URL = "http://127.0.0.1:8765";
+    const AUTO_CONTINUE_DELAY_MS = 800;
     let isBusy = false;
-    let hasRules = false;
+    let hasRules = true;
     let pages = [];
     let currentPageId = "";
     let exportTransfer = null;
+    let localRelayTransfer = null;
+    let currentTransferMode = TRANSFER_MODE_DIRECT_ZIP;
+    let operationStartMs = 0;
+    let pendingExportQueue = null;
+    let autoExportSession = null;
+    let autoContinueTimer = 0;
 
     function send(pluginMessage) {
       parent.postMessage({ pluginMessage }, "*");
@@ -642,40 +741,40 @@
       isBusy = nextBusy;
       start.disabled = nextBusy || !hasRules || getSelectedPageIds().length === 0;
       selectAllPages.disabled = nextBusy || pages.length === 0;
-      rulesInput.disabled = nextBusy;
-      deleteRules.disabled = nextBusy;
-      rulesButton.classList.toggle("disabled", nextBusy);
+      relayUrlInput.disabled = nextBusy;
+      testMainRelay.disabled = nextBusy;
+      transferModeInputs.forEach(input => {
+        input.disabled = nextBusy;
+      });
       pageList.querySelectorAll("input").forEach(input => {
         input.disabled = nextBusy;
         input.closest(".page-row").classList.toggle("disabled", nextBusy);
       });
     }
 
-    function setRulesStatus(rules, errorMessage) {
-      hasRules = !!(rules && rules.valid);
-      if (errorMessage) {
-        rulesStatus.textContent = hasRules
-          ? `${errorMessage}；继续使用 ${rules.fileName || "已缓存规则"}`
-          : errorMessage;
-        rulesStatus.classList.add("error");
-        rulesStatus.classList.remove("hidden");
-      } else if (hasRules) {
-        rulesFileName.textContent = rules.fileName || "已缓存规则";
-        rulesFileName.title = rules.fileName || "已缓存规则";
-        rulesButton.classList.add("hidden");
-        rulesFileName.classList.remove("hidden");
-        deleteRules.classList.remove("hidden");
-        rulesStatus.textContent = `${rules.ruleCount || 0} 条规则`;
-        rulesStatus.classList.remove("error");
-        rulesStatus.classList.add("hidden");
+    function getTransferMode() {
+      const checked = transferModeInputs.find(input => input.checked);
+      return checked && checked.value === TRANSFER_MODE_LOCAL_JSON_STREAM
+        ? TRANSFER_MODE_LOCAL_JSON_STREAM
+        : TRANSFER_MODE_DIRECT_ZIP;
+    }
+
+    function normalizeRelayUrl(value) {
+      const text = String(value || "").trim() || DEFAULT_RELAY_URL;
+      return text.replace(/\/+$/, "");
+    }
+
+    function updateTransferMode() {
+      currentTransferMode = getTransferMode();
+      relayConfig.classList.toggle("hidden", currentTransferMode !== TRANSFER_MODE_LOCAL_JSON_STREAM);
+      if (pendingExportQueue && pendingExportQueue.nextPageId && !isBusy) {
+        renderExportQueueStatus(pendingExportQueue);
+      } else if (currentTransferMode === TRANSFER_MODE_LOCAL_JSON_STREAM) {
+        summary.textContent = "JSON 和图片会流式写入本地服务，完成后生成 zip。";
+        relayDiagnostic.textContent = "先启动本地 Python 中继服务，再开始流传输。";
+        relayDiagnostic.classList.remove("error");
       } else {
-        rulesButton.classList.remove("hidden");
-        rulesFileName.classList.add("hidden");
-        deleteRules.classList.add("hidden");
-        rulesFileName.textContent = "";
-        rulesStatus.textContent = "请先导入 layer-conversion-rules.json。";
-        rulesStatus.classList.add("error");
-        rulesStatus.classList.add("hidden");
+        summary.textContent = "适合较小文件，导出完成后直接下载 zip。";
       }
       setBusy(isBusy);
     }
@@ -685,7 +784,10 @@
       bar.style.width = `${Math.max(0, Math.min(100, percent))}%`;
       status.textContent = label || "处理中...";
       status.classList.remove("error");
-      summary.textContent = total > 0 ? `${current}/${total} 个图层，${percent}%` : "";
+      const detail = total > 0
+        ? `${current}/${total} 个图层，${percent}% · 预计剩余 ${formatEta(current, total)}`
+        : "正在准备任务...";
+      summary.textContent = withAutoSessionSummary(detail);
     }
 
     function setFileProgress(current, total, label) {
@@ -695,17 +797,199 @@
         status.textContent = label;
         status.classList.remove("error");
       }
-      summary.textContent = total > 0 ? `${current}/${total} 个文件，${percent}%` : `${current} 个文件`;
+      const detail = total > 0 ? `${current}/${total} 个文件，${percent}%` : `${current} 个文件`;
+      summary.textContent = withAutoSessionSummary(detail);
+    }
+
+    function formatEta(current, total) {
+      if (!operationStartMs || !total || current <= 0 || current >= total) return "--";
+      const elapsed = Date.now() - operationStartMs;
+      const remainingMs = Math.max(0, (elapsed / current) * (total - current));
+      const seconds = Math.ceil(remainingMs / 1000);
+      if (seconds < 60) return `${seconds}s`;
+      const minutes = Math.floor(seconds / 60);
+      const rest = seconds % 60;
+      return `${minutes}m ${rest}s`;
+    }
+
+    function isAutoSessionActive() {
+      return !!(autoExportSession && autoExportSession.active);
+    }
+
+    function withAutoSessionSummary(detail) {
+      if (!isAutoSessionActive()) return detail;
+      const session = autoExportSession;
+      const currentPage = Math.min(session.completedPages + 1, session.totalPageCount);
+      return `页面 ${currentPage}/${session.totalPageCount} · ${detail} · 已完成 ${session.completedPages} 页 / ${session.completedPackages} 个 zip`;
+    }
+
+    function renderAutoExportSessionStatus(label) {
+      if (!isAutoSessionActive()) return;
+      const session = autoExportSession;
+      const currentPage = Math.min(session.completedPages + 1, session.totalPageCount);
+      status.textContent = label || `正在连续导出 ${currentPage}/${session.totalPageCount}`;
+      status.classList.remove("error");
+      summary.textContent = `已完成 ${session.completedPages}/${session.totalPageCount} 页，${session.completedPackages} 个 zip，${formatBytes(session.totalBytes)}，${session.totalLayers} 个图层`;
+    }
+
+    function createSessionId() {
+      return `session-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    }
+
+    function startAutoExportSession(pageIds, relayUrl) {
+      clearTimeout(autoContinueTimer);
+      autoExportSession = {
+        id: createSessionId(),
+        active: true,
+        relayUrl,
+        totalPageCount: pageIds.length,
+        originalPageIds: pageIds.slice(),
+        pendingPageIds: pageIds.slice(),
+        completedPages: 0,
+        completedPackages: 0,
+        batchesStarted: 0,
+        totalFiles: 0,
+        totalBytes: 0,
+        totalLayers: 0,
+        imageAssetCount: 0,
+        missingImageAssetCount: 0,
+        outputs: [],
+        startedAt: Date.now()
+      };
+      console.log("[MasterGo2Figma UI] Auto export session start", {
+        sessionId: autoExportSession.id,
+        pageCount: pageIds.length,
+        relayUrl
+      });
+      dispatchAutoExportBatch(pageIds);
+    }
+
+    async function dispatchAutoExportBatch(pageIds) {
+      if (!isAutoSessionActive()) return;
+      const session = autoExportSession;
+      const nextPageIds = (pageIds || []).filter(Boolean);
+      if (nextPageIds.length === 0) {
+        finishAutoExportSession();
+        return;
+      }
+
+      session.pendingPageIds = nextPageIds.slice();
+      session.batchesStarted += 1;
+      setBusy(true);
+      renderAutoExportSessionStatus(`正在准备第 ${Math.min(session.completedPages + 1, session.totalPageCount)}/${session.totalPageCount} 页...`);
+
+      try {
+        await ensureLocalRelayAvailable(session.relayUrl);
+      } catch (error) {
+        failAutoExportSession(error.message || "本地中继服务连接失败");
+        return;
+      }
+
+      console.log("[MasterGo2Figma UI] Auto export batch start", {
+        sessionId: session.id,
+        batchIndex: session.batchesStarted,
+        remainingPageCount: nextPageIds.length,
+        nextPageId: nextPageIds[0]
+      });
+      send({
+        type: "start-export",
+        transferMode: TRANSFER_MODE_LOCAL_JSON_STREAM,
+        relayUrl: session.relayUrl,
+        scope: "partial-pages",
+        pageIds: nextPageIds,
+        autoContinue: true,
+        sessionId: session.id,
+        batchIndex: session.batchesStarted,
+        batchTotal: session.totalPageCount
+      });
+    }
+
+    function scheduleNextAutoExportBatch(queue) {
+      if (!isAutoSessionActive()) return;
+      if (!queue || !Array.isArray(queue.pageIds) || queue.pageIds.length === 0) {
+        finishAutoExportSession();
+        return;
+      }
+      autoExportSession.pendingPageIds = queue.pageIds.slice();
+      renderAutoExportSessionStatus(`当前页完成，准备继续下一页...`);
+      clearTimeout(autoContinueTimer);
+      autoContinueTimer = setTimeout(() => {
+        dispatchAutoExportBatch(queue.pageIds);
+      }, AUTO_CONTINUE_DELAY_MS);
+    }
+
+    function noteAutoExportTransferComplete(message, outputPath) {
+      if (!isAutoSessionActive()) return;
+      const session = autoExportSession;
+      const stats = message.stats || {};
+      session.completedPackages += 1;
+      session.totalFiles += message.fileCount || 0;
+      session.totalBytes += message.totalBytes || 0;
+      if (outputPath) session.outputs.push(outputPath);
+
+      if (message.isFinal !== false) {
+        session.completedPages = Math.min(session.completedPages + 1, session.totalPageCount);
+        session.totalLayers += stats.layerCount || 0;
+        session.imageAssetCount += stats.imageAssetCount || 0;
+        session.missingImageAssetCount += stats.missingImageAssetCount || 0;
+      }
+      renderAutoExportSessionStatus(message.isFinal === false ? "当前分包已生成，继续当前页面..." : "当前页面已完成，准备下一页...");
+    }
+
+    function finishAutoExportSession() {
+      if (!autoExportSession) return;
+      const session = autoExportSession;
+      session.active = false;
+      clearTimeout(autoContinueTimer);
+      bar.style.width = "100%";
+      status.textContent = "连续导出完成";
+      status.classList.remove("error");
+      summary.textContent = `${session.completedPages}/${session.totalPageCount} 页，${session.completedPackages} 个 zip，${formatBytes(session.totalBytes)}，${session.totalLayers} 个图层`;
+      console.log("[MasterGo2Figma UI] Auto export session complete", {
+        sessionId: session.id,
+        completedPages: session.completedPages,
+        packages: session.completedPackages,
+        bytes: session.totalBytes,
+        outputs: session.outputs
+      });
+      autoExportSession = null;
+      setBusy(false);
+    }
+
+    function failAutoExportSession(message) {
+      if (autoExportSession) {
+        console.error("[MasterGo2Figma UI] Auto export session failed", {
+          sessionId: autoExportSession.id,
+          message,
+          pendingPageIds: autoExportSession.pendingPageIds
+        });
+        autoExportSession.active = false;
+      }
+      clearTimeout(autoContinueTimer);
+      status.textContent = message || "连续导出失败";
+      status.classList.add("error");
+      summary.textContent = "当前队列已保留，可修复问题后重新打开插件或再次点击开始继续。";
+      setBusy(false);
+    }
+
+    function formatBytes(value) {
+      const bytes = Number(value) || 0;
+      if (bytes < 1024) return `${bytes} B`;
+      if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+      return `${Math.round(bytes / 1024 / 1024)} MB`;
     }
 
     function renderPages(nextPages) {
       pages = nextPages || [];
       pageList.innerHTML = "";
+      const defaultPageId = pendingExportQueue && pendingExportQueue.nextPageId
+        ? pendingExportQueue.nextPageId
+        : currentPageId;
       for (const page of pages) {
         const row = document.createElement("label");
         row.className = "page-row";
         row.innerHTML = `
-          <input type="checkbox" value="${escapeHtml(page.id)}" ${page.id === currentPageId ? "checked" : ""}>
+          <input type="checkbox" value="${escapeHtml(page.id)}" ${page.id === defaultPageId ? "checked" : ""}>
           <span class="page-name" title="${escapeHtml(page.name)}">${escapeHtml(page.name)}</span>
           <span class="badge">${page.childCount || 0}</span>
         `;
@@ -715,6 +999,24 @@
         input.onchange = updatePageSelection;
       });
       updatePageSelection();
+      renderExportQueueStatus(pendingExportQueue);
+    }
+
+    function applyExportQueueSelection(queue) {
+      if (!queue || !queue.nextPageId) return;
+      pageList.querySelectorAll("input").forEach(input => {
+        input.checked = input.value === queue.nextPageId;
+      });
+      updatePageSelection();
+      renderExportQueueStatus(queue);
+    }
+
+    function renderExportQueueStatus(queue) {
+      if (!queue || !queue.nextPageId || isBusy) return;
+      const nextName = queue.nextPageName || queue.nextPageId;
+      status.textContent = `导出队列：下一页 ${nextName}`;
+      status.classList.remove("error");
+      summary.textContent = `剩余 ${queue.remainingCount || 0} 页，点击开始继续。`;
     }
 
     function getSelectedPageIds() {
@@ -739,42 +1041,28 @@
       updatePageSelection();
     };
 
-    rulesInput.onchange = async () => {
-      const file = rulesInput.files && rulesInput.files[0];
-      if (!file) return;
+    transferModeInputs.forEach(input => {
+      input.onchange = updateTransferMode;
+    });
 
-      try {
-        setBusy(true);
-        rulesStatus.textContent = "正在导入规则...";
-        rulesStatus.classList.remove("error");
-        send({
-          type: "import-rules",
-          fileName: file.name,
-          content: await file.text()
-        });
-      } catch (error) {
-        setRulesStatus({ valid: hasRules }, error.message || "规则文件读取失败");
-        setBusy(false);
-      } finally {
-        rulesInput.value = "";
-      }
-    };
-
-    deleteRules.onclick = () => {
-      if (isBusy || !hasRules) return;
-      setBusy(true);
-      send({ type: "delete-rules" });
-    };
-
-    start.onclick = () => {
+    testMainRelay.onclick = () => {
       if (isBusy) return;
-      if (!hasRules) {
-        status.textContent = "请先导入转换规则 JSON";
-        status.classList.add("error");
-        summary.textContent = "";
-        return;
-      }
+      const relayUrl = normalizeRelayUrl(relayUrlInput.value);
+      relayUrlInput.value = relayUrl;
+      relayDiagnostic.textContent = "正在从插件主线程测试 /health...";
+      relayDiagnostic.classList.remove("error");
+      status.textContent = "正在测试主线程直连本地服务...";
+      status.classList.remove("error");
+      summary.textContent = "这会验证 code.ts 是否可以绕过 UI bridge 直接访问 localhost。";
+      testMainRelay.disabled = true;
+      send({
+        type: "test-main-fetch-relay",
+        relayUrl
+      });
+    };
 
+    start.onclick = async () => {
+      if (isBusy) return;
       const pageIds = getSelectedPageIds();
       if (pageIds.length === 0) {
         status.textContent = "请至少选择一个页面";
@@ -784,9 +1072,30 @@
       }
 
       setBusy(true);
-      setProgress(0, 0, "正在启动导出...");
+      operationStartMs = Date.now();
+      const transferMode = getTransferMode();
+      const relayUrl = normalizeRelayUrl(relayUrlInput.value);
+      if (transferMode === TRANSFER_MODE_LOCAL_JSON_STREAM) {
+        try {
+          relayUrlInput.value = relayUrl;
+          setProgress(0, 0, "正在连接本地中继服务...");
+          await ensureLocalRelayAvailable(relayUrl);
+        } catch (error) {
+          status.textContent = error.message || "本地中继服务连接失败";
+          status.classList.add("error");
+          summary.textContent = "请先运行 python3 tools/mastergo_relay_server.py。";
+          setBusy(false);
+          return;
+        }
+        startAutoExportSession(pageIds, relayUrl);
+        return;
+      } else {
+        setProgress(0, 0, "正在启动导出...");
+      }
       send({
         type: "start-export",
+        transferMode,
+        relayUrl: transferMode === TRANSFER_MODE_LOCAL_JSON_STREAM ? relayUrl : "",
         scope: "partial-pages",
         pageIds
       });
@@ -796,6 +1105,249 @@
       if (!event || !event.data) return null;
       if (event.data.pluginMessage) return event.data.pluginMessage;
       return event.data;
+    }
+
+    async function ensureLocalRelayAvailable(relayUrl) {
+      let response;
+      try {
+        response = await fetch(`${relayUrl}/health`, { method: "GET" });
+      } catch (error) {
+        throw new Error(`无法连接本地中继服务：${relayUrl}`);
+      }
+      const payload = await readRelayResponse(response);
+      if (!payload.ok) throw new Error(payload.error || "本地中继服务不可用");
+      return payload;
+    }
+
+    function isLocalRelayMessage(message) {
+      return message && message.target === EXPORT_TARGET_LOCAL_RELAY;
+    }
+
+    function getLocalRelayTransfer(message) {
+      if (!localRelayTransfer || localRelayTransfer.transferId !== message.transferId) return null;
+      return localRelayTransfer;
+    }
+
+    function createLocalRelayEndpoint(transfer, suffix) {
+      return `${transfer.relayUrl}/transfers/${encodeURIComponent(transfer.transferId)}${suffix}`;
+    }
+
+    async function readRelayResponse(response) {
+      let payload = null;
+      try {
+        payload = await response.json();
+      } catch (_) {
+        payload = null;
+      }
+      if (!response.ok) {
+        const message = payload && payload.error ? payload.error : `${response.status} ${response.statusText}`;
+        throw new Error(message);
+      }
+      return payload || { ok: true };
+    }
+
+    async function postRelayJson(transfer, suffix, data) {
+      const response = await fetch(createLocalRelayEndpoint(transfer, suffix), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data || {})
+      });
+      const payload = await readRelayResponse(response);
+      if (payload.ok === false) throw new Error(payload.error || "本地中继服务返回失败");
+      return payload;
+    }
+
+    async function postRelayBytes(transfer, suffix, bytes) {
+      const response = await fetch(createLocalRelayEndpoint(transfer, suffix), {
+        method: "POST",
+        headers: { "Content-Type": "application/octet-stream" },
+        body: bytes
+      });
+      const payload = await readRelayResponse(response);
+      if (payload.ok === false) throw new Error(payload.error || "本地中继服务返回失败");
+      return payload;
+    }
+
+    function enqueueLocalRelay(transfer, task) {
+      const next = transfer.queue.then(() => {
+        if (transfer.error) throw transfer.error;
+        return task();
+      });
+      transfer.queue = next.catch(error => {
+        transfer.error = error instanceof Error ? error : new Error(String(error));
+      });
+      return next;
+    }
+
+    function startLocalRelayTransfer(message) {
+      localRelayTransfer = {
+        transferId: message.transferId,
+        relayUrl: normalizeRelayUrl(message.relayUrl),
+        filename: message.filename || "mastergo2figma",
+        fileCount: message.fileCount || 0,
+        receivedFiles: 0,
+        totalBytes: 0,
+        stats: message.stats || null,
+        files: {},
+        queue: Promise.resolve(),
+        error: null,
+        outputDir: ""
+      };
+      const transfer = localRelayTransfer;
+      enqueueLocalRelay(transfer, () => postRelayJson(transfer, "/start", {
+        filename: transfer.filename,
+        startedAt: new Date().toISOString()
+      })).catch(() => {});
+      status.textContent = "本地流传输已开始";
+      status.classList.remove("error");
+    }
+
+    function startLocalRelayFile(message) {
+      const transfer = getLocalRelayTransfer(message);
+      if (!transfer) return;
+      transfer.files[message.index] = {
+        path: message.path,
+        size: message.size || 0,
+        chunks: message.totalChunks || 0,
+        ended: false
+      };
+      enqueueLocalRelay(transfer, () => postRelayJson(transfer, "/files/start", {
+        index: message.index,
+        path: message.path,
+        kind: message.kind,
+        size: message.size || 0,
+        totalChunks: message.totalChunks || 0
+      })).catch(() => {});
+    }
+
+    function appendLocalRelayFileChunk(message) {
+      const transfer = getLocalRelayTransfer(message);
+      if (!transfer) return;
+      const bytes = message.bytes !== undefined
+        ? normalizeBytes(message.bytes)
+        : new TextEncoder().encode(message.content || "");
+      transfer.totalBytes += bytes.length;
+      enqueueLocalRelay(transfer, () => postRelayBytes(
+        transfer,
+        `/files/chunk?index=${encodeURIComponent(message.index)}&chunkIndex=${encodeURIComponent(message.chunkIndex || 0)}`,
+        bytes
+      )).catch(() => {});
+    }
+
+    async function acknowledgeLocalRelayFile(message) {
+      const transfer = getLocalRelayTransfer(message);
+      let success = false;
+      let errorMessage = "";
+      let path = message.path || "";
+
+      try {
+        if (!transfer) throw new Error("本地流传输不存在或已被重置");
+        const file = transfer.files[message.index];
+        path = path || (file && file.path) || "";
+        await enqueueLocalRelay(transfer, () => postRelayJson(transfer, "/files/end", {
+          index: message.index
+        }));
+        if (file) file.ended = true;
+        transfer.receivedFiles += 1;
+        success = true;
+      } catch (error) {
+        errorMessage = error.message || "本地文件写入失败";
+        console.error(`[MasterGo2Figma UI] Local relay file failed: ${errorMessage}`);
+      }
+
+      const pendingCount = transfer
+        ? Object.keys(transfer.files).filter(index => !transfer.files[index].ended).length
+        : 0;
+      send({
+        type: "export-file-finished",
+        transferId: message.transferId,
+        index: message.index,
+        success,
+        error: errorMessage,
+        pendingCount,
+        path
+      });
+    }
+
+    function abortLocalRelayFile(message) {
+      const transfer = getLocalRelayTransfer(message);
+      if (!transfer) return;
+      enqueueLocalRelay(transfer, () => postRelayJson(transfer, "/files/abort", {
+        index: message.index,
+        reason: message.reason || ""
+      })).catch(() => {});
+    }
+
+    async function completeLocalRelayTransfer(message) {
+      const transfer = getLocalRelayTransfer(message);
+      if (!transfer) {
+        send({
+          type: "export-transfer-finished",
+          transferId: message.transferId,
+          success: false,
+          error: "本地流传输不存在或已被重置",
+          pendingCount: 0,
+          filename: message.filename || ""
+        });
+        return;
+      }
+
+      let success = false;
+      let errorMessage = "";
+      let pendingCount = 0;
+      let outputDir = "";
+      let zipPath = "";
+
+      try {
+        pendingCount = Object.keys(transfer.files).filter(index => !transfer.files[index].ended).length;
+        if (pendingCount > 0) throw new Error(`本地流传输不完整（${pendingCount} 个文件未完成）`);
+        transfer.fileCount = message.fileCount || transfer.fileCount || transfer.receivedFiles;
+        transfer.stats = message.stats || transfer.stats;
+        const payload = await enqueueLocalRelay(transfer, () => postRelayJson(transfer, "/complete", {
+          filename: message.filename || transfer.filename,
+          fileCount: transfer.fileCount,
+          totalBytes: message.totalBytes || transfer.totalBytes,
+          stats: transfer.stats || {},
+          isFinal: message.isFinal !== false,
+          completedAt: new Date().toISOString()
+        }));
+        outputDir = payload.outputDir || "";
+        zipPath = payload.zipPath || "";
+        transfer.outputDir = outputDir;
+        if (message.isFinal !== false) bar.style.width = "100%";
+        status.textContent = message.isFinal === false ? "当前分包已写入本地，继续导出..." : "本地 zip 已生成";
+        status.classList.remove("error");
+        const stats = transfer.stats || {};
+        const imageAssetCount = stats.imageAssetCount || 0;
+        const missingImageAssetCount = stats.missingImageAssetCount || 0;
+        noteAutoExportTransferComplete(message, zipPath || outputDir || transfer.filename);
+        if (!isAutoSessionActive()) {
+          summary.textContent = `${zipPath || outputDir || transfer.transferId}，${stats.pageCount || 0} 个页面，${stats.layerCount || 0} 个图层，${imageAssetCount} 个图片资源${missingImageAssetCount ? `，${missingImageAssetCount} 个图片缺失` : ""}`;
+        }
+        success = true;
+      } catch (error) {
+        errorMessage = error.message || "本地流传输失败";
+        status.textContent = errorMessage;
+        status.classList.add("error");
+        summary.textContent = "请查看本地 Python 服务终端和插件控制台。";
+      } finally {
+        pendingCount = Object.keys(transfer.files).filter(index => !transfer.files[index].ended).length;
+      }
+
+      localRelayTransfer = null;
+      const keepBusy = success && (message.isFinal === false || isAutoSessionActive());
+      setBusy(keepBusy);
+      send({
+        type: "export-transfer-finished",
+        transferId: message.transferId,
+        success,
+        error: errorMessage,
+        pendingCount,
+        filename: zipPath || outputDir || transfer.filename
+      });
+      if (!success && autoExportSession) {
+        failAutoExportSession(errorMessage);
+      }
     }
 
     function startExportTransfer(message) {
@@ -1003,32 +1555,27 @@
 
       if (message.type === "init") {
         currentPageId = message.currentPageId || "";
+        pendingExportQueue = message.exportQueue || null;
         renderPages(message.pages);
-        setRulesStatus(message.rules);
         return;
       }
 
-      if (message.type === "rules-loaded") {
-        setRulesStatus(message.rules);
-        status.textContent = "规则已导入";
-        status.classList.remove("error");
-        summary.textContent = "可以开始导出。";
+      if (message.type === "export-queue-updated") {
+        pendingExportQueue = message.exportQueue || null;
+        if (isAutoSessionActive()) {
+          scheduleNextAutoExportBatch(pendingExportQueue);
+          return;
+        }
+        applyExportQueueSelection(pendingExportQueue);
         setBusy(false);
         return;
       }
 
-      if (message.type === "rules-error") {
-        setRulesStatus(message.rules, message.message || "规则配置导入失败");
-        setBusy(false);
-        return;
-      }
-
-      if (message.type === "rules-deleted") {
-        setRulesStatus(message.rules);
-        status.textContent = "规则已删除";
-        status.classList.remove("error");
-        summary.textContent = "请重新导入转换规则后再开始。";
-        setBusy(false);
+      if (message.type === "export-queue-cleared") {
+        pendingExportQueue = null;
+        if (isAutoSessionActive()) {
+          finishAutoExportSession();
+        }
         return;
       }
 
@@ -1037,33 +1584,77 @@
         return;
       }
 
+      if (message.type === "main-relay-test-result") {
+        testMainRelay.disabled = isBusy;
+        if (message.ok) {
+          const detail = `主线程直连成功：HTTP ${message.status || 200}，${message.elapsedMs || 0}ms`;
+          status.textContent = detail;
+          status.classList.remove("error");
+          relayDiagnostic.textContent = `${detail}。可以考虑把上传链路移到 code.ts。`;
+          relayDiagnostic.classList.remove("error");
+          summary.textContent = `fetch=${message.fetchAvailable ? "可用" : "不可用"} · ${message.relayUrl || ""}`;
+        } else {
+          const errorText = message.error || "主线程直连失败";
+          status.textContent = errorText;
+          status.classList.add("error");
+          relayDiagnostic.textContent = `主线程直连失败：${errorText}`;
+          relayDiagnostic.classList.add("error");
+          summary.textContent = `fetch=${message.fetchAvailable ? "可用" : "不可用"} · ${message.relayUrl || ""}`;
+        }
+        return;
+      }
+
       if (message.type === "export-transfer-start") {
-        startExportTransfer(message);
+        if (isLocalRelayMessage(message)) {
+          startLocalRelayTransfer(message);
+        } else {
+          startExportTransfer(message);
+        }
         return;
       }
 
       if (message.type === "export-file-start") {
-        startExportFile(message);
+        if (isLocalRelayMessage(message)) {
+          startLocalRelayFile(message);
+        } else {
+          startExportFile(message);
+        }
         return;
       }
 
       if (message.type === "export-file-chunk") {
-        appendExportFileChunk(message);
+        if (isLocalRelayMessage(message)) {
+          appendLocalRelayFileChunk(message);
+        } else {
+          appendExportFileChunk(message);
+        }
         return;
       }
 
       if (message.type === "export-file-end") {
-        acknowledgeExportFile(message);
+        if (isLocalRelayMessage(message)) {
+          await acknowledgeLocalRelayFile(message);
+        } else {
+          acknowledgeExportFile(message);
+        }
         return;
       }
 
       if (message.type === "export-file-abort") {
-        abortExportFile(message);
+        if (isLocalRelayMessage(message)) {
+          abortLocalRelayFile(message);
+        } else {
+          abortExportFile(message);
+        }
         return;
       }
 
       if (message.type === "export-transfer-complete") {
-        await completeExportTransfer(message);
+        if (isLocalRelayMessage(message)) {
+          await completeLocalRelayTransfer(message);
+        } else {
+          await completeExportTransfer(message);
+        }
         return;
       }
 
@@ -1082,6 +1673,10 @@
 
       if (message.type === "error") {
         exportTransfer = null;
+        if (autoExportSession) {
+          failAutoExportSession(message.message || "导出失败");
+          return;
+        }
         status.textContent = message.message || "导出失败";
         status.classList.add("error");
         summary.textContent = "请查看插件控制台获取更多信息。";
@@ -1091,6 +1686,7 @@
 
     send({ type: "ui-ready" });
     setTimeout(() => send({ type: "ui-ready" }), 100);
+    updateTransferMode();
 
     function escapeHtml(value) {
       return String(value)
@@ -1151,7 +1747,6 @@
       const end = new Uint8Array(22);
       const endView = new DataView(end.buffer);
       const fileCount = transfer.centralParts.length;
-      console.log(`[MasterGo2Figma UI] Finalizing zip: files=${fileCount}, localParts=${transfer.localParts.length}, centralSize=${centralSize}, offset=${transfer.offset}`);
       endView.setUint32(0, 0x06054b50, true);
       endView.setUint16(8, fileCount, true);
       endView.setUint16(10, fileCount, true);
