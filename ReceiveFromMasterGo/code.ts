@@ -23,6 +23,7 @@ let activeProgressState: RestoreProgressState | null = null;
 
 const INTERNAL_PROPS_PREFIX = "[PROPS]";
 const SIBLING_PROPS_PREFIX = "[PROPS_SIBLING]";
+const MISSING_FONT_NAME_PREFIX_PATTERN = /^\[Font Missing\]\[([^\]]+)\]\[([^\]]+)\]\s*/;
 const LAYER_RULES_SCHEMA = "mastergo2figma.layer-conversion-rules.v1";
 const VALID_RECEIVE_CREATE_TYPES = [
   "VECTOR", "ELLIPSE", "RECTANGLE", "STAR", "LINE", "POLYGON",
@@ -168,6 +169,24 @@ type RestoreProgressState = {
   total: number;
   lastCurrent: number;
   lastPostedAt: number;
+};
+
+type MissingFontTextRestoreResult = {
+  scannedTextNodeCount: number;
+  candidateTextNodeCount: number;
+  restoredTextNodeCount: number;
+  failedTextNodeCount: number;
+  loadedFontCount: number;
+  failedFontCount: number;
+};
+
+type MissingFontTextRestoreTarget = {
+  node: TextNode;
+  requestedFontName: FontName;
+  resolvedFontName: FontName | null;
+  restoredName: string;
+  requestedFontKey: string;
+  resolvedFontKey: string;
 };
 
 showImportUI();
@@ -349,6 +368,8 @@ async function restoreImportPayload(payload: ImportPayload) {
   }
 
   applyDeferredConnectorRestores();
+  await maybeReportRestoreProgress(restoredNodes, totalNodes, "正在还原缺失字体...", true);
+  const missingFontRestoreResult = await restoreMissingFontTextLayers(restoredPages);
   await maybeReportRestoreProgress(restoredNodes, totalNodes, "正在完成还原...", true);
 
   if (restoredPages.length > 0) {
@@ -361,11 +382,15 @@ async function restoreImportPayload(payload: ImportPayload) {
     pageCount: restoredPages.length,
     layerCount: restoredNodes,
     missingImageAssetCount,
-    fallbackConnectorCount
+    fallbackConnectorCount,
+    restoredMissingFontTextNodeCount: missingFontRestoreResult.restoredTextNodeCount,
+    failedMissingFontTextNodeCount: missingFontRestoreResult.failedTextNodeCount
   });
   const completeDetails: string[] = [];
   if (missingImageAssetCount > 0) completeDetails.push(`Missing images: ${missingImageAssetCount}`);
   if (fallbackConnectorCount > 0) completeDetails.push(`Connectors restored as polylines: ${fallbackConnectorCount}`);
+  if (missingFontRestoreResult.restoredTextNodeCount > 0) completeDetails.push(`Fonts restored: ${missingFontRestoreResult.restoredTextNodeCount}`);
+  if (missingFontRestoreResult.failedTextNodeCount > 0) completeDetails.push(`Fonts still missing: ${missingFontRestoreResult.failedTextNodeCount}`);
   logRestorePerformanceSummary(restoredNodes, restoredPages.length);
   figma.notify(completeDetails.length > 0 ? `Restore complete. ${completeDetails.join("; ")}` : "Restore complete!");
 }
@@ -1862,10 +1887,12 @@ async function applyTextProperties(node: TextNode, data: any) {
 
   const family = data.fontName?.family || "Inter";
   const style = data.fontName?.style || "Regular";
-  const isFontExist = !!availableFontKeys[getFontKey(family, style)];
+  const requestedFontName = { family, style };
+  const resolvedFontName = resolveAvailableFontName(requestedFontName);
+  const isFontExist = !!resolvedFontName;
 
   await loadFontCached({ family: "Inter", style: "Regular" });
-  if (isFontExist) await loadFontCached({ family, style });
+  if (resolvedFontName) await loadFontCached(resolvedFontName);
   else node.name = "[Font Missing][" + family + "][" + style + "] " + node.name;
 
   node.textAlignHorizontal = data.textAlignHorizontal || "LEFT";
@@ -1875,12 +1902,246 @@ async function applyTextProperties(node: TextNode, data: any) {
   node.paragraphSpacing = data.paragraphSpacing || 0;
   node.autoRename = data.autoRename || false;
   node.fontSize = data.fontSize || 12;
-  node.fontName = isFontExist ? { family, style } : { family: "Inter", style: "Regular" };
+  node.fontName = resolvedFontName || { family: "Inter", style: "Regular" };
   node.characters = data.characters || "";
   if (data.textCase) node.textCase = data.textCase;
   if (data.textDecoration) node.textDecoration = data.textDecoration;
   if (data.letterSpacing !== undefined) node.letterSpacing = data.letterSpacing;
   if (data.lineHeight !== undefined) node.lineHeight = data.lineHeight;
+}
+
+async function restoreMissingFontTextLayers(pages: PageNode[]): Promise<MissingFontTextRestoreResult> {
+  const result: MissingFontTextRestoreResult = {
+    scannedTextNodeCount: 0,
+    candidateTextNodeCount: 0,
+    restoredTextNodeCount: 0,
+    failedTextNodeCount: 0,
+    loadedFontCount: 0,
+    failedFontCount: 0
+  };
+  const targets: MissingFontTextRestoreTarget[] = [];
+  await ensureAvailableFontsLoaded();
+
+  for (const page of pages) {
+    const textNodes = page.findAll(node => node.type === "TEXT") as TextNode[];
+    result.scannedTextNodeCount += textNodes.length;
+
+    for (const node of textNodes) {
+      const parsed = parseMissingFontTextLayerName(node.name);
+      if (!parsed) continue;
+      const requestedFontName = { family: parsed.family, style: parsed.style };
+      const resolvedFontName = resolveAvailableFontName(requestedFontName);
+      targets.push({
+        node,
+        requestedFontName,
+        resolvedFontName,
+        restoredName: parsed.restoredName,
+        requestedFontKey: getFontKey(parsed.family, parsed.style),
+        resolvedFontKey: resolvedFontName ? getFontKey(resolvedFontName.family, resolvedFontName.style) : ""
+      });
+    }
+  }
+
+  result.candidateTextNodeCount = targets.length;
+  if (targets.length === 0) return result;
+
+  logMissingFontRestoreTargets(targets);
+
+  const fontLoadState = new Map<string, boolean>();
+  for (const target of targets) {
+    if (!target.resolvedFontName) {
+      result.failedTextNodeCount++;
+      continue;
+    }
+
+    if (!fontLoadState.has(target.resolvedFontKey)) {
+      try {
+        await loadFontCached(target.resolvedFontName);
+        fontLoadState.set(target.resolvedFontKey, true);
+        result.loadedFontCount++;
+      } catch (error) {
+        fontLoadState.set(target.resolvedFontKey, false);
+        result.failedFontCount++;
+        console.warn("Unable to restore missing font:", {
+          requested: target.requestedFontName,
+          resolved: target.resolvedFontName
+        }, error);
+      }
+    }
+
+    if (!fontLoadState.get(target.resolvedFontKey)) {
+      result.failedTextNodeCount++;
+      continue;
+    }
+
+    try {
+      target.node.fontName = target.resolvedFontName;
+      target.node.name = target.restoredName;
+      result.restoredTextNodeCount++;
+    } catch (error) {
+      result.failedTextNodeCount++;
+      console.warn("Unable to apply restored font:", target.node.name, {
+        requested: target.requestedFontName,
+        resolved: target.resolvedFontName
+      }, error);
+    }
+  }
+
+  console.log("[MasterGo2Figma] Missing font restore", result);
+  return result;
+}
+
+function parseMissingFontTextLayerName(name: string) {
+  const match = MISSING_FONT_NAME_PREFIX_PATTERN.exec(name);
+  if (!match) return null;
+
+  return {
+    family: match[1],
+    style: match[2],
+    restoredName: name.slice(match[0].length)
+  };
+}
+
+function resolveAvailableFontName(requested: FontName): FontName | null {
+  if (availableFontKeys[getFontKey(requested.family, requested.style)]) return requested;
+
+  let bestMatch: { fontName: FontName; score: number } | null = null;
+  for (const font of documentFonts) {
+    const fontName = font.fontName;
+    const familyScore = getFontFamilyMatchScore(requested.family, fontName.family);
+    if (familyScore <= 0) continue;
+
+    const styleScore = getFontStyleMatchScore(requested.style, fontName.style);
+    if (styleScore <= 0) continue;
+
+    const score = familyScore + styleScore;
+    if (!bestMatch || score > bestMatch.score) {
+      bestMatch = { fontName, score };
+    }
+  }
+
+  return bestMatch ? bestMatch.fontName : null;
+}
+
+function getFontFamilyMatchScore(requestedFamily: string, availableFamily: string) {
+  const requested = normalizeFontFamilyForMatch(requestedFamily);
+  const available = normalizeFontFamilyForMatch(availableFamily);
+  if (!requested || !available) return 0;
+  if (requested === available) return 100;
+  if (available.indexOf(requested) === 0 || requested.indexOf(available) === 0) return 80;
+  return 0;
+}
+
+function getFontStyleMatchScore(requestedStyle: string, availableStyle: string) {
+  const requested = normalizeFontStyleForMatch(requestedStyle);
+  const available = normalizeFontStyleForMatch(availableStyle);
+  if (!requested || !available) return 0;
+  if (requested === available) return 50;
+  return 0;
+}
+
+function normalizeFontFamilyForMatch(value: string) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[\s_-]+/g, "")
+    .replace(/[^a-z0-9]/g, "");
+}
+
+function normalizeFontStyleForMatch(value: string) {
+  const normalized = String(value || "")
+    .toLowerCase()
+    .replace(/[\s_-]+/g, "")
+    .replace(/[^a-z0-9]/g, "");
+
+  const aliases: { [style: string]: string } = {
+    normal: "regular",
+    book: "regular",
+    roman: "regular",
+    regular: "regular",
+    400: "regular",
+    medium: "medium",
+    500: "medium",
+    semibold: "semibold",
+    demibold: "semibold",
+    600: "semibold",
+    bold: "bold",
+    700: "bold",
+    heavy: "heavy",
+    black: "black",
+    900: "black",
+    light: "light",
+    300: "light",
+    extralight: "extralight",
+    ultralight: "extralight",
+    200: "extralight",
+    thin: "thin",
+    100: "thin"
+  };
+
+  return aliases[normalized] || normalized;
+}
+
+function logMissingFontRestoreTargets(targets: MissingFontTextRestoreTarget[]) {
+  const requestedToResolved: { [key: string]: { requested: FontName; resolved: FontName | null; count: number } } = {};
+  for (const target of targets) {
+    if (!requestedToResolved[target.requestedFontKey]) {
+      requestedToResolved[target.requestedFontKey] = {
+        requested: target.requestedFontName,
+        resolved: target.resolvedFontName,
+        count: 0
+      };
+    }
+    requestedToResolved[target.requestedFontKey].count++;
+  }
+
+  const resolutions = Object.keys(requestedToResolved).map(key => requestedToResolved[key]);
+  console.log("[MasterGo2Figma] Missing font restore targets", resolutions);
+
+  for (const item of resolutions) {
+    if (item.resolved) continue;
+    console.warn("[MasterGo2Figma] No available font match for missing font", {
+      requested: item.requested,
+      nearbyAvailableFonts: getNearbyAvailableFontsForLog(item.requested)
+    });
+  }
+}
+
+function getNearbyAvailableFontsForLog(requested: FontName) {
+  const requestedFamily = normalizeFontFamilyForMatch(requested.family);
+  const nearby: FontName[] = [];
+
+  for (const font of documentFonts) {
+    const family = normalizeFontFamilyForMatch(font.fontName.family);
+    if (
+      family.indexOf(requestedFamily) !== -1 ||
+      requestedFamily.indexOf(family) !== -1 ||
+      familiesShareWords(requested.family, font.fontName.family)
+    ) {
+      nearby.push(font.fontName);
+    }
+    if (nearby.length >= 20) break;
+  }
+
+  return nearby;
+}
+
+function familiesShareWords(left: string, right: string) {
+  const leftWords = splitFontFamilyWords(left);
+  const rightWords = splitFontFamilyWords(right);
+  let sharedCount = 0;
+
+  for (const word of leftWords) {
+    if (rightWords.indexOf(word) !== -1) sharedCount++;
+  }
+
+  return sharedCount >= Math.min(2, leftWords.length, rightWords.length);
+}
+
+function splitFontFamilyWords(value: string) {
+  return String(value || "")
+    .toLowerCase()
+    .split(/[\s_-]+/)
+    .filter(Boolean);
 }
 
 async function ensureAvailableFontsLoaded() {

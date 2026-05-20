@@ -62,7 +62,9 @@ mastergo2figma-relay-output/<transferId>.zip
 
 ## OOM 和 MasterGo 限制说明
 
-本项目已经用本地 Python 中继规避了 UI 侧拼接大 zip / Blob 下载带来的内存峰值，但它不能完全解决 MasterGo 插件主线程的 OOM。
+这是 MasterGo 插件架构下的共性问题，不是单纯的本项目打包逻辑问题。
+
+本项目已经用本地 Python 中继规避了 UI 侧拼接大 zip / Blob 下载带来的内存峰值，但它只能避免“打包 zip 时”把所有文件聚合到 UI 内存中，不能避免“大量 JSON / 图片 chunk 传输时”造成的 OOM。
 
 当前导出链路是：
 
@@ -76,20 +78,13 @@ MasterGo 插件主线程 code.ts
   -> Python 写文件并打 zip
 ```
 
-实际测试中，MasterGo 插件主线程没有 `fetch` API，无法直接请求本地 Python 服务。因此数据必须经过 `mg.ui.postMessage` 从主线程传到 UI。这个桥接层由 MasterGo 宿主管理，插件 API 没有提供主动释放、零拷贝传输、可写文件句柄或真正的 streaming channel。
+实际测试中，MasterGo 插件主线程没有 `fetch` API，无法直接请求本地 Python 服务。因此数据必须经过 `mg.ui.postMessage` 从主线程传到 UI。
 
-因此在超大文件或多页面连续导出时，仍可能在下面阶段 OOM：
+当插件连续通过 `mg.ui.postMessage` 发送大量 JSON / 图片 chunk 时，MasterGo 宿主需要在主线程、UI bridge 和 UI 之间做序列化、复制或排队。这个桥接层开销由 MasterGo 宿主管理，插件 API 没有提供主动释放、零拷贝传输、可写文件句柄或真正的 streaming channel。因此即使 UI 已经把 chunk 发给 Python 并写盘，插件也无法保证 bridge 内部开销已经被释放。
 
-- 读取复杂图层对象。
-- 构造或 stringify 大量 JSON record。
-- 通过 `mg.ui.postMessage` 连续发送大量 JSON / 图片 chunk。
+因此对于特别大的页面或多页面连续导出，当前版本无法保证稳定完成。缩小单次导出范围只能作为临时规避方式，不是根本解决方案。
 
-如果遇到 OOM，可以尝试：
-
-- 优先使用 `流传输到本地`，不要用直接 zip。
-- 减少单次导出的页面数量。
-- 避免一次导出包含大量复杂矢量、布尔运算、超深层级或大量图片的页面。
-- OOM 后重新打开插件，从较小范围继续导出。
+`流传输到本地` 仍然建议用于较大文件，因为它能避免 UI 打包 zip 的额外内存峰值；但如果 OOM 发生在 `mg.ui.postMessage` 大量传输 JSON / 图片 chunk 的阶段，流式传输本身无法解决。
 
 如果 MasterGo 后续提供插件主线程网络请求、Transferable / zero-copy postMessage、文件系统写入或官方大文件导出 API，才有机会从架构上彻底解决这个问题。
 

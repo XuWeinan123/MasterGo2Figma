@@ -969,9 +969,13 @@
         bar.style.width = "100%";
         const missingImageAssetCount = message.missingImageAssetCount || 0;
         const fallbackConnectorCount = message.fallbackConnectorCount || 0;
+        const restoredMissingFontTextNodeCount = message.restoredMissingFontTextNodeCount || 0;
+        const failedMissingFontTextNodeCount = message.failedMissingFontTextNodeCount || 0;
         const details = [];
         if (missingImageAssetCount) details.push(`${missingImageAssetCount} 个图片缺失`);
         if (fallbackConnectorCount) details.push(`${fallbackConnectorCount} 个连接线已降级为折线`);
+        if (restoredMissingFontTextNodeCount) details.push(`${restoredMissingFontTextNodeCount} 个文本字体已恢复`);
+        if (failedMissingFontTextNodeCount) details.push(`${failedMissingFontTextNodeCount} 个文本字体仍缺失`);
         setStatus("还原完成", `${message.pageCount} 个页面，${message.layerCount} 个图层${details.length ? `，${details.join("，")}` : ""}`, false);
         setBusy(false);
         return;
