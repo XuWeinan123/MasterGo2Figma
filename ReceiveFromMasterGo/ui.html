@@ -3,6 +3,11 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MasterGo to Figma Restorer</title>
+  <meta name="description" content="Import and restore design asset zip bundles in Figma with pixel-perfect fidelity.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
   <style>
     :root {
       --background: #ffffff;
@@ -12,42 +17,65 @@
       --card: #ffffff;
       --border: #e4e4e7;
       --input: #e4e4e7;
-      --primary: #18181b;
-      --primary-foreground: #fafafa;
+      --primary: #0066cc;
+      --primary-hover: #0052a3;
+      --primary-foreground: #ffffff;
       --secondary: #f4f4f5;
-      --secondary-foreground: #18181b;
-      --ring: #a1a1aa;
+      --secondary-foreground: #09090b;
+      --ring: rgba(0, 102, 204, 0.2);
       --destructive: #dc2626;
-      --radius: 8px;
+      --radius: 12px;
+      --font-sans: 'Outfit', 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
 
     * {
       box-sizing: border-box;
+      transition: background-color 0.2s ease, border-color 0.2s ease, transform 0.1s ease, box-shadow 0.2s ease;
     }
 
     body {
       margin: 0;
-      font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font: 13px/1.5 var(--font-sans);
       color: var(--foreground);
       background: var(--background);
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* App Header */
+    .app-header {
+      padding: 24px 20px 8px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .app-title {
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+      background: linear-gradient(135deg, #09090b 30%, var(--primary) 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      margin: 0;
+    }
+
+    .app-subtitle {
+      font-size: 12px;
+      color: var(--muted-foreground);
+      margin: 0;
     }
 
     main {
       min-height: 100vh;
-      padding: 18px;
+      padding: 0 16px 24px 16px;
       display: flex;
       flex-direction: column;
-      gap: 14px;
+      gap: 16px;
+      overflow: hidden;
     }
 
     h1, p {
       margin: 0;
-    }
-
-    h1 {
-      font-size: 18px;
-      line-height: 1.25;
-      letter-spacing: 0;
     }
 
     .muted {
@@ -59,14 +87,18 @@
       background: var(--card);
       border: 1px solid var(--border);
       border-radius: var(--radius);
-      padding: 14px;
+      padding: 16px;
       display: grid;
       gap: 12px;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.04);
     }
 
     .card-title {
       font-size: 13px;
       font-weight: 650;
+      color: var(--muted-foreground);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
     }
 
     .file-input {
@@ -78,67 +110,106 @@
       white-space: nowrap;
     }
 
-    .drop-button,
-    .button {
-      height: 36px;
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      background: var(--background);
-      color: var(--foreground);
-      padding: 0 14px;
-      font: inherit;
-      font-weight: 600;
-      cursor: pointer;
-      display: inline-flex;
+    .import-drop-card {
+      height: 250px;
+      border: 2px dashed rgba(0, 0, 0, 0.12);
+      border-radius: var(--radius);
+      padding: 0;
+      background: rgba(0, 0, 0, 0.01);
+      display: flex;
       align-items: center;
       justify-content: center;
-      gap: 8px;
+      cursor: pointer;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .import-drop-card:hover {
+      border-color: var(--primary);
+      background: rgba(0, 102, 204, 0.02);
+      box-shadow: 0 0 20px rgba(0, 102, 204, 0.04);
+    }
+
+    .import-drop-card.dragover {
+      border-color: var(--primary);
+      background: rgba(0, 102, 204, 0.05);
+      box-shadow: 0 0 30px rgba(0, 102, 204, 0.08);
+      transform: scale(1.01);
     }
 
     .drop-button {
       width: 100%;
-      height: 76px;
-      border-style: dashed;
-      background: var(--muted);
+      height: 100%;
+      border: 0;
+      background: transparent;
+      display: flex;
       flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      font-size: 14px;
+      color: var(--foreground);
+      cursor: pointer;
     }
 
-    .button-primary {
-      flex: 1;
+    .drop-button::before {
+      content: "↓";
+      font-size: 26px;
+      font-weight: 500;
+      color: var(--primary);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 50px;
+      height: 50px;
+      border-radius: 50%;
+      background: rgba(0, 102, 204, 0.08);
+      transition: transform 0.2s ease;
+    }
+
+    .import-drop-card:hover .drop-button::before {
+      transform: translateY(2px);
+    }
+
+    .file-state-card {
+      padding: 12px 16px;
+    }
+
+    .compact-row {
+      display: flex;
+      align-items: center;
       width: 100%;
-      border-color: var(--primary);
-      background: var(--primary);
-      color: var(--primary-foreground);
+      gap: 12px;
     }
 
-    .button-secondary {
-      background: var(--secondary);
-      color: var(--secondary-foreground);
+    .file-name {
+      flex: 1;
+      color: var(--foreground);
+      font-weight: 500;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
-    .button:disabled,
-    .button.disabled,
-    .drop-button.disabled,
-    .page-row.disabled {
-      cursor: not-allowed;
-      opacity: 0.55;
-    }
-
-    .page-list {
-      display: none;
-      max-height: 228px;
-      overflow: auto;
-      border: 1px solid var(--border);
+    .icon-button {
+      width: 24px;
+      height: 24px;
+      border: 0;
       border-radius: 6px;
-      background: var(--background);
-      align-content: start;
-      grid-auto-rows: max-content;
+      background: transparent;
+      color: var(--muted-foreground);
+      font: inherit;
+      font-size: 18px;
+      line-height: 1;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
     }
 
-    .page-list.visible {
-      display: grid;
-      align-content: start;
-      grid-auto-rows: max-content;
+    .icon-button:hover {
+      background: var(--secondary);
+      color: var(--foreground);
     }
 
     .page-card {
@@ -147,46 +218,51 @@
       gap: 0;
     }
 
-    .page-card .page-list {
-      max-height: 326px;
-      border: 0;
-      border-radius: 0;
-    }
-
-    .page-header,
-    .compact-row {
-      min-height: 64px;
-      padding: 0 16px;
-      display: grid;
-      grid-template-columns: auto 1fr auto;
-      gap: 12px;
-      align-items: center;
-    }
-
     .page-header {
       min-height: 48px;
+      padding: 0 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
       border-bottom: 1px solid var(--border);
+      background: rgba(0, 0, 0, 0.02);
+    }
+
+    .page-list {
+      display: grid;
+      max-height: 228px;
+      overflow: auto;
+      background: var(--muted);
+      align-content: start;
+      grid-auto-rows: max-content;
     }
 
     .page-row {
       display: grid;
       grid-template-columns: 18px 1fr auto;
-      gap: 8px;
+      gap: 10px;
       align-items: center;
       min-height: 40px;
-      padding: 8px 10px;
+      padding: 8px 16px;
       border-bottom: 1px solid var(--border);
+      cursor: pointer;
+    }
+
+    .page-row:hover:not(.disabled) {
+      background: rgba(0, 0, 0, 0.03);
     }
 
     .page-row:last-child {
       border-bottom: 0;
     }
 
-    .page-row input {
-      width: 14px;
-      height: 14px;
+    input[type="checkbox"] {
+      width: 16px;
+      height: 16px;
       margin: 0;
       accent-color: var(--primary);
+      cursor: pointer;
+      border-radius: 4px;
     }
 
     .checkbox-label {
@@ -194,40 +270,27 @@
       align-items: center;
       gap: 8px;
       font-weight: 600;
-    }
-
-    .checkbox-label input {
-      width: 14px;
-      height: 14px;
-      margin: 0;
-      accent-color: #0a84ff;
+      cursor: pointer;
     }
 
     .page-name {
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+      font-weight: 500;
     }
 
     .badge {
       display: inline-flex;
       align-items: center;
-      height: 20px;
+      height: 22px;
       border: 1px solid var(--border);
       border-radius: 999px;
-      padding: 0 8px;
+      padding: 0 10px;
       color: var(--muted-foreground);
       font-size: 11px;
+      background: rgba(0, 0, 0, 0.03);
       white-space: nowrap;
-    }
-
-    .toolbar {
-      display: none;
-      gap: 8px;
-    }
-
-    .toolbar.visible {
-      display: flex;
     }
 
     .progress-track {
@@ -235,39 +298,30 @@
       height: 8px;
       overflow: hidden;
       border-radius: 999px;
-      background: var(--secondary);
+      background: rgba(0, 0, 0, 0.06);
     }
 
     .progress-bar {
       width: 0%;
       height: 100%;
-      background: var(--primary);
-      transition: width 160ms ease;
+      background: linear-gradient(90deg, var(--primary) 0%, #3b82f6 100%);
+      border-radius: 999px;
+      transition: width 200ms cubic-bezier(0.4, 0, 0.2, 1);
     }
 
     .status-line {
       min-height: 20px;
       color: var(--foreground);
-      overflow-wrap: anywhere;
+      font-weight: 600;
+      font-size: 14px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     .summary {
       color: var(--muted-foreground);
       font-size: 12px;
-    }
-
-    .actions {
-      display: flex;
-      gap: 8px;
-      margin-top: auto;
-    }
-
-    .rule-row {
-      min-height: 36px;
-      display: grid;
-      grid-template-columns: auto 1fr auto;
-      gap: 12px;
-      align-items: center;
     }
 
     .file-name {
@@ -301,27 +355,11 @@
       display: none !important;
     }
 
-    /* Figma node 30:315 visual spec */
-    :root {
-      --background: #ffffff;
-      --foreground: #1a191a;
-      --muted: #efefef;
-      --muted-foreground: #737879;
-      --card: #ffffff;
-      --border: #dfe2e5;
-      --input: #dfe2e5;
-      --primary: #0186ff;
-      --primary-foreground: #ffffff;
-      --secondary: #efefef;
-      --secondary-foreground: #1a191a;
-      --divider: rgba(0, 0, 0, 0.05);
-      --radius: 8px;
-    }
-
     body {
-      font: 400 13px/20px "Sarasa UI SC", "Sarasa_UI_SC", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font: 13px/1.5 var(--font-sans);
       color: var(--foreground);
       background: var(--background);
+      -webkit-font-smoothing: antialiased;
     }
 
     main {
@@ -492,6 +530,9 @@
       line-height: 20px;
       font-weight: 400;
       color: var(--foreground);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .page-row input:checked + .page-name {
@@ -561,6 +602,9 @@
       font-size: 13px;
       line-height: 16px;
       color: var(--muted-foreground);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .icon-button {
@@ -572,8 +616,7 @@
     }
 
     .status-card {
-      height: 96px;
-      flex: 0 0 96px;
+      min-height: 96px;
       margin-top: 32px;
       padding: 16px;
       gap: 8px;
@@ -596,6 +639,9 @@
       line-height: 16px;
       font-weight: 600;
       color: var(--foreground);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     .summary {
@@ -635,6 +681,10 @@
   </style>
 </head>
 <body>
+  <header class="app-header">
+    <h1 class="app-title">MasterGo to Figma</h1>
+    <p class="app-subtitle muted">导入并完美还原 MasterGo 设计资产包</p>
+  </header>
   <main>
     <section class="card file-state-card hidden" id="fileState">
       <div class="compact-row">
@@ -649,7 +699,7 @@
         <span id="fileTitle">选择 zip 文件</span>
         <span class="muted" id="fileHint">支持 MasterGo2Figma 导出的 JSON zip</span>
       </label>
-      <input class="file-input" id="zipInput" type="file" accept=".zip,application/zip">
+      <input class="file-input" id="zipInput" type="file" multiple accept=".zip,application/zip">
     </section>
 
     <section class="card page-card hidden" id="pageCard">
@@ -744,42 +794,158 @@
       return `${minutes}m ${rest}s`;
     }
 
+    // Drag and drop event listeners
+    fileDropCard.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      if (isBusy) return;
+      fileDropCard.classList.add("dragover");
+    });
+
+    fileDropCard.addEventListener("dragleave", () => {
+      fileDropCard.classList.remove("dragover");
+    });
+
+    fileDropCard.addEventListener("drop", async (e) => {
+      e.preventDefault();
+      fileDropCard.classList.remove("dragover");
+      if (isBusy) return;
+      const files = e.dataTransfer && e.dataTransfer.files;
+      if (files && files.length > 0) {
+        await handleZipFiles(files);
+      }
+    });
+
     zipInput.onchange = async () => {
-      const file = zipInput.files && zipInput.files[0];
-      if (!file) return;
+      if (zipInput.files && zipInput.files.length > 0) {
+        await handleZipFiles(zipInput.files);
+      }
+    };
+
+    async function handleZipFiles(files) {
+      if (isBusy) return;
 
       try {
         setBusy(true);
-        setProgress(0, 0, "正在解析 zip...");
-        const buffer = await file.arrayBuffer();
-        entries = await readZipEntries(buffer);
-        const manifestPath = findManifestPath(entries);
-        if (!manifestPath) throw new Error("zip 中没有 manifest.json");
-        packageRoot = manifestPath.slice(0, manifestPath.length - "manifest.json".length);
+        
+        // Initialize merged manifest
+        const mergedManifest = {
+          schema: "mastergo2figma.package.v2",
+          version: 2,
+          source: "mastergo",
+          exportedAt: new Date().toISOString(),
+          scope: "composite-pages",
+          pages: [],
+          assets: {},
+          stats: {
+            pageCount: 0,
+            layerCount: 0,
+            imageAssetCount: 0,
+            missingImageAssetCount: 0
+          }
+        };
 
-        manifest = JSON.parse(decodeUtf8(getPackageEntry("manifest.json")));
-        if (manifest.schema !== "mastergo2figma.package.v2" || manifest.version !== 2) {
-          throw new Error("当前只支持 v2 导出包，请用新版 SendToFigma 重新导出。");
+        // Reset global entries
+        entries = {};
+        const fileNames = [];
+        
+        for (let i = 0; i < files.length; i++) {
+          const file = files[i];
+          fileNames.push(file.name);
+          
+          setProgress(0, 0, `正在解析 (${i + 1}/${files.length}): ${file.name}...`);
+          
+          const buffer = await file.arrayBuffer();
+          const zipEntries = await readZipEntries(buffer);
+          
+          const manifestPath = findManifestPath(zipEntries);
+          if (!manifestPath) {
+            throw new Error(`文件 "${file.name}" 中没有 manifest.json`);
+          }
+          
+          const zipPackageRoot = manifestPath.slice(0, manifestPath.length - "manifest.json".length);
+          
+          // Get manifest content
+          const manifestBytes = zipEntries[manifestPath];
+          if (!manifestBytes) {
+            throw new Error(`无法读取 "${file.name}" 的 manifest.json`);
+          }
+          
+          const zipManifest = JSON.parse(decodeUtf8(manifestBytes));
+          if (zipManifest.schema !== "mastergo2figma.package.v2" || zipManifest.version !== 2) {
+            throw new Error(`文件 "${file.name}" 不是 v2 导出包，请使用新版 SendToFigma 重新导出。`);
+          }
+          if (!zipManifest.pages || !Array.isArray(zipManifest.pages)) {
+            throw new Error(`文件 "${file.name}" 的 manifest.json 格式不正确`);
+          }
+          
+          // Copy entries into global entries with prefix "zip_${i}/"
+          for (const path in zipEntries) {
+            entries[`zip_${i}/${path}`] = zipEntries[path];
+          }
+          
+          // Merge pages
+          for (const page of zipManifest.pages) {
+            const mergedPage = {
+              ...page,
+              id: `zip_${i}_${page.id}`,
+              pageFile: `zip_${i}/${zipPackageRoot}${page.pageFile}`,
+              zipIndex: i,
+              zipPackageRoot: zipPackageRoot
+            };
+            mergedManifest.pages.push(mergedPage);
+          }
+          
+          // Merge assets
+          if (zipManifest.assets && typeof zipManifest.assets === "object") {
+            for (const key in zipManifest.assets) {
+              const asset = zipManifest.assets[key];
+              if (asset) {
+                const mergedKey = `zip_${i}_${key}`;
+                mergedManifest.assets[mergedKey] = {
+                  ...asset,
+                  key: mergedKey,
+                  path: asset.path ? `zip_${i}/${zipPackageRoot}${asset.path}` : ""
+                };
+              }
+            }
+          }
+          
+          // Accumulate stats
+          mergedManifest.stats.pageCount += zipManifest.stats?.pageCount || zipManifest.pages.length || 0;
+          mergedManifest.stats.layerCount += zipManifest.stats?.layerCount || 0;
+          mergedManifest.stats.imageAssetCount += zipManifest.stats?.imageAssetCount || 0;
+          mergedManifest.stats.missingImageAssetCount += zipManifest.stats?.missingImageAssetCount || 0;
         }
-        if (!manifest.pages || !Array.isArray(manifest.pages)) throw new Error("manifest.json 格式不正确");
-
-        fileNameState.textContent = file.name;
-        fileNameState.title = file.name;
-        const imageAssetCount = manifest.stats?.imageAssetCount || 0;
-        const missingImageAssetCount = manifest.stats?.missingImageAssetCount || 0;
-        fileHint.textContent = `${manifest.pages.length} 个页面，${manifest.stats?.layerCount || 0} 个图层，${imageAssetCount} 个图片资源${missingImageAssetCount ? `，${missingImageAssetCount} 个图片缺失` : ""}`;
+        
+        manifest = mergedManifest;
+        
+        // Show file state
+        const fileCount = files.length;
+        if (fileCount === 1) {
+          fileNameState.textContent = fileNames[0];
+          fileNameState.title = fileNames[0];
+        } else {
+          fileNameState.textContent = `已导入 ${fileCount} 个 zip 文件`;
+          fileNameState.title = fileNames.join("\n");
+        }
+        
+        const imageAssetCount = manifest.stats.imageAssetCount || 0;
+        const missingImageAssetCount = manifest.stats.missingImageAssetCount || 0;
+        fileHint.textContent = `${manifest.pages.length} 个页面，${manifest.stats.layerCount || 0} 个图层，${imageAssetCount} 个图片资源${missingImageAssetCount ? `，${missingImageAssetCount} 个图片缺失` : ""}`;
+        
         fileDropCard.classList.add("hidden");
         fileState.classList.remove("hidden");
         renderPages(manifest.pages);
         bar.style.width = "0%";
         setStatus("zip 已读取", "请选择需要还原的页面。", false);
+        
       } catch (error) {
         resetZipState();
         setStatus(error.message || "zip 解析失败", "请确认文件来自 SendToFigma 导出。", true);
+      } finally {
+        setBusy(false);
       }
-
-      setBusy(false);
-    };
+    }
 
     deleteZip.onclick = () => {
       if (isBusy) return;
@@ -886,6 +1052,42 @@
       return [...pageList.querySelectorAll("input:checked")].map(input => input.value);
     }
 
+    function prefixImageRefs(obj, prefix) {
+      if (!obj || typeof obj !== "object") return;
+      if (Array.isArray(obj)) {
+        for (let i = 0; i < obj.length; i++) {
+          prefixImageRefs(obj[i], prefix);
+        }
+      } else {
+        if (obj.type === "IMAGE" && typeof obj.imageRef === "string") {
+          obj.imageRef = prefix + obj.imageRef;
+        }
+        for (const key in obj) {
+          if (Object.prototype.hasOwnProperty.call(obj, key)) {
+            prefixImageRefs(obj[key], prefix);
+          }
+        }
+      }
+    }
+
+    function prefixConnectorEndpointNodeIds(obj, prefix) {
+      if (!obj || typeof obj !== "object") return;
+      if (Array.isArray(obj)) {
+        for (let i = 0; i < obj.length; i++) {
+          prefixConnectorEndpointNodeIds(obj[i], prefix);
+        }
+      } else {
+        if (typeof obj.endpointNodeId === "string") {
+          obj.endpointNodeId = prefix + obj.endpointNodeId;
+        }
+        for (const key in obj) {
+          if (Object.prototype.hasOwnProperty.call(obj, key)) {
+            prefixConnectorEndpointNodeIds(obj[key], prefix);
+          }
+        }
+      }
+    }
+
     function buildImportPayload(sourceManifest, selectedPages) {
       const layers = {};
       const pageIndexes = [];
@@ -899,29 +1101,79 @@
         }
         if (!Array.isArray(pageIndex.layerChunks)) throw new Error(`页面缺少图层分块索引：${page.pageFile}`);
 
+        const zipIndex = page.zipIndex;
+        const zipPackageRoot = page.zipPackageRoot;
+        const prefix = `zip_${zipIndex}_`;
+
+        pageIndex.id = `${prefix}${pageIndex.id}`;
+        if (Array.isArray(pageIndex.rootNodeIds)) {
+          pageIndex.rootNodeIds = pageIndex.rootNodeIds.map(rid => `${prefix}${rid}`);
+        }
+
         for (const chunkPath of pageIndex.layerChunks) {
-          const bytes = getPackageEntry(chunkPath);
-          if (!bytes) throw new Error(`缺少图层分块文件：${chunkPath}`);
+          const fullChunkPath = `zip_${zipIndex}/${zipPackageRoot}${chunkPath}`;
+          const bytes = getPackageEntry(fullChunkPath);
+          if (!bytes) throw new Error(`缺少图层分块文件：${fullChunkPath}`);
           const chunk = JSON.parse(decodeUtf8(bytes));
+          
           if (chunk.schema === "mastergo2figma.layers.v2" && Array.isArray(chunk.records)) {
             for (const record of chunk.records) {
-              if (record && record.id) layers[record.id] = record;
+              if (record && record.id) {
+                record.id = `${prefix}${record.id}`;
+                if (record.parentId) record.parentId = `${prefix}${record.parentId}`;
+                if (Array.isArray(record.childIds)) {
+                  record.childIds = record.childIds.map(cid => `${prefix}${cid}`);
+                }
+                
+                // Prefix imageRefs and connector endpoints inside props
+                if (record.props) {
+                  prefixImageRefs(record.props, prefix);
+                  prefixConnectorEndpointNodeIds(record.props, prefix);
+                }
+                
+                layers[record.id] = record;
+              }
             }
             continue;
           }
 
           if (chunk && chunk.id && chunk.props) {
+            chunk.id = `${prefix}${chunk.id}`;
+            if (chunk.parentId) chunk.parentId = `${prefix}${chunk.parentId}`;
+            if (Array.isArray(chunk.childIds)) {
+              chunk.childIds = chunk.childIds.map(cid => `${prefix}${cid}`);
+            }
+            if (chunk.props) {
+              prefixImageRefs(chunk.props, prefix);
+              prefixConnectorEndpointNodeIds(chunk.props, prefix);
+            }
             layers[chunk.id] = chunk;
             continue;
           }
 
           if (chunk && chunk.record && chunk.record.id) {
-            layers[chunk.record.id] = chunk.record;
+            const record = chunk.record;
+            record.id = `${prefix}${record.id}`;
+            if (record.parentId) record.parentId = `${prefix}${record.parentId}`;
+            if (Array.isArray(record.childIds)) {
+              record.childIds = record.childIds.map(cid => `${prefix}${cid}`);
+            }
+            if (record.props) {
+              prefixImageRefs(record.props, prefix);
+              prefixConnectorEndpointNodeIds(record.props, prefix);
+            }
+            layers[record.id] = record;
             continue;
           }
 
           throw new Error(`图层分块格式不正确：${chunkPath}`);
         }
+        
+        // Rewrite chunk paths in pageIndex so Figma side can trace them if needed
+        if (Array.isArray(pageIndex.layerChunks)) {
+          pageIndex.layerChunks = pageIndex.layerChunks.map(chunkPath => `zip_${zipIndex}/${zipPackageRoot}${chunkPath}`);
+        }
+        
         pageIndexes.push(pageIndex);
       }
 
@@ -948,7 +1200,7 @@
     }
 
     function getPackageEntry(path) {
-      return entries[`${packageRoot}${path}`] || entries[path] || null;
+      return entries[path] || entries[`${packageRoot}${path}`] || null;
     }
 
     window.onmessage = (event) => {
@@ -987,8 +1239,9 @@
       }
     };
 
-    send({ type: "ui-ready" });
-    setTimeout(() => send({ type: "ui-ready" }), 100);
+    window.addEventListener("load", () => {
+      send({ type: "ui-ready" });
+    });
 
     function escapeHtml(value) {
       return String(value)

@@ -88,7 +88,7 @@ let layerRulesLoadPromise = null;
 let activeImageAssetContext = null;
 let exportTransferAckResolvers = {};
 let exportFileAckResolvers = {};
-let exportDebugState = null;
+let exportDebugState = { phase: "idle" };
 let activeExportStats = null;
 let activeExportProgress = null;
 try {
@@ -184,8 +184,6 @@ function showPluginUI() {
     });
     openPluginUI();
     startLayerRulesLoad();
-    schedulePostInitUI(50);
-    schedulePostInitUI(300);
 }
 function openPluginUI() {
     try {
@@ -204,72 +202,14 @@ function unwrapUIMessage(rawMessage) {
 function testMainRelayFetch(rawRelayUrl) {
     return __awaiter(this, void 0, void 0, function* () {
         const relayUrl = normalizeRelayUrl(rawRelayUrl);
-        const startedAt = Date.now();
-        const fetchAvailable = typeof fetch === "function";
-        const result = {
+        postUI({
             type: "main-relay-test-result",
             ok: false,
             relayUrl,
-            fetchAvailable,
-            elapsedMs: 0
-        };
-        logDiagnostic("log", "[MasterGo2Figma] Main relay fetch test start", {
-            relayUrl,
-            fetchAvailable
+            fetchAvailable: false,
+            elapsedMs: 0,
+            error: "MasterGo 插件主线程沙盒中没有内置 fetch API，请通过 UI 线程进行请求。"
         });
-        if (!fetchAvailable) {
-            result.error = "MasterGo 插件主线程没有 fetch API";
-            postUI(result);
-            return;
-        }
-        let timeoutId = null;
-        try {
-            const controller = typeof AbortController === "function" ? new AbortController() : null;
-            timeoutId = setTimeout(() => {
-                try {
-                    if (controller)
-                        controller.abort();
-                }
-                catch (_) {
-                    // Ignore abort failures in constrained plugin runtimes.
-                }
-            }, 5000);
-            const response = yield fetch(`${relayUrl}/health`, {
-                method: "GET",
-                signal: controller ? controller.signal : undefined
-            });
-            const text = yield response.text();
-            result.elapsedMs = Date.now() - startedAt;
-            result.status = response.status;
-            result.statusText = response.statusText || "";
-            result.ok = response.ok;
-            result.bodyPreview = text.slice(0, 300);
-            try {
-                result.payload = JSON.parse(text);
-                if (result.payload && result.payload.ok === false) {
-                    result.ok = false;
-                    result.error = result.payload.error || "本地中继服务返回失败";
-                }
-            }
-            catch (_) {
-                result.payload = null;
-            }
-            if (!result.ok && !result.error) {
-                result.error = `HTTP ${response.status} ${response.statusText || ""}`.trim();
-            }
-        }
-        catch (error) {
-            result.elapsedMs = Date.now() - startedAt;
-            const described = describeError(error);
-            result.error = described && described.message ? described.message : safeStringifyForLog(described);
-            result.errorDetail = described;
-        }
-        finally {
-            if (timeoutId !== null)
-                clearTimeout(timeoutId);
-        }
-        logDiagnostic(result.ok ? "log" : "warn", "[MasterGo2Figma] Main relay fetch test result", result);
-        postUI(result);
     });
 }
 function normalizeRelayUrl(value) {
@@ -310,11 +250,6 @@ function safePostInitUI() {
             }
         }
     });
-}
-function schedulePostInitUI(delay) {
-    setTimeout(() => {
-        safePostInitUI();
-    }, delay);
 }
 function startLayerRulesLoad() {
     if (!layerRulesLoadPromise)
@@ -674,8 +609,20 @@ function maybeReportExportProgress(current_1, total_1, label_1) {
     });
 }
 function setExportDebugState(nextState) {
-    exportDebugState = Object.assign(Object.assign({}, nextState), { processedNodes,
-        totalNodes });
+    exportDebugState.phase = nextState.phase;
+    exportDebugState.page = nextState.page;
+    exportDebugState.node = nextState.node;
+    exportDebugState.nodeComplexity = nextState.nodeComplexity;
+    exportDebugState.parentId = nextState.parentId;
+    exportDebugState.nodeIndex = nextState.nodeIndex;
+    exportDebugState.file = nextState.file;
+    exportDebugState.transferId = nextState.transferId;
+    exportDebugState.fileIndex = nextState.fileIndex;
+    exportDebugState.chunkIndex = nextState.chunkIndex;
+    exportDebugState.fileSize = nextState.fileSize;
+    exportDebugState.streamedBytes = nextState.streamedBytes;
+    exportDebugState.processedNodes = processedNodes;
+    exportDebugState.totalNodes = totalNodes;
 }
 function resetExportStats(options, pageCount, rootCount) {
     logDiagnostic("log", "[MasterGo2Figma] Export session stats reset", {
@@ -811,28 +758,17 @@ function describeError(error) {
         return { kind: "null" };
     if (error === undefined)
         return { kind: "undefined" };
-    // Safety check for MasterGo Wasm RuntimeError which makes the engine unstable
     try {
         if (error && error.name === "RuntimeError") {
             return {
                 kind: "RuntimeError",
-                message: "memory access out of bounds (Wasm OOM)",
-                stack: "[Stack Hidden for safety]"
+                message: "memory access out of bounds (Wasm OOM)"
             };
         }
     }
-    catch (e) {
-        return { kind: "fatal", message: "Critical Wasm error detected" };
-    }
-    // Capture standard error properties safely
-    const name = softRead(() => error.name, "");
-    const message = softRead(() => error.message, "");
-    const stack = softRead(() => error.stack, "");
-    const code = softRead(() => error.code, "");
-    // Also check if it might be a scene node or host-bound object
+    catch (_) { }
     const id = softRead(() => error.id, "");
     const type = softRead(() => error.type, "");
-    // If it has id and type, it might be a SceneNode passed as an error!
     if (id || type) {
         return {
             kind: "HostObject",
@@ -841,25 +777,22 @@ function describeError(error) {
             name: softRead(() => error.name, "Untitled")
         };
     }
+    const name = softRead(() => error.name, "");
+    const message = softRead(() => error.message, "");
     if (error instanceof Error || (name && message)) {
         return {
             kind: "Error",
             name: name || "Error",
             message: message || "No message",
-            stack: stack ? "[Stack Hidden]" : undefined,
-            code: code || undefined
+            code: softRead(() => error.code, undefined)
         };
     }
     if (typeof error === "object") {
         const safeObj = { kind: "object" };
         try {
-            const keys = Object.keys(error);
-            for (const key of keys) {
+            for (const key of Object.keys(error)) {
                 const val = error[key];
-                if (typeof val === "string" || typeof val === "number" || typeof val === "boolean") {
-                    safeObj[key] = val;
-                }
-                else if (val === null) {
+                if (val === null) {
                     safeObj[key] = null;
                 }
                 else if (Array.isArray(val)) {
@@ -867,6 +800,9 @@ function describeError(error) {
                 }
                 else if (typeof val === "object") {
                     safeObj[key] = `[Object]`;
+                }
+                else if (typeof val !== "function") {
+                    safeObj[key] = val;
                 }
             }
         }
@@ -887,38 +823,27 @@ function safeStringifyForLog(value) {
         return "undefined";
     if (typeof value !== "object")
         return String(value);
-    // If it's a native Node, do NOT use JSON.stringify. Plain diagnostic
-    // payloads may also contain id/type fields, so do not treat those as host
-    // nodes unless the object does not look like a normal JS object.
     const nodeId = softRead(() => value.id, "");
     const nodeType = softRead(() => value.type, "");
     if ((nodeId || nodeType) && !isPlainObjectForLog(value)) {
-        const nodeName = softRead(() => value.name, "Untitled");
-        return `[HostNode: ${nodeName} (${nodeType}, id=${nodeId})]`;
+        return `[HostNode: ${softRead(() => value.name, "Untitled")} (${nodeType}, id=${nodeId})]`;
     }
     try {
-        const seen = [];
+        const seen = new WeakSet();
         return JSON.stringify(value, (key, nextValue) => {
             if (typeof nextValue === "object" && nextValue !== null) {
-                if (seen.indexOf(nextValue) !== -1)
+                if (seen.has(nextValue))
                     return "[Circular]";
-                seen.push(nextValue);
-                // If nextValue has node properties and is not a plain
-                // diagnostic object, don't recurse into host proxies.
+                seen.add(nextValue);
                 const childId = softRead(() => nextValue.id, "");
                 const childType = softRead(() => nextValue.type, "");
                 if ((childId || childType) && !isPlainObjectForLog(nextValue)) {
                     return `[HostNode: ${softRead(() => nextValue.name, "Untitled")} (${childType}, id=${childId})]`;
                 }
-                // If it's an error-like object, serialize it safely without nested stringify
                 const nextName = softRead(() => nextValue.name, "");
                 const nextMsg = softRead(() => nextValue.message, "");
                 if (nextName || nextMsg) {
-                    return {
-                        name: nextName,
-                        message: nextMsg,
-                        stack: "[Stack Hidden]"
-                    };
+                    return { name: nextName, message: nextMsg };
                 }
             }
             return nextValue;
@@ -928,13 +853,12 @@ function safeStringifyForLog(value) {
         try {
             const name = softRead(() => value.name, "");
             const msg = softRead(() => value.message, "");
-            if (name || msg) {
+            if (name || msg)
                 return `[ErrorObject: ${name} - ${msg}]`;
-            }
-            return `[Object serialization failed: ${String(value)}]`;
+            return `[Object: ${String(value)}]`;
         }
         catch (__) {
-            return "[Object serialization failed completely]";
+            return "[Object serialization failed]";
         }
     }
 }
@@ -1230,7 +1154,7 @@ function streamJsonExportPackage(options) {
                 throw new Error(options.scope === "selected" ? "请先选择要导出的图层" : "没有可导出的图层");
             }
             resetExportStats(options, targets.length, rootCount);
-            if (shouldSplitExportPackages(targets)) {
+            if (shouldSplitExportPackages(options, targets)) {
                 const aggregateManifest = yield streamSplitJsonExportPackages(options, targets);
                 logExportPerformanceSummary("split-complete", aggregateManifest);
                 return aggregateManifest;
@@ -1312,8 +1236,10 @@ function createBaseExportManifest(options, pageCount) {
         }
     };
 }
-function shouldSplitExportPackages(targets) {
+function shouldSplitExportPackages(options, targets) {
     if (!ENABLE_SPLIT_EXPORT)
+        return false;
+    if (options.transferMode === "direct-zip")
         return false;
     if (targets.length > 1)
         return true;

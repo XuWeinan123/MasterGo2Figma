@@ -227,8 +227,6 @@ function showImportUI() {
     }
     importInProgress = false;
   };
-  setTimeout(() => postInitUI(), 50);
-  setTimeout(() => postInitUI(), 300);
 }
 
 async function postInitUI() {
@@ -700,36 +698,33 @@ function createSvgFallbackNode(data: any) {
 }
 
 function createSvgFallbackProps(data: any) {
-  const props = shallowCloneObject(data);
-  props.svgFallback = true;
-  props.receiveCreateOverride = "SVG";
-  return props;
+  return {
+    ...data,
+    svgFallback: true,
+    receiveCreateOverride: "SVG"
+  };
 }
 
 function createBooleanFrameFallbackProps(data: any) {
-  const props = shallowCloneObject(data);
-  props.type = "FRAME";
-  props.restoreType = "FRAME";
-  props.receiveCreateOverride = "FRAME";
-  props.booleanFallback = "frameContainer";
-  props.clipsContent = false;
-  props.geometry = clearGeometryPaint(props.geometry);
-  return props;
-}
-
-function shallowCloneObject(value: any) {
-  const clone: any = {};
-  for (const key in value) clone[key] = value[key];
-  return clone;
+  return {
+    ...data,
+    type: "FRAME",
+    restoreType: "FRAME",
+    receiveCreateOverride: "FRAME",
+    booleanFallback: "frameContainer",
+    clipsContent: false,
+    geometry: clearGeometryPaint(data.geometry)
+  };
 }
 
 function clearGeometryPaint(geometry: any) {
   if (!geometry || typeof geometry !== "object") return geometry;
-  const copy = shallowCloneObject(geometry);
-  copy.fills = [];
-  copy.strokes = [];
-  copy.strokeWeight = 0;
-  return copy;
+  return {
+    ...geometry,
+    fills: [],
+    strokes: [],
+    strokeWeight: 0
+  };
 }
 
 function hasUsableVectorNetwork(vectorNetwork: any) {
@@ -742,7 +737,7 @@ function hasUsableVectorNetwork(vectorNetwork: any) {
 function prepareConnectorPolylineFallbackProps(data: any, parent: PageNode | SceneNode) {
   if (!isConnectorRestoreData(data)) return data;
 
-  const props = shallowCloneObject(data);
+  const props = { ...data };
   props.connectorFallbackPolyline = true;
   if (!hasUsableVectorNetwork(props.vectorNetwork)) {
     props.vectorNetwork = createConnectorVectorNetworkFromData(props, parent);

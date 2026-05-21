@@ -3,6 +3,11 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MasterGo to Figma Exporter</title>
+  <meta name="description" content="Export MasterGo layers and images to Figma high-fidelity JSON files.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
   <style>
     :root {
       --background: #ffffff;
@@ -12,42 +17,64 @@
       --card: #ffffff;
       --border: #e4e4e7;
       --input: #e4e4e7;
-      --primary: #18181b;
-      --primary-foreground: #fafafa;
+      --primary: #0066cc;
+      --primary-hover: #0052a3;
+      --primary-foreground: #ffffff;
       --secondary: #f4f4f5;
-      --secondary-foreground: #18181b;
-      --ring: #a1a1aa;
+      --secondary-foreground: #09090b;
+      --ring: rgba(0, 102, 204, 0.2);
       --destructive: #dc2626;
-      --radius: 8px;
+      --radius: 12px;
+      --font-sans: 'Outfit', 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
 
     * {
       box-sizing: border-box;
+      transition: background-color 0.2s ease, border-color 0.2s ease, transform 0.1s ease, box-shadow 0.2s ease;
     }
 
     body {
       margin: 0;
-      font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font: 13px/1.5 var(--font-sans);
       color: var(--foreground);
       background: var(--background);
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* App Header */
+    .app-header {
+      padding: 24px 20px 8px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .app-title {
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+      background: linear-gradient(135deg, #09090b 30%, var(--primary) 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      margin: 0;
+    }
+
+    .app-subtitle {
+      font-size: 12px;
+      color: var(--muted-foreground);
+      margin: 0;
     }
 
     main {
       min-height: 100vh;
-      padding: 18px;
+      padding: 0 16px 24px 16px;
       display: flex;
       flex-direction: column;
-      gap: 14px;
+      gap: 16px;
     }
 
     h1, p {
       margin: 0;
-    }
-
-    h1 {
-      font-size: 18px;
-      line-height: 1.25;
-      letter-spacing: 0;
     }
 
     .muted {
@@ -59,31 +86,36 @@
       background: var(--card);
       border: 1px solid var(--border);
       border-radius: var(--radius);
-      padding: 14px;
+      padding: 16px;
       display: grid;
       gap: 12px;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.04);
     }
 
     .card-title {
       font-size: 13px;
       font-weight: 650;
+      color: var(--muted-foreground);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
     }
 
     .select-trigger {
       width: 100%;
-      height: 36px;
-      border: 1px solid var(--input);
-      border-radius: 6px;
-      background: var(--background);
+      height: 38px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--input);
       color: var(--foreground);
-      padding: 0 10px;
+      padding: 0 12px;
       font: inherit;
       outline: none;
+      cursor: pointer;
     }
 
     .select-trigger:focus {
-      border-color: var(--ring);
-      box-shadow: 0 0 0 2px rgba(161, 161, 170, 0.25);
+      border-color: var(--primary);
+      box-shadow: 0 0 0 3px rgba(0, 102, 204, 0.15);
     }
 
     .file-input {
@@ -100,8 +132,8 @@
       max-height: 326px;
       overflow: auto;
       border: 1px solid var(--border);
-      border-radius: 6px;
-      background: var(--background);
+      border-radius: 8px;
+      background: var(--muted);
       align-content: start;
       grid-auto-rows: max-content;
     }
@@ -124,27 +156,36 @@
       grid-template-columns: 1fr auto;
       align-items: center;
       border-bottom: 1px solid var(--border);
+      background: rgba(0, 0, 0, 0.02);
     }
 
     .page-row {
       display: grid;
       grid-template-columns: 18px 1fr auto;
-      gap: 8px;
+      gap: 10px;
       align-items: center;
-      min-height: 38px;
-      padding: 8px 10px;
+      min-height: 40px;
+      padding: 8px 16px;
       border-bottom: 1px solid var(--border);
+      cursor: pointer;
+    }
+
+    .page-row:hover:not(.disabled) {
+      background: rgba(0, 0, 0, 0.03);
     }
 
     .page-row:last-child {
       border-bottom: 0;
     }
 
-    .page-row input {
-      width: 14px;
-      height: 14px;
+    .page-row input[type="checkbox"],
+    .checkbox-label input[type="checkbox"] {
+      width: 16px;
+      height: 16px;
       margin: 0;
       accent-color: var(--primary);
+      cursor: pointer;
+      border-radius: 4px;
     }
 
     .checkbox-label {
@@ -152,30 +193,26 @@
       align-items: center;
       gap: 8px;
       font-weight: 600;
-    }
-
-    .checkbox-label input {
-      width: 14px;
-      height: 14px;
-      margin: 0;
-      accent-color: #0a84ff;
+      cursor: pointer;
     }
 
     .page-name {
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+      font-weight: 500;
     }
 
     .badge {
       display: inline-flex;
       align-items: center;
-      height: 20px;
+      height: 22px;
       border: 1px solid var(--border);
       border-radius: 999px;
-      padding: 0 8px;
+      padding: 0 10px;
       color: var(--muted-foreground);
       font-size: 11px;
+      background: rgba(0, 0, 0, 0.03);
       white-space: nowrap;
     }
 
@@ -184,25 +221,29 @@
       height: 8px;
       overflow: hidden;
       border-radius: 999px;
-      background: var(--secondary);
+      background: rgba(0, 0, 0, 0.06);
     }
 
     .progress-bar {
       width: 0%;
       height: 100%;
-      background: var(--primary);
-      transition: width 160ms ease;
+      background: linear-gradient(90deg, var(--primary) 0%, #3b82f6 100%);
+      border-radius: 999px;
+      transition: width 200ms cubic-bezier(0.4, 0, 0.2, 1);
     }
 
     .status-line {
       min-height: 20px;
       color: var(--foreground);
+      font-weight: 600;
+      font-size: 14px;
       overflow-wrap: anywhere;
     }
 
     .summary {
       color: var(--muted-foreground);
       font-size: 12px;
+      line-height: 1.5;
     }
 
     .actions {
@@ -220,21 +261,24 @@
     }
 
     .mode-card {
-      gap: 10px;
+      gap: 12px;
     }
 
     .segmented {
       display: grid;
       grid-template-columns: 1fr 1fr;
-      gap: 6px;
+      gap: 8px;
+      background: rgba(0, 0, 0, 0.04);
+      padding: 4px;
+      border-radius: 8px;
     }
 
     .segment {
       min-width: 0;
       min-height: 32px;
-      border: 1px solid var(--border);
-      border-radius: 4px;
-      background: var(--background);
+      border: 0;
+      border-radius: 6px;
+      background: transparent;
       display: flex;
       align-items: center;
       justify-content: center;
@@ -243,6 +287,7 @@
       font-weight: 600;
       cursor: pointer;
       user-select: none;
+      color: var(--muted-foreground);
     }
 
     .segment input {
@@ -252,14 +297,15 @@
     }
 
     .segment:has(input:checked) {
-      border-color: var(--primary);
-      background: var(--primary);
-      color: var(--primary-foreground);
+      background: var(--card);
+      color: var(--primary);
+      box-shadow: 0 2px 8px rgba(0,0,0,0.06);
     }
 
     .relay-row {
       display: grid;
-      gap: 6px;
+      gap: 8px;
+      margin-top: 4px;
     }
 
     .relay-test-row {
@@ -275,19 +321,19 @@
 
     .text-input {
       width: 100%;
-      height: 32px;
-      border: 1px solid var(--input);
-      border-radius: 4px;
-      background: var(--background);
+      height: 34px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--input);
       color: var(--foreground);
-      padding: 0 10px;
+      padding: 0 12px;
       font: inherit;
       outline: none;
     }
 
     .text-input:focus {
-      border-color: var(--ring);
-      box-shadow: 0 0 0 2px rgba(161, 161, 170, 0.25);
+      border-color: var(--primary);
+      box-shadow: 0 0 0 3px rgba(0, 102, 204, 0.15);
     }
 
     .file-name {
@@ -300,8 +346,8 @@
     }
 
     .icon-button {
-      width: 24px;
-      height: 24px;
+      width: 26px;
+      height: 26px;
       border: 0;
       border-radius: 6px;
       background: transparent;
@@ -310,6 +356,9 @@
       font-size: 18px;
       line-height: 1;
       cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
     }
 
     .icon-button:hover {
@@ -322,23 +371,48 @@
     }
 
     .button {
-      height: 36px;
+      height: 38px;
       border: 1px solid var(--border);
-      border-radius: 6px;
-      background: var(--background);
+      border-radius: 8px;
+      background: var(--secondary);
       color: var(--foreground);
-      padding: 0 14px;
+      padding: 0 16px;
       font: inherit;
       font-weight: 600;
       cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+
+    .button:hover:not(:disabled) {
+      background: #e4e4e7;
+      border-color: rgba(0, 0, 0, 0.1);
+    }
+
+    .button:active:not(:disabled) {
+      transform: scale(0.97);
     }
 
     .button-primary {
       flex: 1;
       width: 100%;
-      border-color: var(--primary);
       background: var(--primary);
       color: var(--primary-foreground);
+      border: none;
+    }
+
+    .button-primary:hover:not(:disabled) {
+      background: var(--primary-hover);
+      box-shadow: 0 0 12px rgba(0, 102, 204, 0.2);
+    }
+
+    .button-primary:disabled {
+      opacity: 0.4;
+      background: var(--primary);
+      color: var(--primary-foreground);
+      cursor: not-allowed;
     }
 
     .button-secondary {
@@ -348,33 +422,15 @@
 
     .button:disabled,
     .button.disabled,
-    .select-trigger:disabled,
     .page-row.disabled {
       cursor: not-allowed;
-      opacity: 0.55;
-    }
-
-    /* Figma node 30:315 visual spec */
-    :root {
-      --background: #ffffff;
-      --foreground: #1a191a;
-      --muted: #efefef;
-      --muted-foreground: #737879;
-      --card: #ffffff;
-      --border: #dfe2e5;
-      --input: #dfe2e5;
-      --primary: #0186ff;
-      --primary-foreground: #ffffff;
-      --secondary: #efefef;
-      --secondary-foreground: #1a191a;
-      --divider: rgba(0, 0, 0, 0.05);
-      --radius: 8px;
     }
 
     body {
-      font: 400 13px/20px "Sarasa UI SC", "Sarasa_UI_SC", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font: 13px/1.5 var(--font-sans);
       color: var(--foreground);
       background: var(--background);
+      -webkit-font-smoothing: antialiased;
     }
 
     main {
@@ -658,6 +714,10 @@
   </style>
 </head>
 <body>
+  <header class="app-header">
+    <h1 class="app-title">MasterGo to Figma</h1>
+    <p class="app-subtitle muted">导出设计资产包至 Figma 还原</p>
+  </header>
   <main>
     <section class="card mode-card">
       <div class="card-title">传输方式</div>
@@ -1684,8 +1744,9 @@
       }
     };
 
-    send({ type: "ui-ready" });
-    setTimeout(() => send({ type: "ui-ready" }), 100);
+    window.addEventListener("load", () => {
+      send({ type: "ui-ready" });
+    });
     updateTransferMode();
 
     function escapeHtml(value) {
