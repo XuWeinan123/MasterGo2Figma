@@ -60,7 +60,7 @@ mastergo2figma-relay-output/<transferId>.zip
 - zip 根目录直接包含 `manifest.json`。
 - zip 内有一个顶层目录，顶层目录内包含 `manifest.json`。
 
-## OOM 和 MasterGo 限制说明
+## OOM（Out of Memory 内存溢出） 和 MasterGo 限制说明
 
 这是 MasterGo 插件架构下的共性问题，不是单纯的本项目打包逻辑问题。
 
