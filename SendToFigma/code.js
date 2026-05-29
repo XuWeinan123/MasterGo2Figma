@@ -2011,6 +2011,10 @@ function clearNodePaint(nodeJson) {
     nodeJson.geometry.fills = [];
     nodeJson.geometry.strokes = [];
     nodeJson.geometry.strokeWeight = 0;
+    nodeJson.geometry.strokeTopWeight = undefined;
+    nodeJson.geometry.strokeBottomWeight = undefined;
+    nodeJson.geometry.strokeLeftWeight = undefined;
+    nodeJson.geometry.strokeRightWeight = undefined;
 }
 function hasUsableVectorNetwork(vectorNetwork) {
     return !!(vectorNetwork &&
@@ -2483,7 +2487,11 @@ function createFallbackNodeJson(node, sourceType) {
             strokeAlign: "CENTER",
             strokeJoin: "MITER",
             dashPattern: [],
-            strokeCap: "NONE"
+            strokeCap: "NONE",
+            strokeTopWeight: undefined,
+            strokeBottomWeight: undefined,
+            strokeLeftWeight: undefined,
+            strokeRightWeight: undefined
         },
         layout: {
             relativeTransform: layoutTransform,
@@ -3186,6 +3194,10 @@ function getUniversalProperty(selection, sourceType, restoreType) {
             "strokeJoin": readNodeProperty(selection, "strokeJoin", "MITER"),
             "dashPattern": cloneJsonCompatible(readNodeProperty(selection, "strokeDashes", []), []),
             "strokeCap": readNodeProperty(selection, "strokeCap", "NONE"),
+            "strokeTopWeight": ("strokeTopWeight" in selection) ? readNodeProperty(selection, "strokeTopWeight", 0) : undefined,
+            "strokeBottomWeight": ("strokeBottomWeight" in selection) ? readNodeProperty(selection, "strokeBottomWeight", 0) : undefined,
+            "strokeLeftWeight": ("strokeLeftWeight" in selection) ? readNodeProperty(selection, "strokeLeftWeight", 0) : undefined,
+            "strokeRightWeight": ("strokeRightWeight" in selection) ? readNodeProperty(selection, "strokeRightWeight", 0) : undefined,
         },
         "layout": {
             "relativeTransform": layoutTransform,

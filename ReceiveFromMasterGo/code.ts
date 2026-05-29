@@ -1109,6 +1109,10 @@ async function applyProperties(node: any, data: any) {
     if (data.geometry.strokeJoin) safeSet(node, "strokeJoin", data.geometry.strokeJoin);
     if (data.geometry.dashPattern !== undefined) safeSet(node, "dashPattern", data.geometry.dashPattern);
     if (data.geometry.strokeCap && !data.connectorFallbackPolyline) safeSet(node, "strokeCap", data.geometry.strokeCap);
+    if (data.geometry.strokeTopWeight !== undefined) safeSet(node, "strokeTopWeight", data.geometry.strokeTopWeight);
+    if (data.geometry.strokeBottomWeight !== undefined) safeSet(node, "strokeBottomWeight", data.geometry.strokeBottomWeight);
+    if (data.geometry.strokeLeftWeight !== undefined) safeSet(node, "strokeLeftWeight", data.geometry.strokeLeftWeight);
+    if (data.geometry.strokeRightWeight !== undefined) safeSet(node, "strokeRightWeight", data.geometry.strokeRightWeight);
   }
 
   if (data.constraints) safeSet(node, "constraints", normalizeConstraints(data.constraints));
