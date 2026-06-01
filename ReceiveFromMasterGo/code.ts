@@ -723,7 +723,11 @@ function clearGeometryPaint(geometry: any) {
     ...geometry,
     fills: [],
     strokes: [],
-    strokeWeight: 0
+    strokeWeight: 0,
+    strokeTopWeight: undefined,
+    strokeBottomWeight: undefined,
+    strokeLeftWeight: undefined,
+    strokeRightWeight: undefined
   };
 }
 
@@ -1103,8 +1107,31 @@ async function applyProperties(node: any, data: any) {
 
   if (!isGroup && data.geometry && !data.svgFallback) {
     if (data.geometry.fills) safeSetFills(node, normalizeImageFills(data.geometry.fills));
-    if (data.geometry.strokes) safeSet(node, "strokes", data.geometry.strokes);
-    if (data.geometry.strokeWeight !== undefined) safeSet(node, "strokeWeight", data.geometry.strokeWeight);
+    if (data.geometry.strokes) {
+      const normalizedStrokes = data.geometry.strokes.map((stroke: any) => {
+        if (stroke && stroke.blendMode === "PASS_THROUGH") {
+          return { ...stroke, blendMode: "NORMAL" };
+        }
+        return stroke;
+      });
+      safeSet(node, "strokes", normalizedStrokes);
+    }
+
+    if (data.geometry.strokeWeight !== undefined) {
+      safeSet(node, "strokeWeight", data.geometry.strokeWeight);
+    }
+
+    if (node.strokeTopWeight !== undefined) {
+      if (data.geometry.strokeTopWeight !== undefined) {
+        try {
+          node.strokeTopWeight = data.geometry.strokeTopWeight;
+          node.strokeBottomWeight = data.geometry.strokeBottomWeight;
+          node.strokeLeftWeight = data.geometry.strokeLeftWeight;
+          node.strokeRightWeight = data.geometry.strokeRightWeight;
+        } catch (e: any) {}
+      }
+    }
+
     if (data.geometry.strokeAlign) safeSet(node, "strokeAlign", data.geometry.strokeAlign);
     if (data.geometry.strokeJoin) safeSet(node, "strokeJoin", data.geometry.strokeJoin);
     if (data.geometry.dashPattern !== undefined) safeSet(node, "dashPattern", data.geometry.dashPattern);

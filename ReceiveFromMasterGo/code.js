@@ -551,7 +551,7 @@ function createBooleanFrameFallbackProps(data) {
 function clearGeometryPaint(geometry) {
     if (!geometry || typeof geometry !== "object")
         return geometry;
-    return Object.assign(Object.assign({}, geometry), { fills: [], strokes: [], strokeWeight: 0 });
+    return Object.assign(Object.assign({}, geometry), { fills: [], strokes: [], strokeWeight: 0, strokeTopWeight: undefined, strokeBottomWeight: undefined, strokeLeftWeight: undefined, strokeRightWeight: undefined });
 }
 function hasUsableVectorNetwork(vectorNetwork) {
     return !!(vectorNetwork &&
@@ -925,10 +925,29 @@ function applyProperties(node, data) {
         if (!isGroup && data.geometry && !data.svgFallback) {
             if (data.geometry.fills)
                 safeSetFills(node, normalizeImageFills(data.geometry.fills));
-            if (data.geometry.strokes)
-                safeSet(node, "strokes", data.geometry.strokes);
-            if (data.geometry.strokeWeight !== undefined)
+            if (data.geometry.strokes) {
+                const normalizedStrokes = data.geometry.strokes.map((stroke) => {
+                    if (stroke && stroke.blendMode === "PASS_THROUGH") {
+                        return Object.assign(Object.assign({}, stroke), { blendMode: "NORMAL" });
+                    }
+                    return stroke;
+                });
+                safeSet(node, "strokes", normalizedStrokes);
+            }
+            if (data.geometry.strokeWeight !== undefined) {
                 safeSet(node, "strokeWeight", data.geometry.strokeWeight);
+            }
+            if (node.strokeTopWeight !== undefined) {
+                if (data.geometry.strokeTopWeight !== undefined) {
+                    try {
+                        node.strokeTopWeight = data.geometry.strokeTopWeight;
+                        node.strokeBottomWeight = data.geometry.strokeBottomWeight;
+                        node.strokeLeftWeight = data.geometry.strokeLeftWeight;
+                        node.strokeRightWeight = data.geometry.strokeRightWeight;
+                    }
+                    catch (e) { }
+                }
+            }
             if (data.geometry.strokeAlign)
                 safeSet(node, "strokeAlign", data.geometry.strokeAlign);
             if (data.geometry.strokeJoin)

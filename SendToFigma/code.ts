@@ -2436,6 +2436,10 @@ function clearNodePaint(nodeJson: any) {
     nodeJson.geometry.fills = [];
     nodeJson.geometry.strokes = [];
     nodeJson.geometry.strokeWeight = 0;
+    nodeJson.geometry.strokeTopWeight = undefined;
+    nodeJson.geometry.strokeBottomWeight = undefined;
+    nodeJson.geometry.strokeLeftWeight = undefined;
+    nodeJson.geometry.strokeRightWeight = undefined;
 }
 
 function hasUsableVectorNetwork(vectorNetwork: any) {
@@ -2911,7 +2915,11 @@ function createFallbackNodeJson(node: SceneNode, sourceType?: string) {
             strokeAlign: "CENTER",
             strokeJoin: "MITER",
             dashPattern: [],
-            strokeCap: "NONE"
+            strokeCap: "NONE",
+            strokeTopWeight: undefined,
+            strokeBottomWeight: undefined,
+            strokeLeftWeight: undefined,
+            strokeRightWeight: undefined
         },
         layout: {
             relativeTransform: layoutTransform,
@@ -3523,7 +3531,7 @@ function fillsAndStrokes2Json(fills: readonly Paint[] | typeof mg.mixed, strokes
                     "type": stroke.type,
                     "visible": stroke.isVisible,
                     "opacity": clamp01(stroke.color && stroke.color.a, 1),
-                    "blendMode": stroke.blendMode,
+                    "blendMode": processBlendMode(stroke.blendMode),
                     "color": cloneRgbColor(stroke.color)
                 }
             } else if (stroke.type == "GRADIENT_LINEAR") {
@@ -3531,7 +3539,7 @@ function fillsAndStrokes2Json(fills: readonly Paint[] | typeof mg.mixed, strokes
                     "type": stroke.type,
                     "visible": stroke.isVisible,
                     "opacity": clamp01(stroke.alpha, 1),
-                    "blendMode": stroke.blendMode,
+                    "blendMode": processBlendMode(stroke.blendMode),
                     "gradientStops": cloneGradientStops(stroke.gradientStops),
                     "gradientTransform": getResultArrayByTwoPoint(stroke.gradientHandlePositions || [])
                 }
@@ -3540,7 +3548,7 @@ function fillsAndStrokes2Json(fills: readonly Paint[] | typeof mg.mixed, strokes
                     "type": stroke.type,
                     "visible": stroke.isVisible,
                     "opacity": clamp01(stroke.alpha, 1),
-                    "blendMode": stroke.blendMode,
+                    "blendMode": processBlendMode(stroke.blendMode),
                     "gradientStops": cloneGradientStops(stroke.gradientStops),
                     "gradientTransform": [[0, 1, 0], [-1, 0, 1]]
                 }
@@ -3662,6 +3670,10 @@ function getUniversalProperty(selection: SceneNode, sourceType?: string, restore
             "strokeJoin": readNodeProperty(selection, "strokeJoin", "MITER"),
             "dashPattern": cloneJsonCompatible(readNodeProperty<any[]>(selection, "strokeDashes", []), []),
             "strokeCap": readNodeProperty(selection, "strokeCap", "NONE"),
+            "strokeTopWeight": ((selection as any).strokeTopWeight !== undefined) ? readNodeProperty(selection, "strokeTopWeight", 0) : undefined,
+            "strokeBottomWeight": ((selection as any).strokeBottomWeight !== undefined) ? readNodeProperty(selection, "strokeBottomWeight", 0) : undefined,
+            "strokeLeftWeight": ((selection as any).strokeLeftWeight !== undefined) ? readNodeProperty(selection, "strokeLeftWeight", 0) : undefined,
+            "strokeRightWeight": ((selection as any).strokeRightWeight !== undefined) ? readNodeProperty(selection, "strokeRightWeight", 0) : undefined,
         },
         "layout": {
             "relativeTransform": layoutTransform,
@@ -3782,6 +3794,16 @@ function createJsonCarrierFrame(name: string) {
     return frame;
 }
 
+/**
+ * 规范化并清洗混合模式（BlendMode）
+ * 
+ * 必要性说明：
+ * 1. 在 Figma 插件 API 中，`PASS_THROUGH` 是合法的图层级别（Layer/Container）混合模式，
+ *    但绝不能应用于 Paint 对象（如 Fills 填充或 Strokes 描边）。
+ * 2. 如果将 `PASS_THROUGH` 写入描边或填充的 blendMode 并尝试在 Figma 中恢复，
+ *    Figma Plugin API 会抛出错误，导致整个描边/填充赋值失败。
+ * 3. 因此，必须在导出端（或导入端）将 Paint 对象中的 `PASS_THROUGH` 自动规范化为 `NORMAL`。
+ */
 function processBlendMode(blendMode: BlendMode | string) {
     var resultBlenderMode = blendMode
     if (resultBlenderMode == "PLUS_DARKER" || resultBlenderMode == "PASS_THROUGH") resultBlenderMode = "NORMAL"
