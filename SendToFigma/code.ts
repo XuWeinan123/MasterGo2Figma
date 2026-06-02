@@ -2329,7 +2329,7 @@ async function enrichBooleanOperationExport(node: SceneNode, nodeJson: any, chil
     if (!nodeJson || safeRead(() => node.type, "") !== "BOOLEAN_OPERATION") return;
     const rule = getLayerRule("BOOLEAN_OPERATION");
     if (rule && rule.sendStrategy === "booleanTree") {
-        await attachBooleanSvgFallbackMarkup(node, nodeJson);
+        // No fallback logic needed per user's instruction. Just return and let children export natively.
         return;
     }
 

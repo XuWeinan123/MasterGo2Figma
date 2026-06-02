@@ -1897,7 +1897,7 @@ function enrichBooleanOperationExport(node, nodeJson, childNodes) {
             return;
         const rule = getLayerRule("BOOLEAN_OPERATION");
         if (rule && rule.sendStrategy === "booleanTree") {
-            yield attachBooleanSvgFallbackMarkup(node, nodeJson);
+            // No fallback logic needed per user's instruction. Just return and let children export natively.
             return;
         }
         if (hasUsableVectorNetwork(nodeJson.vectorNetwork) || childNodes.length === 0)
