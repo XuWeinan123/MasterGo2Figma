@@ -1,631 +1,152 @@
 "use strict";
-/// <reference types="@mastergo/plugin-typings" />
-var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
-    function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
-    return new (P || (P = Promise))(function (resolve, reject) {
-        function fulfilled(value) { try { step(generator.next(value)); } catch (e) { reject(e); } }
-        function rejected(value) { try { step(generator["throw"](value)); } catch (e) { reject(e); } }
-        function step(result) { result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected); }
-        step((generator = generator.apply(thisArg, _arguments || [])).next());
+(() => {
+  var __defProp = Object.defineProperty;
+  var __defProps = Object.defineProperties;
+  var __getOwnPropDescs = Object.getOwnPropertyDescriptors;
+  var __getOwnPropSymbols = Object.getOwnPropertySymbols;
+  var __hasOwnProp = Object.prototype.hasOwnProperty;
+  var __propIsEnum = Object.prototype.propertyIsEnumerable;
+  var __pow = Math.pow;
+  var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
+  var __spreadValues = (a, b) => {
+    for (var prop in b || (b = {}))
+      if (__hasOwnProp.call(b, prop))
+        __defNormalProp(a, prop, b[prop]);
+    if (__getOwnPropSymbols)
+      for (var prop of __getOwnPropSymbols(b)) {
+        if (__propIsEnum.call(b, prop))
+          __defNormalProp(a, prop, b[prop]);
+      }
+    return a;
+  };
+  var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
+  var __async = (__this, __arguments, generator) => {
+    return new Promise((resolve, reject) => {
+      var fulfilled = (value) => {
+        try {
+          step(generator.next(value));
+        } catch (e) {
+          reject(e);
+        }
+      };
+      var rejected = (value) => {
+        try {
+          step(generator.throw(value));
+        } catch (e) {
+          reject(e);
+        }
+      };
+      var step = (x) => x.done ? resolve(x.value) : Promise.resolve(x.value).then(fulfilled, rejected);
+      step((generator = generator.apply(__this, __arguments)).next());
     });
-};
-let totalNodes = 0;
-let processedNodes = 0;
-let loadingNotify = null;
-let lastNotifyAt = 0;
-let exportInProgress = false;
-const DEBUG_LOGGING_PAGE_INDEX_START = 9999; // Keep verbose DFS logging disabled unless explicitly lowered for diagnostics.
-let isVerboseLoggingActive = false;
-function logDebug(message, ...args) {
-    if (isVerboseLoggingActive) {
+  };
+
+  // ../shared/utils.ts
+  function formatDurationMs(ms) {
+    const totalSeconds = Math.round(ms / 1e3);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes}m ${seconds}s`;
+  }
+  function describeError(error) {
+    if (!error) return "Unknown error";
+    if (error instanceof Error) {
+      return {
+        name: error.name,
+        message: error.message,
+        stack: error.stack ? error.stack.split("\n").slice(0, 5).join("\n") : void 0
+      };
+    }
+    if (typeof error === "object") {
+      try {
+        return JSON.parse(JSON.stringify(error));
+      } catch (_) {
+        return String(error);
+      }
+    }
+    return String(error);
+  }
+  function finiteNumber(value, fallback = 0) {
+    const numberValue = Number(value);
+    return Number.isFinite(numberValue) ? numberValue : fallback;
+  }
+  function safeRead(reader, fallback) {
+    try {
+      const value = reader();
+      return value !== void 0 ? value : fallback;
+    } catch (_) {
+      return fallback;
+    }
+  }
+  function yieldToEventLoop() {
+    return new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  function isOutOfMemoryError(error) {
+    if (!error) return false;
+    const msg = String(error.message || error || "").toLowerCase();
+    return msg.includes("out of memory") || msg.includes("oom") || msg.includes("allocation failed");
+  }
+  function cloneJsonCompatible(value, fallback) {
+    if (value === void 0 || value === null) return fallback;
+    try {
+      return JSON.parse(JSON.stringify(value));
+    } catch (_) {
+      return fallback;
+    }
+  }
+
+  // src/state.ts
+  var SendToFigmaState = class {
+    constructor() {
+      this.totalNodes = 0;
+      this.processedNodes = 0;
+      this.loadingNotify = null;
+      // NotificationHandler
+      this.lastNotifyAt = 0;
+      this.exportInProgress = false;
+      this.isVerboseLoggingActive = false;
+      this.cachedLayerRules = null;
+      this.layerRulesBySourceType = null;
+      this.layerRulesLoadPromise = null;
+      this.activeImageAssetContext = null;
+      this.exportTransferAckResolvers = {};
+      this.exportFileAckResolvers = {};
+      this.exportDebugState = { phase: "idle" };
+      this.activeExportStats = null;
+      this.activeExportProgress = null;
+    }
+    logDebug(message, ...args) {
+      if (this.isVerboseLoggingActive) {
         console.log(`[MasterGo2Figma] [DEBUG] ${message}`, ...args);
+      }
     }
-}
-const INTERNAL_PROPS_PREFIX = "[PROPS]";
-const SIBLING_PROPS_PREFIX = "[PROPS_SIBLING]";
-const LAYER_RULES_SCHEMA = "mastergo2figma.layer-conversion-rules.v1";
-const EXPORT_QUEUE_CACHE_KEY = "mastergo2figma.export-queue.v1";
-const COMMAND_ALL_PAGES = "all-pages";
-const COMMAND_SELECTED = "selected";
-const COMMAND_CURRENT_PAGE = "current-page";
-const COMMAND_PARTIAL_PAGES = "partial-pages";
-const TRANSFER_MODE_DIRECT_ZIP = "direct-zip";
-const TRANSFER_MODE_LOCAL_JSON_STREAM = "local-json-stream";
-const EXPORT_TARGET_ZIP = "zip";
-const EXPORT_TARGET_LOCAL_RELAY = "local-relay";
-const ENABLE_IMAGE_EXPORT = true;
-const ENABLE_SPLIT_EXPORT = true;
-const EXPORT_TRANSFER_CHUNK_SIZE = 64 * 1024;
-const EXPORT_TEXT_CHUNK_CHAR_LIMIT = 4 * 1024;
-const EXPORT_TRANSFER_YIELD_EVERY_CHUNKS = 32;
-const SEND_TEXT_CHUNKS_AS_BYTES = true;
-const LAYER_CHUNK_MAX_RECORDS = 16;
-const LAYER_CHUNK_MAX_BYTES = 64 * 1024;
-const LAYER_CHUNK_LOG_BYTES = 48 * 1024;
-const EXPORT_PROGRESS_EVERY_LAYERS = 100;
-const EXPORT_PROGRESS_TIME_INTERVAL_MS = 200;
-const EXPORT_SCAN_YIELD_EVERY_NODES = 500;
-const STRINGIFY_PROBE_VERTEX_THRESHOLD = 1000;
-const STRINGIFY_PROBE_CHILD_THRESHOLD = 300;
-const STRINGIFY_RECORD_WARN_BYTES = 48 * 1024;
-const SVG_FALLBACK_MAX_DOCUMENT_NODES = 5000;
-const SVG_FALLBACK_MAX_NODES = 48;
-const SVG_FALLBACK_MAX_DIMENSION = 256;
-const SVG_FALLBACK_MAX_AREA = 64 * 1024;
-const SVG_FALLBACK_MAX_BYTES = 64 * 1024;
-const PAGE_SEGMENT_TARGET_LAYERS = 8000;
-const MAX_PAGES_PER_BATCH = 1;
-const DEFAULT_LAYER_CONVERSION_CONFIG = {
-    schema: LAYER_RULES_SCHEMA,
-    version: 1,
-    rules: {
-        BOOLEAN_OPERATION: { sourceType: "BOOLEAN_OPERATION", restoreType: "BOOLEAN_OPERATION", sendStrategy: "booleanTree", receiveCreate: "BOOLEAN_OPERATION", isContainer: true, visualFrameSource: false },
-        PEN: { sourceType: "PEN", restoreType: "VECTOR", sendStrategy: "penNetwork", receiveCreate: "VECTOR", isContainer: false, visualFrameSource: false },
-        VECTOR: { sourceType: "VECTOR", restoreType: "VECTOR", sendStrategy: "penNetwork", receiveCreate: "VECTOR", isContainer: false, visualFrameSource: false },
-        ELLIPSE: { sourceType: "ELLIPSE", restoreType: "ELLIPSE", sendStrategy: "ellipseArc", receiveCreate: "ELLIPSE", isContainer: false, visualFrameSource: false },
-        RECTANGLE: { sourceType: "RECTANGLE", restoreType: "RECTANGLE", sendStrategy: "universalOnly", receiveCreate: "RECTANGLE", isContainer: false, visualFrameSource: false },
-        STAR: { sourceType: "STAR", restoreType: "STAR", sendStrategy: "star", receiveCreate: "STAR", isContainer: false, visualFrameSource: false },
-        LINE: { sourceType: "LINE", restoreType: "LINE", sendStrategy: "universalOnly", receiveCreate: "LINE", isContainer: false, visualFrameSource: false },
-        POLYGON: { sourceType: "POLYGON", restoreType: "POLYGON", sendStrategy: "polygon", receiveCreate: "POLYGON", isContainer: false, visualFrameSource: false },
-        TEXT: { sourceType: "TEXT", restoreType: "TEXT", sendStrategy: "text", receiveCreate: "TEXT", isContainer: false, visualFrameSource: false },
-        FRAME: { sourceType: "FRAME", restoreType: "FRAME", sendStrategy: "frameLike", receiveCreate: "FRAME", isContainer: true, visualFrameSource: false },
-        GROUP: { sourceType: "GROUP", restoreType: "GROUP", sendStrategy: "groupLike", receiveCreate: "GROUP", isContainer: true, visualFrameSource: false },
-        SECTION: { sourceType: "SECTION", restoreType: "SECTION", sendStrategy: "frameLike", receiveCreate: "SECTION", isContainer: true, visualFrameSource: false },
-        SLICE: { sourceType: "SLICE", restoreType: "SLICE", sendStrategy: "universalOnly", receiveCreate: "SLICE", isContainer: false, visualFrameSource: false },
-        CONNECTOR: { sourceType: "CONNECTOR", restoreType: "CONNECTOR", sendStrategy: "connector", receiveCreate: "CONNECTOR", isContainer: false, visualFrameSource: false },
-        COMPONENT: { sourceType: "COMPONENT", restoreType: "FRAME", sendStrategy: "frameLike", receiveCreate: "FRAME", isContainer: true, visualFrameSource: true },
-        COMPONENT_SET: { sourceType: "COMPONENT_SET", restoreType: "FRAME", sendStrategy: "frameLike", receiveCreate: "FRAME", isContainer: true, visualFrameSource: true },
-        INSTANCE: { sourceType: "INSTANCE", restoreType: "FRAME", sendStrategy: "frameLike", receiveCreate: "FRAME", isContainer: true, visualFrameSource: true }
+    logDiagnostic(level, message, payload) {
+      if (level === "error") {
+        console.error(message, payload);
+      } else if (level === "warn") {
+        console.warn(message, payload);
+      } else {
+        console.log(message, payload);
+      }
     }
-};
-let cachedLayerRules = {
-    config: DEFAULT_LAYER_CONVERSION_CONFIG,
-    fileName: "内置转换规则",
-    importedAt: ""
-};
-let layerRulesBySourceType = createLayerRuleIndex(DEFAULT_LAYER_CONVERSION_CONFIG);
-let layerRulesLoadPromise = null;
-let activeImageAssetContext = null;
-let exportTransferAckResolvers = {};
-let exportFileAckResolvers = {};
-let exportDebugState = { phase: "idle" };
-let activeExportStats = null;
-let activeExportProgress = null;
-try {
-    showPluginUI();
-}
-catch (error) {
-    console.error("Unable to open SendToFigma plugin UI:", error);
-    try {
-        mg.notify("插件界面打开失败，请查看控制台", {
-            position: "bottom",
-            timeout: 3000,
-            type: "error"
-        });
+    setExportDebugState(nextState) {
+      this.exportDebugState.phase = nextState.phase;
+      this.exportDebugState.page = nextState.page;
+      this.exportDebugState.node = nextState.node;
+      this.exportDebugState.nodeComplexity = nextState.nodeComplexity;
+      this.exportDebugState.parentId = nextState.parentId;
+      this.exportDebugState.nodeIndex = nextState.nodeIndex;
+      this.exportDebugState.file = nextState.file;
+      this.exportDebugState.transferId = nextState.transferId;
+      this.exportDebugState.fileIndex = nextState.fileIndex;
+      this.exportDebugState.chunkIndex = nextState.chunkIndex;
+      this.exportDebugState.fileSize = nextState.fileSize;
+      this.exportDebugState.streamedBytes = nextState.streamedBytes;
+      this.exportDebugState.processedNodes = this.processedNodes;
+      this.exportDebugState.totalNodes = this.totalNodes;
     }
-    catch (_) {
-        // Ignore notify failures while the host is already failing to open.
-    }
-}
-function showPluginUI() {
-    mg.ui.onmessage = (rawMessage) => __awaiter(this, void 0, void 0, function* () {
-        const message = unwrapUIMessage(rawMessage);
-        if (!message || typeof message !== "object")
-            return;
-        if (message.type === "ui-ready") {
-            yield safePostInitUI();
-            return;
-        }
-        if (message.type === "close") {
-            mg.closePlugin();
-            return;
-        }
-        if (message.type === "export-transfer-finished") {
-            resolveExportTransferAck(message);
-            return;
-        }
-        if (message.type === "export-file-finished") {
-            resolveExportFileAck(message);
-            return;
-        }
-        if (message.type === "test-main-fetch-relay") {
-            yield testMainRelayFetch(typeof message.relayUrl === "string" ? message.relayUrl : "");
-            return;
-        }
-        if (message.type !== "start-export")
-            return;
-        if (exportInProgress)
-            return;
-        const options = {
-            scope: normalizeScope(message.scope),
-            pageIds: Array.isArray(message.pageIds) ? message.pageIds : [],
-            transferMode: normalizeTransferMode(message.transferMode),
-            relayUrl: typeof message.relayUrl === "string" ? message.relayUrl : undefined,
-            autoContinue: message.autoContinue === true,
-            sessionId: typeof message.sessionId === "string" ? message.sessionId : undefined,
-            batchIndex: typeof message.batchIndex === "number" ? message.batchIndex : undefined,
-            batchTotal: typeof message.batchTotal === "number" ? message.batchTotal : undefined
-        };
-        exportInProgress = true;
-        try {
-            const prepared = yield prepareExportRun(options);
-            logDiagnostic("log", "[MasterGo2Figma] Export queue plan", createPreparedExportLog(options, prepared));
-            yield savePendingExportQueueForRecovery(prepared);
-            logDiagnostic("log", "[MasterGo2Figma] Export batch start", createPreparedExportLog(options, prepared));
-            const success = yield runWithUI(prepared.options);
-            if (success) {
-                logDiagnostic("log", "[MasterGo2Figma] Export batch complete", createPreparedExportLog(options, prepared));
-                yield updatePendingExportQueue(prepared);
-            }
-            else if (prepared.remainingPageIds.length > 0) {
-                logDiagnostic("warn", "[MasterGo2Figma] Export queue not advanced because current run failed", {
-                    sessionId: prepared.options.sessionId,
-                    batchIndex: prepared.options.batchIndex,
-                    batchTotal: prepared.options.batchTotal,
-                    remainingPageCount: prepared.remainingPageIds.length,
-                    remainingPages: summarizePageIds(prepared.remainingPageIds.slice(0, 5)),
-                    debugState: exportDebugState
-                });
-            }
-        }
-        catch (error) {
-            logDiagnostic("error", "[MasterGo2Figma] Export run failed before completion", {
-                error: describeError(error),
-                debugState: exportDebugState
-            });
-            postUI({
-                type: "error",
-                message: error instanceof Error ? error.message : "导出失败，请查看控制台"
-            });
-        }
-        finally {
-            exportInProgress = false;
-        }
-    });
-    openPluginUI();
-    startLayerRulesLoad();
-}
-function openPluginUI() {
-    try {
-        mg.showUI(__html__, { width: 400, height: 1000 });
-    }
-    catch (error) {
-        console.warn("Unable to open preferred SendToFigma UI size, retrying with compact size:", error);
-        mg.showUI(__html__, { width: 400, height: 1000 });
-    }
-}
-function unwrapUIMessage(rawMessage) {
-    if (rawMessage && rawMessage.pluginMessage)
-        return rawMessage.pluginMessage;
-    return rawMessage;
-}
-function testMainRelayFetch(rawRelayUrl) {
-    return __awaiter(this, void 0, void 0, function* () {
-        const relayUrl = normalizeRelayUrl(rawRelayUrl);
-        postUI({
-            type: "main-relay-test-result",
-            ok: false,
-            relayUrl,
-            fetchAvailable: false,
-            elapsedMs: 0,
-            error: "MasterGo 插件主线程沙盒中没有内置 fetch API，请通过 UI 线程进行请求。"
-        });
-    });
-}
-function normalizeRelayUrl(value) {
-    const text = String(value || "").trim() || "http://127.0.0.1:8765";
-    return text.replace(/\/+$/, "");
-}
-function postInitUI() {
-    return __awaiter(this, void 0, void 0, function* () {
-        yield ensureLayerRulesLoaded();
-        postUI({
-            type: "init",
-            command: normalizeScope(mg.command),
-            selectionCount: mg.document.currentPage.selection.length,
-            pageCount: mg.document.children.length,
-            currentPageName: mg.document.currentPage.name,
-            currentPageId: mg.document.currentPage.id,
-            pages: getDocumentPageSummaries(),
-            exportQueue: yield getPendingExportQueueStatus(),
-            rules: getLayerRuleStatus()
-        });
-    });
-}
-function safePostInitUI() {
-    return __awaiter(this, void 0, void 0, function* () {
-        try {
-            yield postInitUI();
-        }
-        catch (error) {
-            console.warn("Unable to initialize SendToFigma UI:", error);
-            try {
-                postUI({
-                    type: "error",
-                    message: error instanceof Error ? error.message : "插件初始化失败"
-                });
-            }
-            catch (_) {
-                // UI may not be ready yet.
-            }
-        }
-    });
-}
-function startLayerRulesLoad() {
-    if (!layerRulesLoadPromise)
-        layerRulesLoadPromise = Promise.resolve();
-    return layerRulesLoadPromise;
-}
-function ensureLayerRulesLoaded() {
-    return __awaiter(this, void 0, void 0, function* () {
-        yield startLayerRulesLoad();
-    });
-}
-function loadCachedLayerRules() {
-    return __awaiter(this, void 0, void 0, function* () {
-        cachedLayerRules = {
-            config: DEFAULT_LAYER_CONVERSION_CONFIG,
-            fileName: "内置转换规则",
-            importedAt: ""
-        };
-        layerRulesBySourceType = createLayerRuleIndex(DEFAULT_LAYER_CONVERSION_CONFIG);
-    });
-}
-function createLayerRuleIndex(config) {
-    const result = {};
-    for (const sourceType in config.rules)
-        result[sourceType] = config.rules[sourceType];
-    return result;
-}
-function getLayerRuleStatus() {
-    if (!cachedLayerRules || !layerRulesBySourceType)
-        return { valid: false };
-    return {
-        valid: true,
-        fileName: cachedLayerRules.fileName,
-        importedAt: cachedLayerRules.importedAt,
-        ruleCount: Object.keys(layerRulesBySourceType).length
-    };
-}
-function hasValidLayerRules() {
-    return !!layerRulesBySourceType;
-}
-function getLayerRule(sourceType) {
-    if (!sourceType || !layerRulesBySourceType)
-        return null;
-    return layerRulesBySourceType[sourceType] || null;
-}
-function getRuleRestoreType(sourceType) {
-    const rule = getLayerRule(sourceType);
-    return rule ? rule.restoreType : sourceType;
-}
-function isConfiguredContainerType(sourceType) {
-    const rule = getLayerRule(sourceType);
-    return !!rule && rule.isContainer;
-}
-function normalizeScope(scope) {
-    if (scope === COMMAND_ALL_PAGES)
-        return "all-pages";
-    if (scope === COMMAND_SELECTED)
-        return "selected";
-    if (scope === COMMAND_PARTIAL_PAGES)
-        return "partial-pages";
-    return "current-page";
-}
-function normalizeTransferMode(mode) {
-    return mode === TRANSFER_MODE_LOCAL_JSON_STREAM ? "local-json-stream" : "direct-zip";
-}
-function runWithUI(options) {
-    return __awaiter(this, void 0, void 0, function* () {
-        try {
-            yield ensureLayerRulesLoaded();
-            if (options.transferMode === "local-json-stream") {
-                if (!options.relayUrl)
-                    throw new Error("请填写本地流传输服务地址");
-                postProgressUI({ type: "progress", phase: "start", current: 0, total: 0, label: "正在准备流传输 JSON..." });
-                const manifest = yield streamJsonExportPackage(options);
-                cacheLatestExportSummary(manifest);
-                return true;
-            }
-            postProgressUI({ type: "progress", phase: "start", current: 0, total: 0, label: "正在准备生成 zip..." });
-            const manifest = yield streamJsonExportPackage(options);
-            cacheLatestExportSummary(manifest);
-            return true;
-        }
-        catch (error) {
-            logDiagnostic("error", "[MasterGo2Figma] Export failed", {
-                error: describeError(error),
-                debugState: exportDebugState
-            });
-            postUI({
-                type: "error",
-                message: error instanceof Error ? error.message : "导出失败，请查看控制台"
-            });
-            return false;
-        }
-    });
-}
-function createPreparedExportLog(requested, prepared) {
-    return {
-        sessionId: requested.sessionId || "",
-        autoContinue: requested.autoContinue === true,
-        batchIndex: requested.batchIndex || 0,
-        batchTotal: requested.batchTotal || 0,
-        scope: requested.scope,
-        transferMode: requested.transferMode,
-        requestedPageCount: requested.pageIds.length,
-        requestedPages: summarizePageIds(requested.pageIds.slice(0, 5)),
-        runPageCount: prepared.options.pageIds.length,
-        runPages: summarizePageIds(prepared.options.pageIds),
-        remainingPageCount: prepared.remainingPageIds.length,
-        remainingPages: summarizePageIds(prepared.remainingPageIds.slice(0, 5)),
-        limitedToSinglePage: prepared.limitedToSinglePage,
-        maxPagesPerBatch: MAX_PAGES_PER_BATCH
-    };
-}
-function summarizePageIds(pageIds) {
-    if (!Array.isArray(pageIds) || pageIds.length === 0)
-        return [];
-    const pageById = {};
-    for (const page of mg.document.children) {
-        pageById[page.id] = safeRead(() => page.name, "Untitled");
-    }
-    return pageIds.map(id => ({
-        id,
-        name: pageById[id] || ""
-    }));
-}
-function prepareExportRun(options) {
-    return __awaiter(this, void 0, void 0, function* () {
-        if (options.scope !== "partial-pages") {
-            return { options, remainingPageIds: [], limitedToSinglePage: false };
-        }
-        const pageIds = filterExistingPageIds(options.pageIds);
-        if (pageIds.length === 0)
-            return { options: Object.assign(Object.assign({}, options), { pageIds }), remainingPageIds: [], limitedToSinglePage: false };
-        if (pageIds.length > MAX_PAGES_PER_BATCH) {
-            return {
-                options: Object.assign(Object.assign({}, options), { pageIds: pageIds.slice(0, MAX_PAGES_PER_BATCH) }),
-                remainingPageIds: pageIds.slice(MAX_PAGES_PER_BATCH),
-                limitedToSinglePage: true
-            };
-        }
-        const pendingQueue = yield readPendingExportQueue();
-        const isQueuedNextPage = !!(pendingQueue && pendingQueue.pageIds[0] === pageIds[0]);
-        return {
-            options: Object.assign(Object.assign({}, options), { pageIds }),
-            remainingPageIds: isQueuedNextPage && pendingQueue ? pendingQueue.pageIds.slice(1) : [],
-            limitedToSinglePage: false
-        };
-    });
-}
-function savePendingExportQueueForRecovery(prepared) {
-    return __awaiter(this, void 0, void 0, function* () {
-        if (prepared.options.scope !== "partial-pages") {
-            yield clearPendingExportQueue();
-            return;
-        }
-        const recoveryPageIds = filterExistingPageIds([
-            ...prepared.options.pageIds,
-            ...prepared.remainingPageIds
-        ]);
-        if (recoveryPageIds.length === 0) {
-            yield clearPendingExportQueue();
-            return;
-        }
-        const now = new Date().toISOString();
-        const existing = yield readPendingExportQueue();
-        const queue = {
-            pageIds: recoveryPageIds,
-            createdAt: existing && existing.createdAt ? existing.createdAt : now,
-            updatedAt: now
-        };
-        yield mg.clientStorage.setAsync(EXPORT_QUEUE_CACHE_KEY, queue);
-        logDiagnostic("log", "[MasterGo2Figma] Export recovery queue saved", {
-            sessionId: prepared.options.sessionId || "",
-            batchIndex: prepared.options.batchIndex || 0,
-            runningPages: summarizePageIds(prepared.options.pageIds),
-            recoveryPageCount: recoveryPageIds.length,
-            nextPage: summarizePageIds(recoveryPageIds.slice(0, 1))[0] || null
-        });
-    });
-}
-function updatePendingExportQueue(prepared) {
-    return __awaiter(this, void 0, void 0, function* () {
-        if (prepared.options.scope !== "partial-pages") {
-            yield clearPendingExportQueue();
-            return;
-        }
-        const remainingPageIds = filterExistingPageIds(prepared.remainingPageIds);
-        if (remainingPageIds.length === 0) {
-            yield clearPendingExportQueue();
-            postUI({ type: "export-queue-cleared" });
-            if (prepared.options.scope === "partial-pages") {
-                logDiagnostic("log", "[MasterGo2Figma] Export queue complete", {
-                    sessionId: prepared.options.sessionId || "",
-                    autoContinue: prepared.options.autoContinue === true,
-                    exportedPages: summarizePageIds(prepared.options.pageIds),
-                    remainingPageCount: 0
-                });
-            }
-            return;
-        }
-        const now = new Date().toISOString();
-        const existing = yield readPendingExportQueue();
-        const queue = {
-            pageIds: remainingPageIds,
-            createdAt: existing && existing.createdAt ? existing.createdAt : now,
-            updatedAt: now
-        };
-        yield mg.clientStorage.setAsync(EXPORT_QUEUE_CACHE_KEY, queue);
-        const status = createExportQueueStatus(queue);
-        logDiagnostic("log", "[MasterGo2Figma] Export queue saved", {
-            sessionId: prepared.options.sessionId || "",
-            autoContinue: prepared.options.autoContinue === true,
-            exportedPages: summarizePageIds(prepared.options.pageIds),
-            remainingPageCount: remainingPageIds.length,
-            nextPage: summarizePageIds(remainingPageIds.slice(0, 1))[0] || null
-        });
-        postUI({ type: "export-queue-updated", exportQueue: status });
-        if (!prepared.options.autoContinue) {
-            mg.notify(`已导出当前页面，还剩 ${remainingPageIds.length} 个页面，可点击开始继续。`, {
-                position: "bottom",
-                timeout: 5000,
-                type: "highlight"
-            });
-        }
-    });
-}
-function clearPendingExportQueue() {
-    return __awaiter(this, void 0, void 0, function* () {
-        try {
-            yield mg.clientStorage.deleteAsync(EXPORT_QUEUE_CACHE_KEY);
-        }
-        catch (error) {
-            console.warn("Unable to clear export queue:", error);
-        }
-    });
-}
-function readPendingExportQueue() {
-    return __awaiter(this, void 0, void 0, function* () {
-        try {
-            const cached = yield mg.clientStorage.getAsync(EXPORT_QUEUE_CACHE_KEY);
-            if (!cached || !Array.isArray(cached.pageIds))
-                return null;
-            const pageIds = filterExistingPageIds(cached.pageIds);
-            if (pageIds.length === 0) {
-                yield clearPendingExportQueue();
-                return null;
-            }
-            return {
-                pageIds,
-                createdAt: String(cached.createdAt || cached.updatedAt || ""),
-                updatedAt: String(cached.updatedAt || "")
-            };
-        }
-        catch (error) {
-            console.warn("Unable to read export queue:", error);
-            return null;
-        }
-    });
-}
-function getPendingExportQueueStatus() {
-    return __awaiter(this, void 0, void 0, function* () {
-        const queue = yield readPendingExportQueue();
-        return queue ? createExportQueueStatus(queue) : null;
-    });
-}
-function createExportQueueStatus(queue) {
-    const nextPageId = queue.pageIds[0] || "";
-    return {
-        pageIds: queue.pageIds,
-        remainingCount: queue.pageIds.length,
-        nextPageId,
-        nextPageName: getPageNameById(nextPageId),
-        updatedAt: queue.updatedAt
-    };
-}
-function filterExistingPageIds(pageIds) {
-    const existingPageIds = new Set([...mg.document.children].map(page => page.id));
-    const result = [];
-    const seen = {};
-    for (const pageId of pageIds) {
-        if (typeof pageId !== "string" || !existingPageIds.has(pageId) || seen[pageId])
-            continue;
-        seen[pageId] = true;
-        result.push(pageId);
-    }
-    return result;
-}
-function getPageNameById(pageId) {
-    const page = [...mg.document.children].find(nextPage => nextPage.id === pageId);
-    return page ? safeRead(() => page.name, "Untitled") : "Untitled";
-}
-function cacheLatestExportSummary(manifest) {
-    mg.clientStorage.setAsync("latest-mastergo2figma-export", {
-        manifest: {
-            schema: manifest.schema,
-            version: manifest.version,
-            source: manifest.source,
-            documentId: manifest.documentId,
-            exportedAt: manifest.exportedAt,
-            scope: manifest.scope,
-            stats: manifest.stats
-        },
-        savedAt: new Date().toISOString()
-    }).catch(error => {
-        console.warn("Unable to cache latest export summary:", error);
-    });
-}
-function postUI(message) {
-    try {
-        mg.ui.postMessage(message);
-    }
-    catch (error) {
-        logDiagnostic("error", "[MasterGo2Figma] postUI failed", {
-            error: describeError(error),
-            message: summarizeUIMessage(message),
-            debugState: exportDebugState
-        });
-        throw error;
-    }
-}
-function postProgressUI(message) {
-    try {
-        postUI(message);
-    }
-    catch (error) {
-        logDiagnostic("warn", "Unable to post progress update", {
-            error: describeError(error),
-            debugState: exportDebugState
-        });
-    }
-}
-function maybeReportExportProgress(current_1, total_1, label_1) {
-    return __awaiter(this, arguments, void 0, function* (current, total, label, force = false) {
-        const now = Date.now();
-        const progress = activeExportProgress || { lastCurrent: 0, lastPostedAt: 0 };
-        const shouldPost = force ||
-            current >= total && total > 0 ||
-            current - progress.lastCurrent >= EXPORT_PROGRESS_EVERY_LAYERS ||
-            now - progress.lastPostedAt >= EXPORT_PROGRESS_TIME_INTERVAL_MS;
-        if (!shouldPost)
-            return;
-        postProgressUI({
-            type: "progress",
-            phase: "export",
-            current,
-            total,
-            label
-        });
-        progress.lastCurrent = current;
-        progress.lastPostedAt = now;
-        activeExportProgress = progress;
-        if (activeExportStats) {
-            activeExportStats.progressPosts++;
-            activeExportStats.progressYields++;
-        }
-        yield yieldToEventLoop();
-    });
-}
-function setExportDebugState(nextState) {
-    exportDebugState.phase = nextState.phase;
-    exportDebugState.page = nextState.page;
-    exportDebugState.node = nextState.node;
-    exportDebugState.nodeComplexity = nextState.nodeComplexity;
-    exportDebugState.parentId = nextState.parentId;
-    exportDebugState.nodeIndex = nextState.nodeIndex;
-    exportDebugState.file = nextState.file;
-    exportDebugState.transferId = nextState.transferId;
-    exportDebugState.fileIndex = nextState.fileIndex;
-    exportDebugState.chunkIndex = nextState.chunkIndex;
-    exportDebugState.fileSize = nextState.fileSize;
-    exportDebugState.streamedBytes = nextState.streamedBytes;
-    exportDebugState.processedNodes = processedNodes;
-    exportDebugState.totalNodes = totalNodes;
-}
-function resetExportStats(options, pageCount, rootCount) {
-    logDiagnostic("log", "[MasterGo2Figma] Export session stats reset", {
+    resetExportStats(options, pageCount, rootCount) {
+      this.logDiagnostic("log", "[MasterGo2Figma] Export session stats reset", {
         sessionId: options.sessionId || "",
         autoContinue: options.autoContinue === true,
         batchIndex: options.batchIndex || 0,
@@ -634,10 +155,14 @@ function resetExportStats(options, pageCount, rootCount) {
         rootCount,
         transferMode: options.transferMode,
         relayUrl: options.relayUrl || "",
-        chunkMaxRecords: LAYER_CHUNK_MAX_RECORDS,
-        chunkMaxBytes: LAYER_CHUNK_MAX_BYTES
-    });
-    activeExportStats = {
+        chunkMaxRecords: 16,
+        // LAYER_CHUNK_MAX_RECORDS
+        chunkMaxBytes: 64 * 1024
+        // LAYER_CHUNK_MAX_BYTES
+      });
+      this.totalNodes = 0;
+      this.processedNodes = 0;
+      this.activeExportStats = {
         startedAt: Date.now(),
         scope: options.scope,
         transferMode: options.transferMode,
@@ -664,2448 +189,432 @@ function resetExportStats(options, pageCount, rootCount) {
         missingImageAssets: 0,
         progressPosts: 0,
         progressYields: 0
-    };
-    activeExportProgress = {
+      };
+      this.activeExportProgress = {
         lastCurrent: 0,
         lastPostedAt: Date.now()
-    };
-}
-function timeExportPhase(phase, action) {
-    return __awaiter(this, void 0, void 0, function* () {
+      };
+    }
+    timeExportPhase(phase, action) {
+      return __async(this, null, function* () {
         const startedAt = Date.now();
         try {
-            return yield action();
+          return yield action();
+        } finally {
+          if (this.activeExportStats) {
+            this.activeExportStats[phase] += Date.now() - startedAt;
+          }
         }
-        finally {
-            if (activeExportStats)
-                activeExportStats[phase] += Date.now() - startedAt;
-        }
-    });
-}
-function noteExportFileTransfer(file, size, totalChunks) {
-    if (!activeExportStats)
-        return;
-    activeExportStats.files++;
-    activeExportStats.chunks += totalChunks;
-    activeExportStats.bytes += size;
-    if (file.path.indexOf("/layers/layers-") !== -1)
-        activeExportStats.layerChunkFiles++;
-}
-function noteExportLayerRecord() {
-    if (activeExportStats)
-        activeExportStats.layerRecords++;
-}
-function noteExportSplitPackage() {
-    if (activeExportStats)
-        activeExportStats.splitPackages++;
-}
-function updateExportStatsFromManifest(manifest) {
-    if (!activeExportStats)
-        return;
-    activeExportStats.totalNodes = totalNodes > 0 ? totalNodes : processedNodes;
-    activeExportStats.processedNodes = processedNodes;
-    if (manifest) {
-        activeExportStats.imageAssets = manifest.stats.imageAssetCount;
-        activeExportStats.missingImageAssets = manifest.stats.missingImageAssetCount;
+      });
     }
-}
-function logExportPerformanceSummary(label, manifest) {
-    if (!activeExportStats)
-        return;
-    updateExportStatsFromManifest(manifest);
-    const durationMs = Math.max(Date.now() - activeExportStats.startedAt, 1);
-    const nodesPerSecond = Math.round((activeExportStats.processedNodes / durationMs) * 10000) / 10;
-    console.log("[MasterGo2Figma] Export performance", {
+    noteExportFileTransfer(file, size, totalChunks) {
+      if (!this.activeExportStats) return;
+      this.activeExportStats.files++;
+      this.activeExportStats.chunks += totalChunks;
+      this.activeExportStats.bytes += size;
+      if (file.path.indexOf("/layers/layers-") !== -1) {
+        this.activeExportStats.layerChunkFiles++;
+      }
+    }
+    noteExportLayerRecord() {
+      if (this.activeExportStats) this.activeExportStats.layerRecords++;
+    }
+    noteExportSplitPackage() {
+      if (this.activeExportStats) this.activeExportStats.splitPackages++;
+    }
+    updateExportStatsFromManifest(manifest) {
+      if (!this.activeExportStats) return;
+      this.activeExportStats.totalNodes = this.totalNodes > 0 ? this.totalNodes : this.processedNodes;
+      this.activeExportStats.processedNodes = this.processedNodes;
+      if (manifest) {
+        this.activeExportStats.imageAssets = manifest.stats.imageAssetCount;
+        this.activeExportStats.missingImageAssets = manifest.stats.missingImageAssetCount;
+      }
+    }
+    logExportPerformanceSummary(label, manifest) {
+      if (!this.activeExportStats) return;
+      this.updateExportStatsFromManifest(manifest);
+      const durationMs = Math.max(Date.now() - this.activeExportStats.startedAt, 1);
+      const nodesPerSecond = Math.round(this.activeExportStats.processedNodes / durationMs * 1e4) / 10;
+      console.log("[MasterGo2Figma] Export performance", {
         label,
         durationMs,
         duration: formatDurationMs(durationMs),
         nodesPerSecond,
-        sessionId: activeExportStats.sessionId,
-        autoContinue: activeExportStats.autoContinue,
-        batchIndex: activeExportStats.batchIndex,
-        batchTotal: activeExportStats.batchTotal,
-        scope: activeExportStats.scope,
-        transferMode: activeExportStats.transferMode,
-        pageCount: activeExportStats.pageCount,
-        rootCount: activeExportStats.rootCount,
-        totalNodes: activeExportStats.totalNodes,
-        processedNodes: activeExportStats.processedNodes,
-        scanMs: activeExportStats.scanMs,
-        exportMs: activeExportStats.exportMs,
-        assetMs: activeExportStats.assetMs,
-        manifestMs: activeExportStats.manifestMs,
-        ackMs: activeExportStats.ackMs,
-        files: activeExportStats.files,
-        chunks: activeExportStats.chunks,
-        bytes: activeExportStats.bytes,
-        layerChunkFiles: activeExportStats.layerChunkFiles,
-        layerRecords: activeExportStats.layerRecords,
-        splitPackages: activeExportStats.splitPackages,
-        imageAssets: activeExportStats.imageAssets,
-        missingImageAssets: activeExportStats.missingImageAssets,
-        progressPosts: activeExportStats.progressPosts,
-        progressYields: activeExportStats.progressYields
-    });
-}
-function formatDurationMs(ms) {
-    const totalSeconds = Math.round(ms / 1000);
-    const minutes = Math.floor(totalSeconds / 60);
-    const seconds = totalSeconds % 60;
-    return `${minutes}m ${seconds}s`;
-}
-function describeError(error) {
-    if (error === null)
-        return { kind: "null" };
-    if (error === undefined)
-        return { kind: "undefined" };
-    try {
-        if (error && error.name === "RuntimeError") {
-            return {
-                kind: "RuntimeError",
-                message: "memory access out of bounds (Wasm OOM)"
-            };
-        }
+        sessionId: this.activeExportStats.sessionId,
+        autoContinue: this.activeExportStats.autoContinue,
+        batchIndex: this.activeExportStats.batchIndex,
+        batchTotal: this.activeExportStats.batchTotal,
+        scope: this.activeExportStats.scope,
+        transferMode: this.activeExportStats.transferMode,
+        pageCount: this.activeExportStats.pageCount,
+        rootCount: this.activeExportStats.rootCount,
+        totalNodes: this.activeExportStats.totalNodes,
+        processedNodes: this.activeExportStats.processedNodes,
+        scanMs: this.activeExportStats.scanMs,
+        exportMs: this.activeExportStats.exportMs,
+        assetMs: this.activeExportStats.assetMs,
+        manifestMs: this.activeExportStats.manifestMs,
+        ackMs: this.activeExportStats.ackMs,
+        files: this.activeExportStats.files,
+        chunks: this.activeExportStats.chunks,
+        bytes: this.activeExportStats.bytes,
+        layerChunkFiles: this.activeExportStats.layerChunkFiles,
+        layerRecords: this.activeExportStats.layerRecords,
+        splitPackages: this.activeExportStats.splitPackages,
+        imageAssets: this.activeExportStats.imageAssets,
+        missingImageAssets: this.activeExportStats.missingImageAssets,
+        progressPosts: this.activeExportStats.progressPosts,
+        progressYields: this.activeExportStats.progressYields
+      });
     }
-    catch (_) { }
-    const id = softRead(() => error.id, "");
-    const type = softRead(() => error.type, "");
-    if (id || type) {
-        return {
-            kind: "HostObject",
-            id,
-            type,
-            name: softRead(() => error.name, "Untitled")
+    postUI(message) {
+      try {
+        mg.ui.postMessage(message);
+      } catch (error) {
+        console.warn("Unable to post message to SendToFigma UI:", error);
+      }
+    }
+    postProgressUI(message) {
+      this.postUI(message);
+    }
+    maybeReportExportProgress(current, total, label, force = false) {
+      return __async(this, null, function* () {
+        const now = Date.now();
+        const state2 = this.activeExportProgress || {
+          lastCurrent: 0,
+          lastPostedAt: 0
         };
-    }
-    const name = softRead(() => error.name, "");
-    const message = softRead(() => error.message, "");
-    if (error instanceof Error || (name && message)) {
-        return {
-            kind: "Error",
-            name: name || "Error",
-            message: message || "No message",
-            code: softRead(() => error.code, undefined)
-        };
-    }
-    if (typeof error === "object") {
-        const safeObj = { kind: "object" };
-        try {
-            for (const key of Object.keys(error)) {
-                const val = error[key];
-                if (val === null) {
-                    safeObj[key] = null;
-                }
-                else if (Array.isArray(val)) {
-                    safeObj[key] = `[Array(${val.length})]`;
-                }
-                else if (typeof val === "object") {
-                    safeObj[key] = `[Object]`;
-                }
-                else if (typeof val !== "function") {
-                    safeObj[key] = val;
-                }
-            }
-        }
-        catch (_) {
-            safeObj.raw = String(error);
-        }
-        return safeObj;
-    }
-    return {
-        kind: typeof error,
-        value: String(error)
-    };
-}
-function safeStringifyForLog(value) {
-    if (value === null)
-        return "null";
-    if (value === undefined)
-        return "undefined";
-    if (typeof value !== "object")
-        return String(value);
-    const nodeId = softRead(() => value.id, "");
-    const nodeType = softRead(() => value.type, "");
-    if ((nodeId || nodeType) && !isPlainObjectForLog(value)) {
-        return `[HostNode: ${softRead(() => value.name, "Untitled")} (${nodeType}, id=${nodeId})]`;
-    }
-    try {
-        const seen = new WeakSet();
-        return JSON.stringify(value, (key, nextValue) => {
-            if (typeof nextValue === "object" && nextValue !== null) {
-                if (seen.has(nextValue))
-                    return "[Circular]";
-                seen.add(nextValue);
-                const childId = softRead(() => nextValue.id, "");
-                const childType = softRead(() => nextValue.type, "");
-                if ((childId || childType) && !isPlainObjectForLog(nextValue)) {
-                    return `[HostNode: ${softRead(() => nextValue.name, "Untitled")} (${childType}, id=${childId})]`;
-                }
-                const nextName = softRead(() => nextValue.name, "");
-                const nextMsg = softRead(() => nextValue.message, "");
-                if (nextName || nextMsg) {
-                    return { name: nextName, message: nextMsg };
-                }
-            }
-            return nextValue;
+        const shouldPost = force || current >= total || current - state2.lastCurrent >= 100 || // EXPORT_PROGRESS_EVERY_LAYERS
+        now - state2.lastPostedAt >= 200;
+        if (!shouldPost) return;
+        this.postProgressUI({
+          type: "progress",
+          phase: "exporting",
+          current,
+          total,
+          label
         });
+        state2.lastCurrent = current;
+        state2.lastPostedAt = now;
+        this.activeExportProgress = state2;
+        if (this.activeExportStats) {
+          this.activeExportStats.progressPosts++;
+          this.activeExportStats.progressYields++;
+        }
+        yield yieldToEventLoop();
+      });
     }
-    catch (_) {
-        try {
-            const name = softRead(() => value.name, "");
-            const msg = softRead(() => value.message, "");
-            if (name || msg)
-                return `[ErrorObject: ${name} - ${msg}]`;
-            return `[Object: ${String(value)}]`;
-        }
-        catch (__) {
-            return "[Object serialization failed]";
-        }
+  };
+  var state = new SendToFigmaState();
+
+  // src/layerRules.ts
+  var LAYER_RULES_SCHEMA = "mastergo2figma.layer-conversion-rules.v1";
+  var DEFAULT_LAYER_CONVERSION_CONFIG = {
+    schema: LAYER_RULES_SCHEMA,
+    version: 1,
+    rules: {
+      BOOLEAN_OPERATION: { sourceType: "BOOLEAN_OPERATION", restoreType: "BOOLEAN_OPERATION", sendStrategy: "booleanTree", receiveCreate: "BOOLEAN_OPERATION", isContainer: true, visualFrameSource: false },
+      PEN: { sourceType: "PEN", restoreType: "VECTOR", sendStrategy: "penNetwork", receiveCreate: "VECTOR", isContainer: false, visualFrameSource: false },
+      VECTOR: { sourceType: "VECTOR", restoreType: "VECTOR", sendStrategy: "penNetwork", receiveCreate: "VECTOR", isContainer: false, visualFrameSource: false },
+      ELLIPSE: { sourceType: "ELLIPSE", restoreType: "ELLIPSE", sendStrategy: "ellipseArc", receiveCreate: "ELLIPSE", isContainer: false, visualFrameSource: false },
+      RECTANGLE: { sourceType: "RECTANGLE", restoreType: "RECTANGLE", sendStrategy: "universalOnly", receiveCreate: "RECTANGLE", isContainer: false, visualFrameSource: false },
+      STAR: { sourceType: "STAR", restoreType: "STAR", sendStrategy: "star", receiveCreate: "STAR", isContainer: false, visualFrameSource: false },
+      LINE: { sourceType: "LINE", restoreType: "LINE", sendStrategy: "universalOnly", receiveCreate: "LINE", isContainer: false, visualFrameSource: false },
+      POLYGON: { sourceType: "POLYGON", restoreType: "POLYGON", sendStrategy: "polygon", receiveCreate: "POLYGON", isContainer: false, visualFrameSource: false },
+      TEXT: { sourceType: "TEXT", restoreType: "TEXT", sendStrategy: "text", receiveCreate: "TEXT", isContainer: false, visualFrameSource: false },
+      FRAME: { sourceType: "FRAME", restoreType: "FRAME", sendStrategy: "frameLike", receiveCreate: "FRAME", isContainer: true, visualFrameSource: false },
+      GROUP: { sourceType: "GROUP", restoreType: "GROUP", sendStrategy: "groupLike", receiveCreate: "GROUP", isContainer: true, visualFrameSource: false },
+      SECTION: { sourceType: "SECTION", restoreType: "SECTION", sendStrategy: "frameLike", receiveCreate: "SECTION", isContainer: true, visualFrameSource: false },
+      SLICE: { sourceType: "SLICE", restoreType: "SLICE", sendStrategy: "universalOnly", receiveCreate: "SLICE", isContainer: false, visualFrameSource: false },
+      CONNECTOR: { sourceType: "CONNECTOR", restoreType: "CONNECTOR", sendStrategy: "connector", receiveCreate: "CONNECTOR", isContainer: false, visualFrameSource: false },
+      COMPONENT: { sourceType: "COMPONENT", restoreType: "FRAME", sendStrategy: "frameLike", receiveCreate: "FRAME", isContainer: true, visualFrameSource: true },
+      COMPONENT_SET: { sourceType: "COMPONENT_SET", restoreType: "FRAME", sendStrategy: "frameLike", receiveCreate: "FRAME", isContainer: true, visualFrameSource: true },
+      INSTANCE: { sourceType: "INSTANCE", restoreType: "FRAME", sendStrategy: "frameLike", receiveCreate: "FRAME", isContainer: true, visualFrameSource: true }
     }
-}
-function isPlainObjectForLog(value) {
-    if (!value || typeof value !== "object" || Array.isArray(value))
-        return false;
-    try {
-        const proto = Object.getPrototypeOf(value);
-        return proto === Object.prototype || proto === null;
-    }
-    catch (_) {
-        return false;
-    }
-}
-function logDiagnostic(level, message, payload) {
-    const text = payload === undefined ? "" : ` ${safeStringifyForLog(payload)}`;
-    console[level](`${message}${text}`);
-}
-function summarizeUIMessage(message) {
-    if (!message || typeof message !== "object")
-        return { value: String(message) };
-    return {
-        type: message.type,
-        transferId: message.transferId,
-        index: message.index,
-        chunkIndex: message.chunkIndex,
-        path: message.path,
-        kind: message.kind,
-        size: message.size,
-        totalChunks: message.totalChunks,
-        contentLength: typeof message.content === "string" ? message.content.length : undefined,
-        bytesLength: message.bytes && typeof message.bytes.length === "number" ? message.bytes.length : undefined
-    };
-}
-function createExportTransfer(manifest, filename, options) {
-    const transferId = `export-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    const target = options && options.transferMode === "local-json-stream" ? EXPORT_TARGET_LOCAL_RELAY : EXPORT_TARGET_ZIP;
-    return {
-        transferId,
-        filename: filename || createExportFilename(manifest),
-        fileIndex: 0,
-        postedChunks: 0,
-        streamedBytes: 0,
-        target,
-        relayUrl: target === EXPORT_TARGET_LOCAL_RELAY && options ? options.relayUrl : undefined
-    };
-}
-function getExportTransferMessageMeta(transfer) {
-    return {
-        target: transfer.target,
-        relayUrl: transfer.relayUrl || ""
-    };
-}
-function startExportTransfer(transfer) {
-    postUI(Object.assign({ type: "export-transfer-start", transferId: transfer.transferId, filename: transfer.filename, fileCount: 0, totalBytes: 0 }, getExportTransferMessageMeta(transfer)));
-}
-function streamExportFileToUI(transfer, file) {
-    return __awaiter(this, void 0, void 0, function* () {
-        const index = transfer.fileIndex++;
-        const canSendTextAsBytes = file.bytes === undefined && SEND_TEXT_CHUNKS_AS_BYTES && typeof TextEncoder !== "undefined";
-        const kind = file.bytes !== undefined || canSendTextAsBytes ? "bytes" : "content";
-        const contentParts = file.contentParts || (file.content !== undefined ? [file.content] : []);
-        const size = kind === "bytes"
-            ? (file.bytes ? file.bytes.length : contentParts.reduce((sum, part) => sum + part.length, 0))
-            : contentParts.reduce((sum, part) => sum + part.length, 0);
-        const totalChunks = kind === "bytes"
-            ? Math.ceil(size / EXPORT_TRANSFER_CHUNK_SIZE)
-            : Math.max(1, Math.ceil(size / EXPORT_TEXT_CHUNK_CHAR_LIMIT));
-        let fileStarted = false;
-        let fileEnded = false;
-        try {
-            setExportDebugState({
-                phase: "transfer:file-start",
-                file: file.path,
-                transferId: transfer.transferId,
-                fileIndex: index,
-                fileSize: size,
-                streamedBytes: transfer.streamedBytes
-            });
-            postUI(Object.assign({ type: "export-file-start", transferId: transfer.transferId, index, path: file.path, kind,
-                size,
-                totalChunks }, getExportTransferMessageMeta(transfer)));
-            fileStarted = true;
-            if (file.bytes !== undefined) {
-                const bytes = file.bytes || new Uint8Array(0);
-                for (let offset = 0, chunkIndex = 0; offset < bytes.length; offset += EXPORT_TRANSFER_CHUNK_SIZE, chunkIndex++) {
-                    setExportDebugState({
-                        phase: "transfer:bytes-chunk",
-                        file: file.path,
-                        transferId: transfer.transferId,
-                        fileIndex: index,
-                        chunkIndex,
-                        fileSize: size,
-                        streamedBytes: transfer.streamedBytes
-                    });
-                    postUI(Object.assign({ type: "export-file-chunk", transferId: transfer.transferId, index,
-                        chunkIndex, bytes: bytes.slice(offset, offset + EXPORT_TRANSFER_CHUNK_SIZE) }, getExportTransferMessageMeta(transfer)));
-                    transfer.postedChunks++;
-                    if (transfer.postedChunks % EXPORT_TRANSFER_YIELD_EVERY_CHUNKS === 0)
-                        yield yieldToHost();
-                }
-            }
-            else {
-                let chunkIndex = 0;
-                const textEncoder = canSendTextAsBytes ? new TextEncoder() : null;
-                const postContentChunk = (content) => __awaiter(this, void 0, void 0, function* () {
-                    setExportDebugState({
-                        phase: textEncoder ? "transfer:content-bytes-chunk" : "transfer:content-chunk",
-                        file: file.path,
-                        transferId: transfer.transferId,
-                        fileIndex: index,
-                        chunkIndex,
-                        fileSize: size,
-                        streamedBytes: transfer.streamedBytes
-                    });
-                    const message = textEncoder
-                        ? Object.assign({ type: "export-file-chunk", transferId: transfer.transferId, index,
-                            chunkIndex, bytes: textEncoder.encode(content) }, getExportTransferMessageMeta(transfer)) : Object.assign({ type: "export-file-chunk", transferId: transfer.transferId, index,
-                        chunkIndex,
-                        content }, getExportTransferMessageMeta(transfer));
-                    postUI(message);
-                    chunkIndex++;
-                    transfer.postedChunks++;
-                    if (transfer.postedChunks % EXPORT_TRANSFER_YIELD_EVERY_CHUNKS === 0)
-                        yield yieldToHost();
-                });
-                for (const part of contentParts) {
-                    if (!part)
-                        continue;
-                    let offset = 0;
-                    while (offset < part.length) {
-                        const nextLength = Math.min(EXPORT_TEXT_CHUNK_CHAR_LIMIT, part.length - offset);
-                        const chunkStr = part.slice(offset, offset + nextLength);
-                        yield postContentChunk(chunkStr);
-                        offset += nextLength;
-                    }
-                }
-                if (size === 0)
-                    yield postContentChunk("");
-            }
-            transfer.streamedBytes += size;
-            setExportDebugState({
-                phase: "transfer:file-end",
-                file: file.path,
-                transferId: transfer.transferId,
-                fileIndex: index,
-                fileSize: size,
-                streamedBytes: transfer.streamedBytes
-            });
-            const fileAckPromise = waitForExportFileAck(transfer, index, file.path);
-            postUI(Object.assign({ type: "export-file-end", transferId: transfer.transferId, index }, getExportTransferMessageMeta(transfer)));
-            fileEnded = true;
-            yield fileAckPromise;
-            noteExportFileTransfer(file, size, totalChunks);
-            if (index % 25 === 0)
-                yield yieldToHost();
-        }
-        catch (error) {
-            logDiagnostic("error", "[MasterGo2Figma] Transfer file failed", {
-                error: describeError(error),
-                file: {
-                    path: file.path,
-                    kind,
-                    index,
-                    size,
-                    started: fileStarted,
-                    ended: fileEnded
-                },
-                debugState: exportDebugState
-            });
-            if (fileStarted && !fileEnded)
-                abortExportFileToUI(transfer, index, file.path, error);
-            clearPendingExportFileAck(transfer, index);
-            throw error;
-        }
-    });
-}
-function abortExportFileToUI(transfer, index, path, error) {
-    try {
-        postUI(Object.assign({ type: "export-file-abort", transferId: transfer.transferId, index,
-            path, reason: safeStringifyForLog(describeError(error)) }, getExportTransferMessageMeta(transfer)));
-    }
-    catch (abortError) {
-        logDiagnostic("warn", "[MasterGo2Figma] Unable to send export-file-abort", {
-            abortError: describeError(abortError),
-            originalError: describeError(error),
-            transfer: summarizeTransfer(transfer),
-            file: { index, path }
-        });
-    }
-}
-function getExportFileAckKey(transferId, index) {
-    return `${transferId}:${index}`;
-}
-function resolveExportFileAck(message) {
-    const transferId = String(message && message.transferId || "");
-    const index = Number(message && message.index);
-    const key = getExportFileAckKey(transferId, index);
-    const resolver = exportFileAckResolvers[key];
-    if (!resolver)
-        return;
-    clearTimeout(resolver.timeoutId);
-    delete exportFileAckResolvers[key];
-    const ack = {
-        transferId,
-        index,
-        success: message && message.success === true,
-        path: typeof message.path === "string" ? message.path : resolver.path,
-        error: typeof message.error === "string" ? message.error : undefined,
-        pendingCount: typeof message.pendingCount === "number" ? message.pendingCount : undefined
-    };
-    if (ack.success) {
-        resolver.resolve(ack);
-    }
-    else {
-        resolver.reject(new Error(`UI failed to write ${ack.path || resolver.path}: ${ack.error || "unknown error"}; pending=${ack.pendingCount === undefined ? "unknown" : ack.pendingCount}`));
-    }
-}
-function waitForExportFileAck(transfer, index, path, timeoutMs = 60000) {
-    return new Promise((resolve, reject) => {
-        const key = getExportFileAckKey(transfer.transferId, index);
-        const timeoutId = setTimeout(() => {
-            delete exportFileAckResolvers[key];
-            reject(new Error(`Timed out waiting for UI file ack: ${path}`));
-        }, timeoutMs);
-        exportFileAckResolvers[key] = {
-            resolve,
-            reject,
-            timeoutId,
-            path
-        };
-    });
-}
-function clearPendingExportFileAck(transfer, index) {
-    const key = getExportFileAckKey(transfer.transferId, index);
-    const resolver = exportFileAckResolvers[key];
-    if (!resolver)
-        return;
-    clearTimeout(resolver.timeoutId);
-    delete exportFileAckResolvers[key];
-}
-function completeExportTransfer(transfer, manifest, isFinal = true, stats = manifest.stats) {
-    postUI(Object.assign({ type: "export-transfer-complete", transferId: transfer.transferId, filename: transfer.filename, fileCount: transfer.fileIndex, totalBytes: transfer.streamedBytes, stats,
-        isFinal }, getExportTransferMessageMeta(transfer)));
-}
-function resolveExportTransferAck(message) {
-    const transferId = String(message && message.transferId || "");
-    const resolver = exportTransferAckResolvers[transferId];
-    if (!resolver)
-        return;
-    clearTimeout(resolver.timeoutId);
-    delete exportTransferAckResolvers[transferId];
-    const ack = {
-        transferId,
-        success: message && message.success === true,
-        filename: typeof message.filename === "string" ? message.filename : undefined,
-        error: typeof message.error === "string" ? message.error : undefined,
-        pendingCount: typeof message.pendingCount === "number" ? message.pendingCount : undefined
-    };
-    if (ack.success) {
-        resolver.resolve(ack);
-    }
-    else {
-        resolver.reject(new Error(`UI zip failed for ${ack.filename || transferId}: ${ack.error || "unknown error"}; pending=${ack.pendingCount === undefined ? "unknown" : ack.pendingCount}`));
-    }
-}
-function waitForExportTransferAck(transfer, timeoutMs = 120000) {
-    return new Promise((resolve, reject) => {
-        const timeoutId = setTimeout(() => {
-            delete exportTransferAckResolvers[transfer.transferId];
-            reject(new Error(`Timed out waiting for UI zip ack: ${transfer.filename}`));
-        }, timeoutMs);
-        exportTransferAckResolvers[transfer.transferId] = {
-            resolve,
-            reject,
-            timeoutId
-        };
-    });
-}
-function streamJsonExportPackage(options) {
-    return __awaiter(this, void 0, void 0, function* () {
-        totalNodes = 0;
-        processedNodes = 0;
-        const previousImageAssetContext = activeImageAssetContext;
-        try {
-            const targets = getExportTargets(options);
-            let rootCount = 0;
-            for (const target of targets) {
-                rootCount += ensureTargetNodes(target).length;
-                clearTargetNodes(target);
-            }
-            if (rootCount === 0) {
-                throw new Error(options.scope === "selected" ? "请先选择要导出的图层" : "没有可导出的图层");
-            }
-            resetExportStats(options, targets.length, rootCount);
-            if (shouldSplitExportPackages(options, targets)) {
-                const aggregateManifest = yield streamSplitJsonExportPackages(options, targets);
-                logExportPerformanceSummary("split-complete", aggregateManifest);
-                return aggregateManifest;
-            }
-            postProgressUI({ type: "progress", phase: "scan", current: 0, total: 0, label: "正在扫描图层..." });
-            countVisited = 0;
-            totalNodes = 0;
-            yield timeExportPhase("scanMs", () => __awaiter(this, void 0, void 0, function* () {
-                for (const target of targets) {
-                    const nodes = ensureTargetNodes(target);
-                    for (const node of nodes)
-                        yield countNodes(node);
-                    clearTargetNodes(target);
-                }
-            }));
-            processedNodes = 0;
-            postProgressUI({ type: "progress", phase: "prepare", current: 0, total: totalNodes, label: "准备分块导出 JSON..." });
-            const imageAssetContext = createImageAssetContext();
-            activeImageAssetContext = imageAssetContext;
-            const manifest = createBaseExportManifest(options, targets.length);
-            const transfer = createExportTransfer(manifest, undefined, options);
-            startExportTransfer(transfer);
-            console.log(`[MasterGo2Figma] Export v2 start: ${targets.length} pages, ${rootCount} roots, nodes=${totalNodes}.`);
-            yield timeExportPhase("exportMs", () => __awaiter(this, void 0, void 0, function* () {
-                for (let pageIndex = 0; pageIndex < targets.length; pageIndex++) {
-                    const pageTarget = targets[pageIndex];
-                    ensureTargetNodes(pageTarget);
-                    yield streamPageExportToTransfer(pageTarget, pageIndex, targets.length, manifest, transfer);
-                    clearTargetNodes(pageTarget);
-                    targets[pageIndex] = null;
-                }
-            }));
-            postProgressUI({ type: "progress", phase: "assets", current: processedNodes, total: totalNodes, label: "正在导出图片资源..." });
-            yield timeExportPhase("assetMs", () => __awaiter(this, void 0, void 0, function* () {
-                yield streamImageAssetsToTransfer(imageAssetContext, manifest, transfer);
-            }));
-            yield timeExportPhase("manifestMs", () => __awaiter(this, void 0, void 0, function* () {
-                yield streamExportFileToUI(transfer, {
-                    path: "manifest.json",
-                    content: JSON.stringify(manifest)
-                });
-            }));
-            postProgressUI({ type: "progress", phase: "complete", current: processedNodes, total: processedNodes, label: "JSON 已生成，正在准备下载..." });
-            const ackPromise = waitForExportTransferAck(transfer);
-            completeExportTransfer(transfer, manifest);
-            const ack = yield timeExportPhase("ackMs", () => __awaiter(this, void 0, void 0, function* () { return yield ackPromise; }));
-            console.log(`[MasterGo2Figma] UI zip complete: ${ack.filename || transfer.filename}, files=${transfer.fileIndex}, bytes=${transfer.streamedBytes}`);
-            logExportPerformanceSummary("complete", manifest);
-            return manifest;
-        }
-        catch (error) {
-            logExportPerformanceSummary("failed");
-            logDiagnostic("error", "[MasterGo2Figma] Export transfer failed", {
-                error: describeError(error),
-                debugState: exportDebugState
-            });
-            throw error;
-        }
-        finally {
-            activeImageAssetContext = previousImageAssetContext;
-        }
-    });
-}
-function createBaseExportManifest(options, pageCount) {
-    return {
-        schema: "mastergo2figma.package.v2",
-        version: 2,
-        source: "mastergo",
-        documentId: mg.documentId,
-        exportedAt: new Date().toISOString(),
-        scope: options.scope,
-        pages: [],
-        assets: {},
-        stats: {
-            pageCount,
-            layerCount: 0,
-            imageAssetCount: 0,
-            missingImageAssetCount: 0
-        }
-    };
-}
-function shouldSplitExportPackages(options, targets) {
-    if (!ENABLE_SPLIT_EXPORT)
-        return false;
-    if (options.transferMode === "direct-zip")
-        return false;
-    if (targets.length > 1)
-        return true;
-    const nodes = ensureTargetNodes(targets[0]);
-    return nodes.length > 1;
-}
-function streamSplitJsonExportPackages(options, targets) {
-    return __awaiter(this, void 0, void 0, function* () {
-        const aggregateManifest = createBaseExportManifest(options, targets.length);
-        let rootCount = 0;
-        for (const target of targets) {
-            rootCount += ensureTargetNodes(target).length;
-            clearTargetNodes(target);
-        }
-        console.log(`[MasterGo2Figma] Split export start: ${targets.length} pages, ${rootCount} roots. Node pre-scan skipped.`);
-        postProgressUI({
-            type: "progress",
-            phase: "prepare",
-            current: 0,
-            total: 0,
-            label: "正在按页面分包导出..."
-        });
-        for (let pageIndex = 0; pageIndex < targets.length; pageIndex++) {
-            const pageTarget = targets[pageIndex];
-            ensureTargetNodes(pageTarget);
-            yield streamPageRootSegmentsToPackages(options, pageTarget, pageIndex, targets.length, aggregateManifest);
-            clearTargetNodes(pageTarget);
-            targets[pageIndex] = null;
-        }
-        return aggregateManifest;
-    });
-}
-function streamPageRootSegmentsToPackages(options, pageTarget, pageIndex, pageCount, aggregateManifest) {
-    return __awaiter(this, void 0, void 0, function* () {
-        const pageName = safeRead(() => pageTarget.page.name, "Untitled");
-        isVerboseLoggingActive = pageIndex >= DEBUG_LOGGING_PAGE_INDEX_START;
-        if (isVerboseLoggingActive) {
-            console.log(`[MasterGo2Figma] [DEBUG] Verbose logging activated for split package page: ${pageName}`);
-        }
-        let rootIndex = 0;
-        let segmentIndex = 0;
-        const nodes = ensureTargetNodes(pageTarget);
-        const useSegmentNames = nodes.length > 1;
-        while (rootIndex < nodes.length) {
-            const imageAssetContext = createImageAssetContext();
-            activeImageAssetContext = imageAssetContext;
-            const manifest = createBaseExportManifest(options, 1);
-            const filename = createPageExportFilename(options.scope, pageTarget.page, pageIndex, pageCount, manifest.exportedAt, segmentIndex, useSegmentNames ? 0 : 1);
-            const transfer = createExportTransfer(manifest, filename, options);
-            startExportTransfer(transfer);
-            const segmentLabel = useSegmentNames ? ` segment ${segmentIndex + 1}` : "";
-            const pageNameOverride = useSegmentNames ? `${pageName} ${segmentIndex + 1}` : undefined;
-            const startRootIndex = rootIndex;
-            console.log(`[MasterGo2Figma] Split package start ${pageIndex + 1}/${pageCount}${segmentLabel}: ${pageName}, roots=${startRootIndex + 1}-${nodes.length}`);
-            logDiagnostic("log", "[MasterGo2Figma] Split package detail", {
-                pageIndex: pageIndex + 1,
-                pageCount,
-                pageName,
-                segmentIndex: segmentIndex + 1,
-                startRootIndex,
-                remainingRootCount: nodes.length - startRootIndex,
-                targetLayerCount: PAGE_SEGMENT_TARGET_LAYERS,
-                chunkMaxRecords: LAYER_CHUNK_MAX_RECORDS,
-                chunkMaxBytes: LAYER_CHUNK_MAX_BYTES,
-                transfer: summarizeTransfer(transfer)
-            });
-            noteExportSplitPackage();
-            const segmentResult = yield timeExportPhase("exportMs", () => __awaiter(this, void 0, void 0, function* () {
-                return yield streamPageRootSegmentToTransfer(pageTarget, pageIndex, pageCount, rootIndex, PAGE_SEGMENT_TARGET_LAYERS, manifest, transfer, pageNameOverride);
-            }));
-            rootIndex = segmentResult.nextRootIndex;
-            postProgressUI({
-                type: "progress",
-                phase: "assets",
-                current: processedNodes,
-                total: 0,
-                label: `正在导出图片资源 ${pageIndex + 1}/${pageCount}${segmentLabel}...`
-            });
-            yield timeExportPhase("assetMs", () => __awaiter(this, void 0, void 0, function* () {
-                yield streamImageAssetsToTransfer(imageAssetContext, manifest, transfer);
-            }));
-            yield timeExportPhase("manifestMs", () => __awaiter(this, void 0, void 0, function* () {
-                yield streamExportFileToUI(transfer, {
-                    path: "manifest.json",
-                    content: JSON.stringify(manifest)
-                });
-            }));
-            const pageSummary = manifest.pages[0];
-            if (pageSummary)
-                aggregateManifest.pages.push(pageSummary);
-            aggregateManifest.stats.pageCount = aggregateManifest.pages.length;
-            aggregateManifest.stats.layerCount += manifest.stats.layerCount;
-            aggregateManifest.stats.imageAssetCount += manifest.stats.imageAssetCount;
-            aggregateManifest.stats.missingImageAssetCount += manifest.stats.missingImageAssetCount;
-            const isFinal = pageIndex === pageCount - 1 && rootIndex >= nodes.length;
-            const ackPromise = waitForExportTransferAck(transfer);
-            completeExportTransfer(transfer, manifest, isFinal, isFinal ? aggregateManifest.stats : manifest.stats);
-            releaseExportPackageMemory(manifest, imageAssetContext);
-            activeImageAssetContext = null;
-            const ack = yield timeExportPhase("ackMs", () => __awaiter(this, void 0, void 0, function* () { return yield ackPromise; }));
-            console.log(`[MasterGo2Figma] Split package complete ${pageIndex + 1}/${pageCount}${segmentLabel}: ${ack.filename || transfer.filename}, roots=${segmentResult.rootCount}, layers=${segmentResult.layerCount}, files=${transfer.fileIndex}, bytes=${transfer.streamedBytes}`);
-            segmentIndex++;
-            yield yieldToHost();
-        }
-    });
-}
-function streamPageRootSegmentToTransfer(pageTarget, pageIndex, pageCount, startRootIndex, targetLayerCount, manifest, transfer, pageNameOverride) {
-    return __awaiter(this, void 0, void 0, function* () {
-        const pageFolder = createPageFolderName(pageTarget.page, pageIndex);
-        const pageId = safeRead(() => pageTarget.page.id, `page-${pageIndex + 1}`);
-        const pageName = pageNameOverride || safeRead(() => pageTarget.page.name, "Untitled");
-        const pageIndexRecord = {
-            schema: "mastergo2figma.page.v2",
-            version: 2,
-            id: pageId,
-            name: pageName,
-            folder: pageFolder,
-            rootNodeIds: [],
-            layerChunks: [],
-            layerCount: 0
-        };
-        const chunk = {
-            pageId,
-            pageFolder,
-            chunkIndex: 1,
-            recordJsons: [],
-            bytes: 0,
-            writtenNodeIds: {}
-        };
-        const nodes = ensureTargetNodes(pageTarget);
-        let rootIndex = startRootIndex;
-        while (rootIndex < nodes.length) {
-            const node = nodes[rootIndex];
-            pageIndexRecord.rootNodeIds.push(safeRead(() => node.id, `root-${pageIndex + 1}-${rootIndex + 1}`));
-            yield collectSubtreeIterative(node, pageTarget.page, pageFolder, null, rootIndex, pageIndexRecord, chunk, transfer, "root");
-            rootIndex++;
-            if (pageIndexRecord.layerCount >= targetLayerCount)
-                break;
-        }
-        yield flushLayerChunk(pageIndexRecord, chunk, transfer);
-        const pageFile = `pages/${pageFolder}/page.json`;
-        yield streamExportFileToUI(transfer, {
-            path: pageFile,
-            content: JSON.stringify(pageIndexRecord)
-        });
-        manifest.pages.push({
-            id: pageIndexRecord.id,
-            name: pageIndexRecord.name,
-            folder: pageFolder,
-            pageFile,
-            layerCount: pageIndexRecord.layerCount
-        });
-        manifest.stats.layerCount += pageIndexRecord.layerCount;
-        return {
-            nextRootIndex: rootIndex,
-            rootCount: rootIndex - startRootIndex,
-            layerCount: pageIndexRecord.layerCount
-        };
-    });
-}
-function streamPageExportToTransfer(pageTarget, pageIndex, pageCount, manifest, transfer, pageNameOverride) {
-    return __awaiter(this, void 0, void 0, function* () {
-        const pageFolder = createPageFolderName(pageTarget.page, pageIndex);
-        const pageId = safeRead(() => pageTarget.page.id, `page-${pageIndex + 1}`);
-        const pageName = pageNameOverride || safeRead(() => pageTarget.page.name, "Untitled");
-        const nodes = ensureTargetNodes(pageTarget);
-        isVerboseLoggingActive = pageIndex >= DEBUG_LOGGING_PAGE_INDEX_START;
-        if (isVerboseLoggingActive) {
-            console.log(`[MasterGo2Figma] [DEBUG] Verbose logging activated for page: ${pageName}`);
-        }
-        console.log(`[MasterGo2Figma] Page export start ${pageIndex + 1}/${pageCount}: ${pageName}, roots=${nodes.length}`);
-        const pageIndexRecord = {
-            schema: "mastergo2figma.page.v2",
-            version: 2,
-            id: pageId,
-            name: pageName,
-            folder: pageFolder,
-            rootNodeIds: [],
-            layerChunks: [],
-            layerCount: 0
-        };
-        const chunk = {
-            pageId,
-            pageFolder,
-            chunkIndex: 1,
-            recordJsons: [],
-            bytes: 0,
-            writtenNodeIds: {}
-        };
-        for (let index = 0; index < nodes.length; index++) {
-            const node = nodes[index];
-            pageIndexRecord.rootNodeIds.push(safeRead(() => node.id, `root-${pageIndex + 1}-${index + 1}`));
-            yield collectSubtreeIterative(node, pageTarget.page, pageFolder, null, index, pageIndexRecord, chunk, transfer, "root");
-        }
-        yield flushLayerChunk(pageIndexRecord, chunk, transfer);
-        const pageFile = `pages/${pageFolder}/page.json`;
-        yield streamExportFileToUI(transfer, {
-            path: pageFile,
-            content: JSON.stringify(pageIndexRecord)
-        });
-        console.log(`[MasterGo2Figma] Page export complete ${pageIndex + 1}/${pageCount}: ${pageIndexRecord.name}, layers=${pageIndexRecord.layerCount}, files=${pageIndexRecord.layerChunks.length}`);
-        manifest.pages.push({
-            id: pageIndexRecord.id,
-            name: pageIndexRecord.name,
-            folder: pageFolder,
-            pageFile,
-            layerCount: pageIndexRecord.layerCount
-        });
-        manifest.stats.layerCount += pageIndexRecord.layerCount;
-    });
-}
-function streamImageAssetsToTransfer(imageAssetContext, manifest, transfer) {
-    return __awaiter(this, void 0, void 0, function* () {
-        if (!ENABLE_IMAGE_EXPORT)
-            return;
-        for (const asset of imageAssetContext.assets) {
-            yield loadAndStreamImageAsset(asset, imageAssetContext, transfer);
-            manifest.assets[asset.key] = {
-                key: asset.key,
-                fileName: asset.fileName,
-                path: asset.path,
-                missing: asset.missing || undefined
-            };
-            if (asset.bytes && !asset.missing)
-                manifest.stats.imageAssetCount++;
-            // 显式断开强引用并给予主线程喘息机会
-            asset.bytes = null;
-            yield yieldToHost();
-        }
-        manifest.stats.missingImageAssetCount = imageAssetContext.missingImageAssetCount;
-    });
-}
-function releaseExportPackageMemory(manifest, imageAssetContext) {
-    manifest.pages = [];
-    manifest.assets = {};
-    imageAssetContext.assets.length = 0;
-    imageAssetContext.bySourceRef = {};
-}
-function yieldToHost() {
-    return new Promise(resolve => setTimeout(resolve, 0));
-}
-function createExportFilename(manifest) {
-    const date = manifest.exportedAt.replace(/[:.]/g, "-");
-    return `mastergo2figma-${manifest.scope}-${date}.zip`;
-}
-function createPageExportFilename(scope, page, pageIndex, pageCount, exportedAt, segmentIndex = 0, segmentCount = 1) {
-    const date = exportedAt.replace(/[:.]/g, "-");
-    const pageName = createFileSafeName(safeRead(() => page.name, ""), `page-${pageIndex + 1}`);
-    const segmentName = segmentCount > 1
-        ? `-segment-${padNumber(segmentIndex + 1)}-of-${padNumber(segmentCount)}`
-        : (segmentCount === 0 ? `-segment-${padNumber(segmentIndex + 1)}` : "");
-    return `mastergo2figma-${scope}-part-${padNumber(pageIndex + 1)}-of-${padNumber(pageCount)}${segmentName}-${pageName}-${date}.zip`;
-}
-function createFileSafeName(value, fallback) {
-    const cleaned = String(value || "")
-        .trim()
-        .replace(/[\\/:*?"<>|]/g, "-")
-        .replace(/\s+/g, "-")
-        .replace(/-+/g, "-")
-        .slice(0, 48);
-    return cleaned || fallback;
-}
-function ensureTargetNodes(target) {
-    if (!target.nodes) {
-        target.nodes = getSafeExportableChildren(target.page);
-    }
-    return target.nodes;
-}
-function clearTargetNodes(target) {
-    if (target.nodes) {
-        target.nodes.length = 0;
-        delete target.nodes;
-    }
-}
-function getExportTargets(options) {
-    const pages = [...mg.document.children].filter(page => !page.name.endsWith("_Process"));
-    const selectedPageIds = new Set(options.pageIds);
-    if (options.scope === "all-pages") {
-        return pages
-            .filter(page => selectedPageIds.size === 0 || selectedPageIds.has(page.id))
-            .map(page => ({ page }));
-    }
-    if (options.scope === "partial-pages") {
-        if (selectedPageIds.size === 0)
-            throw new Error("请至少选择一个页面");
-        return pages
-            .filter(page => selectedPageIds.has(page.id))
-            .map(page => ({ page }));
-    }
-    if (options.scope === "selected") {
-        const nodes = getTopLevelSelectedNodes(mg.document.currentPage.selection);
-        return [{ page: mg.document.currentPage, nodes }];
-    }
-    return [{ page: mg.document.currentPage }];
-}
-function getExportableChildren(node) {
-    const rawChildren = safeRead(() => node.children, null);
-    if (!rawChildren)
-        return [];
-    // Crucial: We MUST use index-based access.
-    // Spreading [...rawChildren] will force the Wasm engine to instantiate all children at once,
-    // which causes the "memory access out of bounds" error on large nodes.
-    const result = [];
-    const count = safeRead(() => rawChildren.length, 0);
-    for (let i = 0; i < count; i++) {
-        try {
-            const child = rawChildren[i];
-            if (child && !isGeneratedCarrierName(safeRead(() => child.name, ""))) {
-                result.push(child);
-            }
-        }
-        catch (error) {
-            // If accessing a specific index fails in the Wasm layer (e.g. getLayerProperties fail),
-            // we skip it to prevent crashing the whole export.
-            if (isOutOfMemoryError(error)) {
-                logDiagnostic("error", "[MasterGo2Figma] Child access OOM", {
-                    parent: getNodeProbe(node),
-                    childIndex: i,
-                    error: describeError(error)
-                });
-                throw error;
-            }
-        }
+  };
+  function createLayerRuleIndex(config) {
+    const result = {};
+    for (const sourceType in config.rules) {
+      if (Object.prototype.hasOwnProperty.call(config.rules, sourceType)) {
+        result[sourceType] = config.rules[sourceType];
+      }
     }
     return result;
-}
-function getSafeExportableChildren(node) {
-    try {
-        return getExportableChildren(node);
-    }
-    catch (error) {
-        if (isOutOfMemoryError(error))
-            throw error;
-        logDiagnostic("warn", "[MasterGo2Figma] Unable to read children for export", {
-            node: getNodeProbe(node),
-            error: describeError(error)
-        });
-        return [];
-    }
-}
-function collectSubtreeIterative(rootNode, page, pageFolder, parentId, rootIndex, pageIndexRecord, chunk, transfer, relation) {
-    return __awaiter(this, void 0, void 0, function* () {
-        const rootNodeId = safeRead(() => rootNode.id, "");
-        if (!rootNodeId)
-            return;
-        const stack = [{
-                nodeId: rootNodeId,
-                parentId,
-                index: rootIndex,
-                relation
-            }];
-        while (stack.length > 0) {
-            const item = stack.pop();
-            const { nodeId, parentId: currentParentId, index: currentIndex, relation: currentRelation } = item;
-            try {
-                const node = mg.getNodeById(nodeId);
-                if (!node) {
-                    logDiagnostic("warn", `[MasterGo2Figma] DFS node not found by ID: ${nodeId}`, {
-                        nodeId,
-                        debugState: exportDebugState
-                    });
-                    continue;
-                }
-                const result = yield collectSingleNodeExport(node, page, pageFolder, currentParentId, currentIndex, pageIndexRecord, chunk, transfer, currentRelation);
-                if (result && result.shouldExportChildren && result.childIds && result.childIds.length > 0) {
-                    // Push children in reverse order to keep correct DFS sequence
-                    for (let i = result.childIds.length - 1; i >= 0; i--) {
-                        const childId = result.childIds[i];
-                        if (childId) {
-                            stack.push({
-                                nodeId: childId,
-                                parentId: result.nodeId,
-                                index: i,
-                                relation: "child"
-                            });
-                        }
-                    }
-                }
-            }
-            catch (error) {
-                if (isOutOfMemoryError(error))
-                    throw error;
-                logDiagnostic("error", `[MasterGo2Figma] Iterative DFS node traversal failed: ${nodeId}`, {
-                    error: describeError(error),
-                    nodeId,
-                    debugState: exportDebugState
-                });
-            }
-        }
-    });
-}
-function collectSingleNodeExport(node, page, pageFolder, parentId, index, pageIndex, chunk, transfer, relation) {
-    return __awaiter(this, void 0, void 0, function* () {
-        processedNodes++;
-        const nodeDebug = getNodeDebugLabel(node);
-        const pageName = safeRead(() => page.name, pageIndex.name);
-        let phase = "start";
-        let nodeId = safeRead(() => node.id, `node-${pageIndex.layerCount + 1}`);
-        let nodeName = safeRead(() => node.name, "Untitled");
-        let recordAppended = false;
-        let childNodes = [];
-        let shouldExportChildren = false;
-        logDebug(`[DFS] Start node: id=${nodeId}, name=${nodeName}, type=${node.type}, page=${pageName}`);
-        const setNodeDebug = (nextPhase, nodeComplexity) => {
-            phase = nextPhase;
-            logDebug(`  - [DFS] Node ${nodeId} enter phase: ${nextPhase}`);
-            setExportDebugState({
-                phase: `node:${nextPhase}`,
-                page: pageName,
-                node: nodeDebug,
-                nodeComplexity,
-                parentId,
-                nodeIndex: index,
-                transferId: transfer.transferId,
-                fileIndex: transfer.fileIndex,
-                streamedBytes: transfer.streamedBytes
-            });
-        };
-        try {
-            setNodeDebug("read-children");
-            childNodes = getSafeExportableChildren(node);
-            logDebug(`  - [DFS] Node ${nodeId} read-children done: childCount=${childNodes.length}`);
-            setNodeDebug("analyse");
-            let nodeJson = analyseNodes(node);
-            logDebug(`  - [DFS] Node ${nodeId} analyse done`);
-            setNodeDebug("enrich-boolean");
-            yield enrichBooleanOperationExport(node, nodeJson, childNodes);
-            logDebug(`  - [DFS] Node ${nodeId} enrich-boolean done`);
-            setNodeDebug("enrich-vector");
-            yield enrichFilledVectorExport(node, nodeJson);
-            logDebug(`  - [DFS] Node ${nodeId} enrich-vector done`);
-            setNodeDebug("override-layout");
-            overrideExportLayoutFromSourceNode(nodeJson, node);
-            logDebug(`  - [DFS] Node ${nodeId} override-layout done`);
-            setNodeDebug("build-record");
-            shouldExportChildren = !nodeJson || !nodeJson.omitChildrenOnRestore;
-            const childIds = shouldExportChildren ? childNodes.map(child => safeRead(() => child.id, "")) : [];
-            const omittedChildNodeCount = !shouldExportChildren && nodeJson && nodeJson.omittedChildNodeCount
-                ? nodeJson.omittedChildNodeCount
-                : 0;
-            let layerRecord = {
-                id: nodeId,
-                pageId: safeRead(() => page.id, ""),
-                parentId,
-                index,
-                name: nodeName,
-                childIds,
-                props: nodeJson
-            };
-            let nodeComplexity = createNodeComplexitySnapshot(node, childNodes, nodeJson);
-            childNodes = [];
-            if (shouldLogStringifyProbe(nodeComplexity)) {
-                logDiagnostic("log", "[MasterGo2Figma] Stringify probe", {
-                    page: pageName,
-                    processedNodes,
-                    totalNodes,
-                    complexity: nodeComplexity
-                });
-            }
-            setNodeDebug("stringify", nodeComplexity);
-            let recordJson = stringifyLayerPayload(layerRecord, node, nodeComplexity);
-            const recordBytes = recordJson.length;
-            if (recordBytes >= STRINGIFY_RECORD_WARN_BYTES) {
-                logDiagnostic("warn", "[MasterGo2Figma] Large layer record", {
-                    page: pageName,
-                    node: nodeDebug,
-                    recordBytes,
-                    chunkBytes: chunk.bytes,
-                    chunkRecords: chunk.recordJsons.length,
-                    complexity: nodeComplexity,
-                    transfer: summarizeTransfer(transfer)
-                });
-            }
-            logDebug(`  - [DFS] Node ${nodeId} stringify done: length=${recordBytes}`);
-            layerRecord = null;
-            nodeJson = null;
-            nodeComplexity = null;
-            pageIndex.layerCount++;
-            noteExportLayerRecord();
-            setNodeDebug("append-record");
-            yield appendLayerRecord(recordJson, pageIndex, chunk, transfer);
-            markLayerWritten(chunk, nodeId);
-            recordAppended = true;
-            logDebug(`  - [DFS] Node ${nodeId} append done`);
-            if (omittedChildNodeCount) {
-                processedNodes += omittedChildNodeCount;
-            }
-            setNodeDebug("progress");
-            yield maybeReportExportProgress(processedNodes, totalNodes, "正在导出图层...");
-            // Clean up references immediately to allow GC
-            recordJson = null;
-            childNodes = null;
-            logDebug(`[DFS] Complete node: id=${nodeId}`);
-            return { nodeId, shouldExportChildren, childIds };
-        }
-        catch (error) {
-            logDebug(`[DFS] Node export caught error: id=${nodeId}, phase=${phase}, error=`, describeError(error));
-            const fatalOom = isOutOfMemoryError(error);
-            logDiagnostic("error", fatalOom ? `[MasterGo2Figma] Fatal node OOM, stopping export: ${nodeId}` : `[MasterGo2Figma] Node export failed: ${nodeId}`, {
-                phase,
-                error: describeError(error),
-                nodeId,
-                page: pageName,
-                debugState: exportDebugState
-            });
-            if (fatalOom)
-                throw error;
-            if (isRecoverableNodeExportError(error)) {
-                if (nodeId && chunk.writtenNodeIds[nodeId]) {
-                    return null;
-                }
-                try {
-                    yield appendFallbackLayerRecord(node, page, parentId, index, pageIndex, chunk, transfer);
-                }
-                catch (fallbackError) {
-                    logDiagnostic("error", "[MasterGo2Figma] Recoverable node fallback failed, skipping node", {
-                        relation,
-                        parentId,
-                        node: getNodeProbe(node),
-                        originalError: describeError(error),
-                        fallbackError: describeError(fallbackError)
-                    });
-                }
-            }
-            else {
-                throw error;
-            }
-            return null;
-        }
-    });
-}
-function appendFallbackLayerRecord(node, page, parentId, index, pageIndex, chunk, transfer) {
-    return __awaiter(this, void 0, void 0, function* () {
-        const nodeId = safeRead(() => node.id, `fallback-${pageIndex.layerCount + 1}`);
-        const nodeName = safeRead(() => node.name, "Untitled");
-        const sourceType = safeRead(() => node.type, "UNKNOWN");
-        const fallbackJson = createFallbackNodeJson(node, sourceType);
-        const nodeComplexity = createNodeComplexitySnapshot(node, [], fallbackJson);
-        const layerRecord = {
-            id: nodeId,
-            pageId: safeRead(() => page.id, ""),
-            parentId,
-            index,
-            name: nodeName,
-            childIds: [],
-            props: fallbackJson
-        };
-        const recordJson = stringifyLayerPayload(layerRecord, node, nodeComplexity);
-        pageIndex.layerCount++;
-        noteExportLayerRecord();
-        yield appendLayerRecord(recordJson, pageIndex, chunk, transfer);
-        markLayerWritten(chunk, nodeId);
-    });
-}
-function getNodeProbe(node) {
-    return {
-        id: softRead(() => node.id, "unknown-id"),
-        name: softRead(() => node.name, "Untitled"),
-        type: softRead(() => node.type, "UNKNOWN"),
-        width: softRead(() => Number(node.width), undefined),
-        height: softRead(() => Number(node.height), undefined),
-        childCount: getRawChildCount(node)
+  }
+  function initializeRules() {
+    state.cachedLayerRules = {
+      config: DEFAULT_LAYER_CONVERSION_CONFIG,
+      fileName: "\u5185\u7F6E\u8F6C\u6362\u89C4\u5219",
+      importedAt: ""
     };
-}
-function createNodeComplexitySnapshot(node, childNodes, nodeJson) {
-    const vectorNetwork = nodeJson && nodeJson.vectorNetwork ? nodeJson.vectorNetwork : null;
-    const regions = vectorNetwork && Array.isArray(vectorNetwork.regions) ? vectorNetwork.regions : undefined;
+    state.layerRulesBySourceType = createLayerRuleIndex(DEFAULT_LAYER_CONVERSION_CONFIG);
+  }
+  function startLayerRulesLoad() {
+    if (!state.layerRulesLoadPromise) {
+      state.layerRulesLoadPromise = (() => __async(null, null, function* () {
+        initializeRules();
+      }))();
+    }
+    return state.layerRulesLoadPromise;
+  }
+  function ensureLayerRulesLoaded() {
+    return __async(this, null, function* () {
+      yield startLayerRulesLoad();
+    });
+  }
+  function getLayerRuleStatus() {
+    if (!state.cachedLayerRules || !state.layerRulesBySourceType) return { valid: false };
     return {
-        id: softRead(() => node.id, "unknown-id"),
-        name: softRead(() => node.name, "Untitled"),
-        type: softRead(() => node.type, "UNKNOWN"),
-        sourceType: nodeJson && typeof nodeJson.sourceType === "string" ? nodeJson.sourceType : undefined,
-        restoreType: nodeJson && typeof nodeJson.restoreType === "string" ? nodeJson.restoreType : undefined,
-        width: softRead(() => Number(node.width), undefined),
-        height: softRead(() => Number(node.height), undefined),
-        childCount: childNodes ? childNodes.length : getRawChildCount(node),
-        rawChildCount: getRawChildCount(node),
-        textLength: nodeJson && typeof nodeJson.characters === "string" ? nodeJson.characters.length : undefined,
-        fillCount: nodeJson && nodeJson.geometry && Array.isArray(nodeJson.geometry.fills) ? nodeJson.geometry.fills.length : undefined,
-        strokeCount: nodeJson && nodeJson.geometry && Array.isArray(nodeJson.geometry.strokes) ? nodeJson.geometry.strokes.length : undefined,
-        effectCount: nodeJson && nodeJson.blend && Array.isArray(nodeJson.blend.effects) ? nodeJson.blend.effects.length : undefined,
-        vectorNetwork: vectorNetwork ? {
-            vertices: Array.isArray(vectorNetwork.vertices) ? vectorNetwork.vertices.length : undefined,
-            segments: Array.isArray(vectorNetwork.segments) ? vectorNetwork.segments.length : undefined,
-            regions: regions ? regions.length : undefined,
-            loops: regions ? regions.reduce((sum, region) => sum + (region && Array.isArray(region.loops) ? region.loops.length : 0), 0) : undefined
-        } : undefined
+      valid: true,
+      fileName: state.cachedLayerRules.fileName,
+      importedAt: state.cachedLayerRules.importedAt,
+      ruleCount: Object.keys(state.layerRulesBySourceType).length
     };
-}
-function getRawChildCount(node) {
-    return softRead(() => {
-        const children = node && node.children;
-        return children && typeof children.length === "number" ? children.length : undefined;
-    }, undefined);
-}
-function shouldLogStringifyProbe(complexity) {
-    const vertexCount = complexity.vectorNetwork && complexity.vectorNetwork.vertices || 0;
-    const segmentCount = complexity.vectorNetwork && complexity.vectorNetwork.segments || 0;
-    const regionCount = complexity.vectorNetwork && complexity.vectorNetwork.regions || 0;
-    const childCount = complexity.childCount || complexity.rawChildCount || 0;
-    return vertexCount >= STRINGIFY_PROBE_VERTEX_THRESHOLD ||
-        segmentCount >= STRINGIFY_PROBE_VERTEX_THRESHOLD ||
-        regionCount >= 50 ||
-        childCount >= STRINGIFY_PROBE_CHILD_THRESHOLD;
-}
-function isOutOfMemoryError(error) {
-    let message = "";
-    let name = "";
-    try {
-        message = String(error && error.message !== undefined ? error.message : error).toLowerCase();
+  }
+  function getLayerRule(sourceType) {
+    if (!sourceType || !state.layerRulesBySourceType) return null;
+    return state.layerRulesBySourceType[sourceType] || null;
+  }
+  function getRuleRestoreType(sourceType) {
+    const rule = getLayerRule(sourceType);
+    return rule ? rule.restoreType : sourceType;
+  }
+  function getRestoreType(sourceType) {
+    return getRuleRestoreType(sourceType);
+  }
+
+  // ../shared/matrixUtils.ts
+  function cloneTransform(transform) {
+    if (!transform || !Array.isArray(transform) || transform.length < 2) {
+      return [[1, 0, 0], [0, 1, 0]];
     }
-    catch (_) {
-        message = "";
-    }
-    try {
-        name = String(error && error.name !== undefined ? error.name : "").toLowerCase();
-    }
-    catch (_) {
-        name = "";
-    }
-    return message.indexOf("out of memory") !== -1 ||
-        message.indexOf("memory access out of bounds") !== -1 ||
-        name.indexOf("internalerror") !== -1 && message.indexOf("memory") !== -1;
-}
-function isRecoverableNodeExportError(error) {
-    if (isOutOfMemoryError(error))
-        return false;
-    let message = "";
-    try {
-        message = String(error && error.message !== undefined ? error.message : error).toLowerCase();
-    }
-    catch (_) {
-        message = "";
-    }
-    if (message.indexOf("ui zip") !== -1 || message.indexOf("timed out waiting for ui zip") !== -1)
-        return false;
-    return true;
-}
-function markLayerWritten(chunk, nodeId) {
-    if (nodeId)
-        chunk.writtenNodeIds[nodeId] = true;
-}
-function summarizeTransfer(transfer) {
-    return {
-        transferId: transfer.transferId,
-        filename: transfer.filename,
-        fileIndex: transfer.fileIndex,
-        postedChunks: transfer.postedChunks,
-        streamedBytes: transfer.streamedBytes
-    };
-}
-function enrichBooleanOperationExport(node, nodeJson, childNodes) {
-    return __awaiter(this, void 0, void 0, function* () {
-        if (!nodeJson || safeRead(() => node.type, "") !== "BOOLEAN_OPERATION")
-            return;
-        const rule = getLayerRule("BOOLEAN_OPERATION");
-        if (rule && rule.sendStrategy === "booleanTree") {
-            // No fallback logic needed per user's instruction. Just return and let children export natively.
-            return;
-        }
-        if (hasUsableVectorNetwork(nodeJson.vectorNetwork) || childNodes.length === 0)
-            return;
-        const svg = yield tryExportBooleanSvgMarkup(node);
-        if (svg) {
-            nodeJson.svgMarkup = svg;
-            nodeJson.svgFallback = true;
-            nodeJson.receiveCreateOverride = "SVG";
-            nodeJson.omitChildrenOnRestore = true;
-            nodeJson.omittedChildNodeCount = Math.max(0, countExportableSubtreeNodes(node) - 1);
-            return;
-        }
-        markBooleanAsFrameFallback(nodeJson);
-    });
-}
-function attachBooleanSvgFallbackMarkup(node, nodeJson) {
-    return __awaiter(this, void 0, void 0, function* () {
-        const svg = yield tryExportSvgMarkup(node, "Boolean");
-        if (!svg)
-            return;
-        nodeJson.svgMarkup = svg;
-        nodeJson.svgFallback = true;
-        nodeJson.booleanVisualFallback = "svg";
-        nodeJson.receiveCreateOverride = "SVG";
-        nodeJson.omitChildrenOnRestore = true;
-        nodeJson.omittedChildNodeCount = Math.max(0, countExportableSubtreeNodes(node) - 1);
-    });
-}
-function tryExportBooleanSvgMarkup(node) {
-    return __awaiter(this, void 0, void 0, function* () {
-        return tryExportSvgMarkup(node, "Boolean");
-    });
-}
-function enrichFilledVectorExport(node, nodeJson) {
-    return __awaiter(this, void 0, void 0, function* () {
-        if (!shouldUseSvgFallbackForFilledVector(nodeJson))
-            return;
-        const svg = yield tryExportSvgMarkup(node, "Filled vector");
-        if (!svg)
-            return;
-        nodeJson.svgMarkup = svg;
-        nodeJson.svgFallback = true;
-        nodeJson.receiveCreateOverride = "SVG";
-        nodeJson.vectorFallback = "svgMissingRegions";
-    });
-}
-function shouldUseSvgFallbackForFilledVector(nodeJson) {
-    if (!nodeJson || nodeJson.receiveCreateOverride || nodeJson.svgFallback)
-        return false;
-    if (nodeJson.sourceType !== "PEN" && nodeJson.sourceType !== "VECTOR")
-        return false;
-    if (!hasVisibleFill(nodeJson.geometry && nodeJson.geometry.fills))
-        return false;
-    const vectorNetwork = nodeJson.vectorNetwork;
-    if (!vectorNetwork || !Array.isArray(vectorNetwork.segments) || vectorNetwork.segments.length < 2)
-        return false;
-    if (Array.isArray(vectorNetwork.regions) && vectorNetwork.regions.length > 0)
-        return false;
-    return true;
-}
-function hasVisibleFill(fills) {
-    if (!Array.isArray(fills))
-        return false;
-    return fills.some(fill => fill && fill.type && fill.visible !== false && (fill.opacity === undefined || fill.opacity > 0));
-}
-function tryExportSvgMarkup(node, label) {
-    return __awaiter(this, void 0, void 0, function* () {
-        if (totalNodes === 0 && label !== "Boolean")
-            return "";
-        if (totalNodes > SVG_FALLBACK_MAX_DOCUMENT_NODES)
-            return "";
-        const subtreeNodeCount = countExportableSubtreeNodes(node);
-        const width = Number(safeRead(() => node.width, 0)) || 0;
-        const height = Number(safeRead(() => node.height, 0)) || 0;
-        const area = Math.abs(width * height);
-        if (subtreeNodeCount <= SVG_FALLBACK_MAX_NODES &&
-            area <= SVG_FALLBACK_MAX_AREA &&
-            Math.max(Math.abs(width), Math.abs(height)) <= SVG_FALLBACK_MAX_DIMENSION) {
-            try {
-                logDebug(`    * [SVG-Export] calling exportAsync for ${node.id} (${node.type}) - name=${node.name}, dims=${width}x${height}`);
-                const svg = yield node.exportAsync({ format: "SVG" });
-                logDebug(`    * [SVG-Export] completed exportAsync for ${node.id}: bytes=${svg ? svg.length : 0}`);
-                if (typeof svg === "string" && svg.trim()) {
-                    if (svg.length > SVG_FALLBACK_MAX_BYTES) {
-                        console.warn(`[MasterGo2Figma] ${label} SVG fallback skipped because SVG is too large: ${getNodeDebugLabel(node)}, bytes=${svg.length}`);
-                        return "";
-                    }
-                    return svg;
-                }
-            }
-            catch (error) {
-                logDebug(`    * [SVG-Export] exportAsync failed for ${node.id}:`, describeError(error));
-                console.warn(`Unable to export ${label} as SVG fallback:`, getNodeDebugLabel(node), error);
-            }
-        }
-        return "";
-    });
-}
-function markBooleanAsFrameFallback(nodeJson) {
-    nodeJson.type = "FRAME";
-    nodeJson.restoreType = "FRAME";
-    nodeJson.receiveCreateOverride = "FRAME";
-    nodeJson.booleanFallback = "frameContainer";
-    nodeJson.clipsContent = false;
-    clearNodePaint(nodeJson);
-}
-function clearNodePaint(nodeJson) {
-    if (!nodeJson.geometry)
-        return;
-    nodeJson.geometry.fills = [];
-    nodeJson.geometry.strokes = [];
-    nodeJson.geometry.strokeWeight = 0;
-    nodeJson.geometry.strokeTopWeight = undefined;
-    nodeJson.geometry.strokeBottomWeight = undefined;
-    nodeJson.geometry.strokeLeftWeight = undefined;
-    nodeJson.geometry.strokeRightWeight = undefined;
-}
-function hasUsableVectorNetwork(vectorNetwork) {
-    return !!(vectorNetwork &&
-        Array.isArray(vectorNetwork.vertices) &&
-        vectorNetwork.vertices.length > 0 &&
-        Array.isArray(vectorNetwork.segments));
-}
-function countExportableSubtreeNodes(node) {
-    let count = 1;
-    const children = getSafeExportableChildren(node);
-    for (const child of children) {
-        count += countExportableSubtreeNodes(child);
-        if (count > SVG_FALLBACK_MAX_NODES)
-            return count;
-    }
-    return count;
-}
-function appendLayerRecord(recordJson, pageIndex, chunk, transfer) {
-    return __awaiter(this, void 0, void 0, function* () {
-        const nextBytes = recordJson.length + (chunk.recordJsons.length > 0 ? 1 : 0);
-        if (recordJson.length > LAYER_CHUNK_MAX_BYTES) {
-            logDiagnostic("warn", "[MasterGo2Figma] Single layer record exceeds chunk byte target", {
-                recordBytes: recordJson.length,
-                chunkMaxBytes: LAYER_CHUNK_MAX_BYTES,
-                page: pageIndex.name,
-                transfer: summarizeTransfer(transfer)
-            });
-        }
-        if (chunk.recordJsons.length > 0 &&
-            (chunk.recordJsons.length >= LAYER_CHUNK_MAX_RECORDS || chunk.bytes + nextBytes > LAYER_CHUNK_MAX_BYTES)) {
-            yield flushLayerChunk(pageIndex, chunk, transfer);
-        }
-        chunk.recordJsons.push(recordJson);
-        chunk.bytes += nextBytes;
-        if (chunk.recordJsons.length >= LAYER_CHUNK_MAX_RECORDS || chunk.bytes >= LAYER_CHUNK_MAX_BYTES) {
-            yield flushLayerChunk(pageIndex, chunk, transfer);
-        }
-    });
-}
-function flushLayerChunk(pageIndex, chunk, transfer) {
-    return __awaiter(this, void 0, void 0, function* () {
-        if (chunk.recordJsons.length === 0)
-            return;
-        const fileIndex = chunk.chunkIndex++;
-        const path = `pages/${chunk.pageFolder}/layers/layers-${padNumber(fileIndex)}.json`;
-        const recordCount = chunk.recordJsons.length;
-        const byteCount = chunk.bytes;
-        setExportDebugState({
-            phase: "chunk:flush",
-            page: pageIndex.name,
-            file: path,
-            transferId: transfer.transferId,
-            fileIndex: transfer.fileIndex,
-            chunkIndex: fileIndex,
-            fileSize: byteCount,
-            streamedBytes: transfer.streamedBytes
-        });
-        if (fileIndex === 1 || fileIndex % 50 === 0 || byteCount >= LAYER_CHUNK_LOG_BYTES) {
-            logDiagnostic("log", "[MasterGo2Figma] Layer chunk flush", {
-                page: pageIndex.name,
-                path,
-                chunkIndex: fileIndex,
-                records: recordCount,
-                bytes: byteCount,
-                processedNodes,
-                transfer: summarizeTransfer(transfer)
-            });
-        }
-        const contentParts = [
-            `{"schema":"mastergo2figma.layers.v2","version":2,"pageId":${JSON.stringify(chunk.pageId)},"records":[`
-        ];
-        for (let index = 0; index < chunk.recordJsons.length; index++) {
-            contentParts.push(index > 0 ? `,${chunk.recordJsons[index]}` : chunk.recordJsons[index]);
-        }
-        contentParts.push("]}");
-        yield streamExportFileToUI(transfer, { path, contentParts });
-        pageIndex.layerChunks.push(path);
-        chunk.recordJsons = [];
-        chunk.bytes = 0;
-    });
-}
-function getDocumentPageSummaries() {
-    return [...mg.document.children]
-        .filter(page => !page.name.endsWith("_Process"))
-        .map(page => ({
-        id: page.id,
-        name: page.name,
-        isCurrent: page.id === mg.document.currentPage.id,
-        childCount: page.children.length
-    }));
-}
-function createPageFolderName(page, index) {
-    const label = safeRead(() => page.name, "") || safeRead(() => page.id, "page");
-    return `page-${padNumber(index + 1)}-${slugifyPathPart(label)}`;
-}
-function createLayerFileName(node, index) {
-    const label = safeRead(() => node.name, "") || safeRead(() => node.type, "untitled");
-    return `layer-${padNumber(index)}-${slugifyPathPart(label)}.json`;
-}
-function padNumber(value) {
+    const r0 = transform[0] || [1, 0, 0];
+    const r1 = transform[1] || [0, 1, 0];
+    return [
+      [typeof r0[0] === "number" ? r0[0] : 1, typeof r0[1] === "number" ? r0[1] : 0, typeof r0[2] === "number" ? r0[2] : 0],
+      [typeof r1[0] === "number" ? r1[0] : 0, typeof r1[1] === "number" ? r1[1] : 1, typeof r1[2] === "number" ? r1[2] : 0]
+    ];
+  }
+
+  // src/imageExporter.ts
+  function padNumber(value) {
     const text = String(value);
-    if (text.length >= 3)
-        return text;
+    if (text.length >= 3) return text;
     return "000".slice(0, 3 - text.length) + text;
-}
-function slugifyPathPart(value) {
-    const normalized = value
-        .trim()
-        .toLowerCase()
-        .replace(/[^a-z0-9\u4e00-\u9fa5]+/g, "-")
-        .replace(/^-+|-+$/g, "");
-    return (normalized || "untitled").slice(0, 48);
-}
-function safeCloneTransform(transform) {
-    if (!transform)
-        return null;
-    return cloneTransform(transform);
-}
-function safeRead(reader, fallback) {
-    try {
-        const value = reader();
-        return value === undefined || value === null ? fallback : value;
-    }
-    catch (error) {
-        if (isOutOfMemoryError(error))
-            throw error;
-        return fallback;
-    }
-}
-function softRead(reader, fallback) {
-    try {
-        const value = reader();
-        return value === undefined || value === null ? fallback : value;
-    }
-    catch (_) {
-        return fallback;
-    }
-}
-function readNodeProperty(node, property, fallback) {
-    try {
-        const value = node ? node[property] : undefined;
-        return value === undefined || value === null ? fallback : value;
-    }
-    catch (error) {
-        if (isOutOfMemoryError(error)) {
-            logDiagnostic("error", "[MasterGo2Figma] Node property read OOM", {
-                property,
-                node: getNodeProbe(node),
-                error: describeError(error),
-                debugState: exportDebugState
-            });
-        }
-        return fallback;
-    }
-}
-function cloneJsonCompatible(value, fallback, depth = 0) {
-    if (value === undefined)
-        return fallback;
-    if (value === null)
-        return null;
-    const valueType = typeof value;
-    if (valueType === "string" || valueType === "boolean")
-        return value;
-    if (valueType === "number")
-        return Number.isFinite(value) ? value : fallback;
-    if (valueType !== "object")
-        return fallback;
-    if (depth > 32)
-        return fallback;
-    if (isTypedArrayLike(value))
-        return fallback;
-    if (Array.isArray(value)) {
-        const result = [];
-        for (let index = 0; index < value.length; index++) {
-            const cloned = cloneJsonCompatible(value[index], null, depth + 1);
-            result.push(cloned);
-        }
-        return result;
-    }
-    let keys = [];
-    try {
-        keys = Object.keys(value);
-    }
-    catch (_) {
-        return fallback;
-    }
-    const result = {};
-    for (const key of keys) {
-        const cloned = cloneJsonCompatible(value[key], undefined, depth + 1);
-        if (cloned !== undefined)
-            result[key] = cloned;
-    }
-    return result;
-}
-function isTypedArrayLike(value) {
-    try {
-        return typeof ArrayBuffer !== "undefined" &&
-            typeof ArrayBuffer.isView === "function" &&
-            ArrayBuffer.isView(value);
-    }
-    catch (_) {
-        return false;
-    }
-}
-function finiteNumber(value, fallback = 0) {
-    const numberValue = Number(value);
-    return Number.isFinite(numberValue) ? numberValue : fallback;
-}
-function clamp01(value, fallback = 0) {
-    const numberValue = finiteNumber(value, fallback);
-    if (numberValue < 0)
-        return 0;
-    if (numberValue > 1)
-        return 1;
-    return numberValue;
-}
-function cloneRgbColor(color) {
-    return {
-        r: finiteNumber(color && color.r, 0),
-        g: finiteNumber(color && color.g, 0),
-        b: finiteNumber(color && color.b, 0)
-    };
-}
-function cloneRgbaColor(color) {
-    return {
-        r: finiteNumber(color && color.r, 0),
-        g: finiteNumber(color && color.g, 0),
-        b: finiteNumber(color && color.b, 0),
-        a: clamp01(color && color.a, 1)
-    };
-}
-function cloneVector2(point) {
-    return {
-        x: finiteNumber(point && point.x, 0),
-        y: finiteNumber(point && point.y, 0)
-    };
-}
-function cloneGradientStops(stops) {
-    if (!Array.isArray(stops))
-        return [];
-    return stops.map(stop => ({
-        position: clamp01(stop && stop.position, 0),
-        color: cloneRgbaColor(stop && stop.color)
-    }));
-}
-function cloneVectorNetworkForExport(vectorNetwork) {
-    if (!vectorNetwork || typeof vectorNetwork !== "object")
-        return undefined;
-    return {
-        vertices: cloneJsonCompatible(vectorNetwork.vertices, []),
-        segments: cloneJsonCompatible(vectorNetwork.segments, []),
-        regions: normalizeVectorRegions(vectorNetwork.regions)
-    };
-}
-function sanitizeExportNodeJson(nodeJson) {
-    if (!nodeJson || typeof nodeJson !== "object")
-        return nodeJson;
-    if (nodeJson.constraints !== undefined)
-        nodeJson.constraints = cloneJsonCompatible(nodeJson.constraints, undefined);
-    if (nodeJson.exportSettings !== undefined)
-        nodeJson.exportSettings = cloneJsonCompatible(nodeJson.exportSettings, []);
-    if (nodeJson.arcData !== undefined)
-        nodeJson.arcData = cloneJsonCompatible(nodeJson.arcData, undefined);
-    if (nodeJson.fontName !== undefined)
-        nodeJson.fontName = cloneJsonCompatible(nodeJson.fontName, nodeJson.fontName);
-    if (nodeJson.letterSpacing !== undefined)
-        nodeJson.letterSpacing = cloneJsonCompatible(nodeJson.letterSpacing, nodeJson.letterSpacing);
-    if (nodeJson.lineHeight !== undefined)
-        nodeJson.lineHeight = cloneJsonCompatible(nodeJson.lineHeight, nodeJson.lineHeight);
-    if (nodeJson.connectorStart !== undefined)
-        nodeJson.connectorStart = cloneJsonCompatible(nodeJson.connectorStart, undefined);
-    if (nodeJson.connectorEnd !== undefined)
-        nodeJson.connectorEnd = cloneJsonCompatible(nodeJson.connectorEnd, undefined);
-    if (nodeJson.connectorStartLocal !== undefined)
-        nodeJson.connectorStartLocal = cloneJsonCompatible(nodeJson.connectorStartLocal, undefined);
-    if (nodeJson.connectorEndLocal !== undefined)
-        nodeJson.connectorEndLocal = cloneJsonCompatible(nodeJson.connectorEndLocal, undefined);
-    if (nodeJson.vectorNetwork && !isPlainObjectForLog(nodeJson.vectorNetwork)) {
-        nodeJson.vectorNetwork = cloneVectorNetworkForExport(nodeJson.vectorNetwork);
-    }
-    if (nodeJson.geometry) {
-        if (nodeJson.geometry.fills !== undefined)
-            nodeJson.geometry.fills = cloneJsonCompatible(nodeJson.geometry.fills, []);
-        if (nodeJson.geometry.strokes !== undefined)
-            nodeJson.geometry.strokes = cloneJsonCompatible(nodeJson.geometry.strokes, []);
-        if (nodeJson.geometry.dashPattern !== undefined)
-            nodeJson.geometry.dashPattern = cloneJsonCompatible(nodeJson.geometry.dashPattern, []);
-    }
-    if (nodeJson.blend && Array.isArray(nodeJson.blend.effects)) {
-        nodeJson.blend.effects = cloneJsonCompatible(nodeJson.blend.effects, []);
-    }
-    return nodeJson;
-}
-function getNodeDebugLabel(node) {
-    const name = softRead(() => node.name, "Untitled");
-    const type = softRead(() => node.type, "UNKNOWN");
-    const id = softRead(() => node.id, "unknown-id");
-    return `${name} (${type}, ${id})`;
-}
-function stringifyLayerPayload(payload, node, nodeComplexity) {
-    try {
-        return JSON.stringify(payload);
-    }
-    catch (error) {
-        const fatalOom = isOutOfMemoryError(error);
-        logDiagnostic(fatalOom ? "error" : "warn", fatalOom ? "[MasterGo2Figma] Stringify OOM" : "[MasterGo2Figma] Stringify failed, exporting fallback", {
-            error: describeError(error),
-            complexity: nodeComplexity || createNodeComplexitySnapshot(node)
-        });
-        if (fatalOom)
-            throw error;
-        const fallbackPayload = Object.assign(Object.assign({}, payload), { props: createFallbackNodeJson(node, safeRead(() => node.type, "UNKNOWN")) });
-        return JSON.stringify(fallbackPayload);
-    }
-}
-function isGeneratedCarrierName(name) {
-    return name.startsWith(INTERNAL_PROPS_PREFIX) || name.startsWith(SIBLING_PROPS_PREFIX);
-}
-function overrideExportLayoutFromSourceNode(nodeJson, node) {
-    if (!nodeJson || !nodeJson.layout)
-        return;
-    try {
-        const layoutTransform = cloneTransform(node.relativeTransform);
-        nodeJson.layout.relativeTransform = layoutTransform;
-        nodeJson.layout.x = layoutTransform[0][2];
-        nodeJson.layout.y = layoutTransform[1][2];
-        nodeJson.layout.rotation = -(node.rotation || 0);
-        nodeJson.layout.width = node.width;
-        nodeJson.layout.height = node.height;
-        nodeJson.layout.constrainProportions = node.constrainProportions || false;
-    }
-    catch (error) {
-        if (isOutOfMemoryError(error))
-            throw error;
-    }
-}
-let countVisited = 0;
-function countNodes(node) {
-    return __awaiter(this, void 0, void 0, function* () {
-        totalNodes++;
-        countVisited++;
-        if (countVisited % EXPORT_SCAN_YIELD_EVERY_NODES === 0)
-            yield yieldToEventLoop();
-        try {
-            let childNodes = getSafeExportableChildren(node);
-            for (let i = 0; i < childNodes.length; i++) {
-                const child = childNodes[i];
-                childNodes[i] = null;
-                yield countNodes(child);
-            }
-            childNodes = null;
-        }
-        catch (error) {
-            const canMark = !!(error && typeof error === "object");
-            if (!canMark || !error.__mastergo2figmaScanLogged) {
-                if (canMark)
-                    error.__mastergo2figmaScanLogged = true;
-                logDiagnostic("error", "[MasterGo2Figma] Scan node failed", {
-                    error: describeError(error),
-                    node: getNodeProbe(node),
-                    totalNodes
-                });
-            }
-            throw error;
-        }
-    });
-}
-function yieldToEventLoop() {
-    return new Promise(resolve => setTimeout(resolve, 0));
-}
-function getTopLevelSelectedNodes(selection) {
-    const selectedSet = new Set(selection.map(node => node.id));
-    return selection.filter(node => !hasSelectedAncestor(node, selectedSet));
-}
-function hasSelectedAncestor(node, selectedSet) {
-    let parent = node.parent;
-    while (parent && parent.type !== "PAGE" && parent.type !== "DOCUMENT") {
-        if (selectedSet.has(parent.id))
-            return true;
-        parent = parent.parent;
-    }
-    return false;
-}
-function analyseNodes(node, sourceType) {
-    try {
-        return sanitizeExportNodeJson(analyseNodesUnsafe(node, sourceType));
-    }
-    catch (error) {
-        if (isOutOfMemoryError(error)) {
-            logDiagnostic("error", "[MasterGo2Figma] Analyse node OOM", {
-                node: getNodeProbe(node),
-                sourceType,
-                error: describeError(error)
-            });
-            throw error;
-        }
-        logDiagnostic("warn", "[MasterGo2Figma] Unable to fully analyse node, exporting fallback", {
-            node: getNodeProbe(node),
-            sourceType,
-            error: describeError(error),
-            debugState: exportDebugState
-        });
-        return sanitizeExportNodeJson(createFallbackNodeJson(node, sourceType));
-    }
-}
-function analyseNodesUnsafe(node, sourceType) {
-    const resolvedSourceType = sourceType || node.type;
-    const rule = getLayerRule(resolvedSourceType) || getLayerRule(node.type);
-    if (!rule) {
-        console.warn("Unsupported layer type:", resolvedSourceType, node.type);
-        return {};
-    }
-    if (rule.sendStrategy === "flattenBoolean")
-        return transBONode(node);
-    if (rule.sendStrategy === "booleanTree")
-        return transBooleanTreeNode(node, rule.restoreType);
-    if (rule.sendStrategy === "penNetwork")
-        return transPenNode(node, resolvedSourceType, rule.restoreType);
-    if (rule.sendStrategy === "ellipseArc")
-        return transEllipseNode(node);
-    if (rule.sendStrategy === "text")
-        return transTextNode(node);
-    if (rule.sendStrategy === "star")
-        return transStarNode(node);
-    if (rule.sendStrategy === "polygon")
-        return transPolygonNode(node);
-    if (rule.sendStrategy === "connector")
-        return transConnectorNode(node);
-    if (rule.sendStrategy === "frameLike")
-        return transFrameNode(node, resolvedSourceType);
-    if (rule.sendStrategy === "groupLike")
-        return transGroupNode(node);
-    return getUniversalProperty(node, resolvedSourceType, rule.restoreType);
-}
-function createFallbackNodeJson(node, sourceType) {
-    const resolvedSourceType = sourceType || safeRead(() => node.type, "UNKNOWN");
-    const restoreType = getRuleRestoreType(resolvedSourceType);
-    const layoutTransform = safeRead(() => cloneTransform(node.relativeTransform), [[1, 0, 0], [0, 1, 0]]);
-    return {
-        type: restoreType,
-        sourceType: resolvedSourceType,
-        restoreType,
-        id: safeRead(() => node.id, ""),
-        name: safeRead(() => node.name, "Untitled"),
-        parentID: safeRead(() => { var _a; return node.parent && node.parent.type === "PAGE" ? null : (_a = node.parent) === null || _a === void 0 ? void 0 : _a.id; }, null),
-        constraints: cloneJsonCompatible(safeRead(() => node.constraints, undefined), undefined),
-        exportSettings: [],
-        scence: {
-            visible: safeRead(() => node.isVisible, true),
-            locked: safeRead(() => node.isLocked, false)
-        },
-        blend: {
-            opacity: safeRead(() => node.opacity, 1),
-            isMask: safeRead(() => node.isMask, false),
-            blendMode: "NORMAL",
-            effects: []
-        },
-        corner: {
-            topLeftRadius: 0,
-            topRightRadius: 0,
-            bottomLeftRadius: 0,
-            bottomRightRadius: 0,
-            cornerRadius: 0,
-            cornerSmoothing: 0
-        },
-        geometry: {
-            fills: [],
-            strokes: [],
-            strokeWeight: 0,
-            strokeAlign: "CENTER",
-            strokeJoin: "MITER",
-            dashPattern: [],
-            strokeCap: "NONE",
-            strokeTopWeight: undefined,
-            strokeBottomWeight: undefined,
-            strokeLeftWeight: undefined,
-            strokeRightWeight: undefined
-        },
-        layout: {
-            relativeTransform: layoutTransform,
-            x: layoutTransform[0][2],
-            y: layoutTransform[1][2],
-            rotation: safeRead(() => -(node.rotation || 0), 0),
-            width: safeRead(() => node.width, 0),
-            height: safeRead(() => node.height, 0),
-            constrainProportions: false,
-            layoutMode: "NONE",
-            itemSpacing: 0,
-            paddingLeft: 0,
-            paddingRight: 0,
-            paddingTop: 0,
-            paddingBottom: 0,
-            primaryAxisAlignItems: "MIN",
-            counterAxisAlignItems: "MIN",
-            counterAxisAlignContent: "AUTO",
-            primaryAxisSizingMode: "FIXED",
-            counterAxisSizingMode: "FIXED",
-            itemReverseZIndex: false,
-            strokesIncludedInLayout: false,
-            layoutAlign: "INHERIT",
-            layoutGrow: 0,
-            layoutPositioning: "AUTO"
-        },
-        fallbackExport: true
-    };
-}
-function transBONode(node) {
-    // Avoid clone + flatten here. Complex boolean operations can crash the
-    // MasterGo host runtime during large exports; direct network data is safer.
-    const json = transPenNode(node, "BOOLEAN_OPERATION", getRuleRestoreType("BOOLEAN_OPERATION"));
-    json.booleanOperation = safeRead(() => node.booleanOperation, "UNION");
-    return json;
-}
-function transBooleanTreeNode(node, restoreType) {
-    const json = getUniversalProperty(node, "BOOLEAN_OPERATION", restoreType);
-    json.booleanOperation = safeRead(() => node.booleanOperation, "UNION");
-    return json;
-}
-function transPenNode(selection, sourceType, restoreType) {
-    const universalStruct = getUniversalProperty(selection, sourceType, restoreType);
-    const originJson = selection.penNetwork;
-    if (!originJson || !originJson.ctrlNodes || !originJson.nodes || !originJson.paths) {
-        const vectorNetwork = cloneVectorNetworkForExport(selection.vectorNetwork);
-        const resultStruct = Object.assign(vectorNetwork ? { vectorNetwork } : {}, universalStruct);
-        resultStruct.type = restoreType || getRuleRestoreType(sourceType || selection.type);
-        return resultStruct;
-    }
-    const originCtrlNodes = originJson.ctrlNodes;
-    const originNodes = originJson.nodes;
-    const originPaths = originJson.paths;
-    const resultSegments = new Array();
-    for (var j = 0; j < originPaths.length; j++) {
-        var tempStart = originPaths[j][0];
-        var tempEnd = originPaths[j][3];
-        var tempTangentStart = { x: 0, y: 0 };
-        var tempTangentEnd = { x: 0, y: 0 };
-        if (originPaths[j][1] != -1) {
-            tempTangentStart.x = originCtrlNodes[originPaths[j][1]].x - originNodes[tempStart].x;
-            tempTangentStart.y = originCtrlNodes[originPaths[j][1]].y - originNodes[tempStart].y;
-        }
-        if (originPaths[j][2] != -1) {
-            tempTangentEnd.x = originCtrlNodes[originPaths[j][2]].x - originNodes[tempEnd].x;
-            tempTangentEnd.y = originCtrlNodes[originPaths[j][2]].y - originNodes[tempEnd].y;
-        }
-        resultSegments.push({
-            start: tempStart,
-            end: tempEnd,
-            tangentStart: tempTangentStart,
-            tangentEnd: tempTangentEnd
-        });
-    }
-    const finalPathJson = {
-        "segments": resultSegments,
-        "vertices": cloneJsonCompatible(originNodes, []),
-        "regions": normalizeVectorRegions(originJson.regions)
-    };
-    const otherStruct = {
-        "vectorNetwork": finalPathJson
-    };
-    const resultStruct = Object.assign(otherStruct, universalStruct);
-    resultStruct.type = restoreType || getRuleRestoreType(sourceType || selection.type);
-    return resultStruct;
-}
-function normalizeVectorRegions(regions) {
-    if (!Array.isArray(regions))
-        return [];
-    const result = [];
-    for (const region of regions) {
-        if (!region || typeof region !== "object")
-            continue;
-        const loops = normalizeVectorRegionLoops(region.loops);
-        if (loops.length === 0)
-            continue;
-        result.push({
-            windingRule: normalizeWindingRuleForFigma(region.windingRule),
-            loops
-        });
-    }
-    return result;
-}
-function normalizeVectorRegionLoops(loops) {
-    if (!Array.isArray(loops))
-        return [];
-    const result = [];
-    for (const loop of loops) {
-        if (!Array.isArray(loop))
-            continue;
-        const segmentIndexes = loop
-            .map((value) => Number(value))
-            .filter((value) => Number.isFinite(value));
-        if (segmentIndexes.length > 0)
-            result.push(segmentIndexes);
-    }
-    return result;
-}
-function normalizeWindingRuleForFigma(value) {
-    if (value === "Evenodd" || value === "EVENODD")
-        return "EVENODD";
-    if (value === "Nonzero" || value === "NONZERO")
-        return "NONZERO";
-    return "NONZERO";
-}
-function transEllipseNode(selection) {
-    const universalStruct = getUniversalProperty(selection);
-    const otherStruct = { "arcData": cloneJsonCompatible(selection.arcData, undefined) };
-    return Object.assign(otherStruct, universalStruct);
-}
-function transRectangleNode(selection) {
-    const universalStruct = getUniversalProperty(selection);
-    return Object.assign({}, universalStruct);
-}
-function transStarNode(selection) {
-    const universalStruct = getUniversalProperty(selection);
-    const otherStruct = {
-        "pointCount": selection.pointCount,
-        "innerRadius": selection.innerRadius
-    };
-    return Object.assign(otherStruct, universalStruct);
-}
-function transLineNode(selection) {
-    const universalStruct = getUniversalProperty(selection);
-    return Object.assign({}, universalStruct);
-}
-function transPolygonNode(selection) {
-    const universalStruct = getUniversalProperty(selection);
-    const otherStruct = { "pointCount": selection.pointCount };
-    return Object.assign(otherStruct, universalStruct);
-}
-function transFrameNode(selection, sourceType) {
-    const universalStruct = getUniversalProperty(selection, sourceType);
-    const otherStruct = { "clipsContent": selection.clipsContent };
-    return Object.assign(otherStruct, universalStruct);
-}
-function transSectionNode(selection) {
-    const universalStruct = getUniversalProperty(selection, "SECTION", "SECTION");
-    const otherStruct = { "clipsContent": selection.clipsContent };
-    return Object.assign(otherStruct, universalStruct);
-}
-function transGroupNode(selection) {
-    const universalStruct = getUniversalProperty(selection, "GROUP", "GROUP");
-    const otherStruct = { "clipsContent": false };
-    return Object.assign(otherStruct, universalStruct);
-}
-function transSliceNode(selection) {
-    return getUniversalProperty(selection, "SLICE", "SLICE");
-}
-function transConnectorNode(selection) {
-    const universalStruct = getUniversalProperty(selection, "CONNECTOR", "CONNECTOR");
-    const connectorStart = normalizeConnectorEndpoint(selection.connectorStart);
-    const connectorEnd = normalizeConnectorEndpoint(selection.connectorEnd);
-    const connectorLineType = selection.connectorLineType || "ELBOWED";
-    const connectorCornerRadius = selection.cornerRadius || 0;
-    const connectorStartStrokeCap = selection.connectorStartStrokeCap || "NONE";
-    const connectorEndStrokeCap = selection.connectorEndStrokeCap || "NONE";
-    const otherStruct = {
-        "connectorStart": connectorStart,
-        "connectorEnd": connectorEnd,
-        "connectorStartLocal": connectorEndpointToLocalPoint(selection, connectorStart, true),
-        "connectorEndLocal": connectorEndpointToLocalPoint(selection, connectorEnd, false),
-        "connectorStartStrokeCap": connectorStartStrokeCap,
-        "connectorEndStrokeCap": connectorEndStrokeCap,
-        "connectorLineType": connectorLineType,
-        "connectorCornerRadius": connectorCornerRadius
-    };
-    otherStruct.vectorNetwork = createConnectorVectorNetwork(otherStruct.connectorStartLocal, otherStruct.connectorEndLocal, connectorStart, connectorEnd, connectorLineType, connectorCornerRadius, connectorStartStrokeCap, connectorEndStrokeCap);
-    return Object.assign(otherStruct, universalStruct);
-}
-function connectorEndpointToLocalPoint(selection, endpoint, isStart) {
-    const point = endpoint && endpoint.position ? endpoint.position : null;
-    if (point)
-        return absolutePointToNodeLocal(selection, point);
-    const width = Number(safeRead(() => selection.width, 0)) || 0;
-    const height = Number(safeRead(() => selection.height, 0)) || 0;
-    return isStart ? { x: 0, y: 0 } : { x: width, y: height };
-}
-function absolutePointToNodeLocal(node, point) {
-    const transform = safeRead(() => node.absoluteTransform, null);
-    if (!transform || !transform[0] || !transform[1])
-        return { x: Number(point.x) || 0, y: Number(point.y) || 0 };
-    const a = Number(transform[0][0]) || 0;
-    const c = Number(transform[0][1]) || 0;
-    const e = Number(transform[0][2]) || 0;
-    const b = Number(transform[1][0]) || 0;
-    const d = Number(transform[1][1]) || 0;
-    const f = Number(transform[1][2]) || 0;
-    const det = a * d - b * c;
-    if (Math.abs(det) < 0.000001)
-        return { x: (Number(point.x) || 0) - e, y: (Number(point.y) || 0) - f };
-    const dx = (Number(point.x) || 0) - e;
-    const dy = (Number(point.y) || 0) - f;
-    return {
-        x: (d * dx - c * dy) / det,
-        y: (-b * dx + a * dy) / det
-    };
-}
-function createConnectorVectorNetwork(start, end, startEndpoint, endEndpoint, lineType, cornerRadius, startStrokeCap, endStrokeCap) {
-    const points = createConnectorRoutePoints(start, end, startEndpoint, endEndpoint, lineType);
-    const vertices = points.map((point, index) => {
-        const vertex = { x: point.x, y: point.y };
-        if (index === 0)
-            vertex.strokeCap = normalizeConnectorVectorStrokeCap(startStrokeCap);
-        if (index === points.length - 1)
-            vertex.strokeCap = normalizeConnectorVectorStrokeCap(endStrokeCap);
-        if (index > 0 && index < points.length - 1) {
-            const radius = getConnectorCornerRadius(points, index, cornerRadius);
-            if (radius > 0)
-                vertex.cornerRadius = radius;
-        }
-        return vertex;
-    });
-    const segments = [];
-    for (let index = 0; index < points.length - 1; index++) {
-        segments.push({ start: index, end: index + 1, tangentStart: { x: 0, y: 0 }, tangentEnd: { x: 0, y: 0 } });
-    }
-    return { vertices, segments, regions: [] };
-}
-function createConnectorRoutePoints(start, end, startEndpoint, endEndpoint, lineType) {
-    const startPoint = normalizeConnectorPoint(start);
-    const endPoint = normalizeConnectorPoint(end);
-    if (lineType !== "ELBOWED" || isSameConnectorAxis(startPoint, endPoint))
-        return dedupeConnectorPoints([startPoint, endPoint]);
-    const horizontalFirst = shouldConnectorRouteStartHorizontal(startPoint, endPoint, startEndpoint, endEndpoint);
-    const middlePoint = horizontalFirst
-        ? { x: endPoint.x, y: startPoint.y }
-        : { x: startPoint.x, y: endPoint.y };
-    return dedupeConnectorPoints([startPoint, middlePoint, endPoint]);
-}
-function normalizeConnectorPoint(point) {
-    return {
-        x: Number(point && point.x) || 0,
-        y: Number(point && point.y) || 0
-    };
-}
-function isSameConnectorAxis(start, end) {
-    return Math.abs(start.x - end.x) < 0.01 || Math.abs(start.y - end.y) < 0.01;
-}
-function shouldConnectorRouteStartHorizontal(start, end, startEndpoint, endEndpoint) {
-    const startMagnet = startEndpoint && startEndpoint.magnet;
-    if (startMagnet === "LEFT" || startMagnet === "RIGHT")
-        return true;
-    if (startMagnet === "TOP" || startMagnet === "BOTTOM")
-        return false;
-    const endMagnet = endEndpoint && endEndpoint.magnet;
-    if (endMagnet === "TOP" || endMagnet === "BOTTOM")
-        return true;
-    if (endMagnet === "LEFT" || endMagnet === "RIGHT")
-        return false;
-    return Math.abs(end.x - start.x) >= Math.abs(end.y - start.y);
-}
-function dedupeConnectorPoints(points) {
-    const result = [];
-    for (const point of points) {
-        const previous = result[result.length - 1];
-        if (!previous || Math.abs(previous.x - point.x) >= 0.01 || Math.abs(previous.y - point.y) >= 0.01) {
-            result.push(point);
-        }
-    }
-    return result.length > 1 ? result : [points[0], points[points.length - 1]];
-}
-function getConnectorCornerRadius(points, index, requestedRadius) {
-    const radius = Number(requestedRadius) || 0;
-    if (radius <= 0)
-        return 0;
-    const previous = points[index - 1];
-    const current = points[index];
-    const next = points[index + 1];
-    const previousLength = Math.abs(current.x - previous.x) + Math.abs(current.y - previous.y);
-    const nextLength = Math.abs(next.x - current.x) + Math.abs(next.y - current.y);
-    return Math.min(radius, previousLength / 2, nextLength / 2);
-}
-function normalizeConnectorVectorStrokeCap(value) {
-    if (value === "ARROW_EQUILATERAL" ||
-        value === "ARROW_LINES" ||
-        value === "TRIANGLE_FILLED" ||
-        value === "DIAMOND_FILLED" ||
-        value === "CIRCLE_FILLED" ||
-        value === "ROUND" ||
-        value === "SQUARE" ||
-        value === "NONE") {
-        return value;
-    }
-    if (value === "LINE_ARROW" || value === "LINE")
-        return "ARROW_LINES";
-    if (value === "TRIANGLE_ARROW")
-        return "ARROW_EQUILATERAL";
-    if (value === "DIAMOND")
-        return "DIAMOND_FILLED";
-    if (value === "ROUND_ARROW" || value === "RING")
-        return "CIRCLE_FILLED";
-    return "NONE";
-}
-function normalizeConnectorEndpoint(endpoint) {
-    if (!endpoint || typeof endpoint !== "object")
-        return undefined;
-    const result = {};
-    if (endpoint.position) {
-        result.position = {
-            x: Number(endpoint.position.x) || 0,
-            y: Number(endpoint.position.y) || 0
-        };
-    }
-    if (typeof endpoint.endpointNodeId === "string" && endpoint.endpointNodeId) {
-        result.endpointNodeId = endpoint.endpointNodeId;
-    }
-    if (typeof endpoint.magnet === "string" && endpoint.magnet) {
-        result.magnet = endpoint.magnet;
-    }
-    return result.position || result.endpointNodeId ? result : undefined;
-}
-function transTextNode(selection) {
-    var _a, _b, _c;
-    const universalStruct = getUniversalProperty(selection);
-    const textStyles = readNodeProperty(selection, "textStyles", []);
-    let tempFontName = cloneJsonCompatible((_b = (_a = textStyles === null || textStyles === void 0 ? void 0 : textStyles[0]) === null || _a === void 0 ? void 0 : _a.textStyle) === null || _b === void 0 ? void 0 : _b.fontName, undefined);
-    if (tempFontName && tempFontName.family == "AlibabaPuHuiTi") {
-        tempFontName = {
-            family: "Alibaba PuHuiTi",
-            style: tempFontName.style
-        };
-    }
-    const style = ((_c = textStyles === null || textStyles === void 0 ? void 0 : textStyles[0]) === null || _c === void 0 ? void 0 : _c.textStyle) || {};
-    const otherStruct = {
-        "textAlignHorizontal": readNodeProperty(selection, "textAlignHorizontal", "LEFT"),
-        "textAlignVertical": readNodeProperty(selection, "textAlignVertical", "TOP"),
-        "textAutoResize": readNodeProperty(selection, "textAutoResize", "NONE"),
-        "paragraphIndent": 0,
-        "paragraphSpacing": readNodeProperty(selection, "paragraphSpacing", 0),
-        "autoRename": false,
-        "characters": readNodeProperty(selection, "characters", ""),
-        "fontSize": style.fontSize,
-        "fontName": tempFontName,
-        "fontWeight": style.fontWeight,
-        "textCase": style.textCase,
-        "textDecoration": style.textDecoration,
-        "letterSpacing": cloneJsonCompatible(style.letterSpacing, style.letterSpacing),
-        "lineHeight": cloneJsonCompatible(style.lineHeight, style.lineHeight),
-    };
-    return Object.assign(otherStruct, universalStruct);
-}
-function transBooleanNode(selection) {
-    const universalStruct = getUniversalProperty(selection);
-    const otherStruct = { "booleanOperation": selection.booleanOperation };
-    return Object.assign(otherStruct, universalStruct);
-}
-function createImageAssetContext() {
-    return {
-        bySourceRef: {},
-        assets: [],
-        missingImageAssetCount: 0
-    };
-}
-function createImageFillJson(fill) {
-    var _a, _b;
-    const result = {
-        "blendMode": processBlendMode(fill.blendMode),
-        "opacity": (_a = fill.alpha) !== null && _a !== void 0 ? _a : 1,
-        "type": "IMAGE",
-        "scaleMode": normalizeImageScaleModeForFigma(fill.scaleMode),
-        "visible": (_b = fill.isVisible) !== null && _b !== void 0 ? _b : true
-    };
-    if (fill.filters)
-        result.filters = cloneJsonCompatible(fill.filters, undefined);
-    if (fill.rotation !== undefined)
-        result.rotation = finiteNumber(fill.rotation, 0);
-    if (fill.ratio !== undefined)
-        result.ratio = finiteNumber(fill.ratio, 1);
-    const sourceRef = typeof fill.imageRef === "string" ? fill.imageRef : "";
-    if (!sourceRef || !activeImageAssetContext || !ENABLE_IMAGE_EXPORT) {
-        markMissingImageFill(result, "missing-image");
-        return result;
-    }
-    const asset = registerImageAsset(sourceRef);
-    result.imageRef = asset.key;
-    return result;
-}
-function normalizeImageScaleModeForFigma(value) {
-    if (value === "FILL" || value === "FIT" || value === "CROP" || value === "TILE")
-        return value;
-    if (value === "STRETCH")
-        return "FILL";
-    if (value === "CENTER")
-        return "FIT";
+  }
+  function normalizeImageScaleModeForFigma(value) {
+    if (value === "FILL" || value === "FIT" || value === "CROP" || value === "TILE") return value;
+    if (value === "STRETCH") return "FILL";
+    if (value === "CENTER") return "FIT";
     return "FILL";
-}
-function registerImageAsset(sourceRef) {
-    const context = activeImageAssetContext;
+  }
+  function registerImageAsset(sourceRef) {
+    const context = state.activeImageAssetContext;
     const existing = context.bySourceRef[sourceRef];
-    if (existing)
-        return existing;
+    if (existing) return existing;
     const index = context.assets.length + 1;
     const key = `image-${padNumber(index)}`;
     const fileName = `${key}.bin`;
     const asset = {
-        key,
-        sourceRef,
-        index,
-        fileName,
-        path: `assets/${fileName}`,
-        bytes: null,
-        missing: false
+      key,
+      sourceRef,
+      index,
+      fileName,
+      path: `assets/${fileName}`,
+      bytes: null,
+      missing: false
     };
     context.bySourceRef[sourceRef] = asset;
     context.assets.push(asset);
     return asset;
-}
-function loadAndStreamImageAsset(asset, context, transfer) {
-    return __awaiter(this, void 0, void 0, function* () {
-        let bytes = null;
-        try {
-            setExportDebugState({
-                phase: "asset:get-image",
-                file: asset.path,
-                transferId: transfer.transferId,
-                fileIndex: transfer.fileIndex,
-                streamedBytes: transfer.streamedBytes
-            });
-            const image = mg.getImageByHref(asset.sourceRef);
-            if (!image || typeof image.getBytesAsync !== "function")
-                throw new Error("图片资源不可读取");
-            setExportDebugState({
-                phase: "asset:get-bytes",
-                file: asset.path,
-                transferId: transfer.transferId,
-                fileIndex: transfer.fileIndex,
-                streamedBytes: transfer.streamedBytes
-            });
-            bytes = yield image.getBytesAsync();
-            if (!bytes || bytes.length === 0)
-                throw new Error("图片资源为空");
-        }
-        catch (error) {
-            markImageAssetMissing(asset, context, "read", error);
-            return;
-        }
-        const extension = detectImageExtension(bytes);
-        asset.bytes = bytes;
-        asset.fileName = `image-${padNumber(asset.index)}.${extension}`;
-        asset.path = `assets/${asset.fileName}`;
-        try {
-            yield streamExportFileToUI(transfer, {
-                path: asset.path,
-                bytes
-            });
-        }
-        catch (error) {
-            asset.bytes = null;
-            logDiagnostic("error", "[MasterGo2Figma] Unable to transfer image asset", {
-                sourceRef: asset.sourceRef,
-                assetKey: asset.key,
-                path: asset.path,
-                error: describeError(error),
-                debugState: exportDebugState
-            });
-            throw error;
-        }
-    });
-}
-function markImageAssetMissing(asset, context, reason, error) {
+  }
+  function markMissingImageFill(fill, fileName, shouldCount = true) {
+    fill.imageRef = fileName;
+    fill.missingAsset = true;
+    if (shouldCount && state.activeImageAssetContext) {
+      state.activeImageAssetContext.missingImageAssetCount++;
+    }
+  }
+  function createImageFillJson(fill) {
+    var _a, _b;
+    const result = {
+      "blendMode": processBlendMode(fill.blendMode),
+      "opacity": (_a = fill.alpha) != null ? _a : 1,
+      "type": "IMAGE",
+      "scaleMode": normalizeImageScaleModeForFigma(fill.scaleMode),
+      "visible": (_b = fill.isVisible) != null ? _b : true
+    };
+    if (fill.filters) result.filters = state.cachedLayerRules ? state.cachedLayerRules.config.rules["RECTANGLE"] : void 0;
+    if (fill.filters) result.filters = fill.filters;
+    if (fill.rotation !== void 0) result.rotation = finiteNumber(fill.rotation, 0);
+    if (fill.ratio !== void 0) result.ratio = finiteNumber(fill.ratio, 1);
+    const sourceRef = typeof fill.imageRef === "string" ? fill.imageRef : "";
+    if (!sourceRef || !state.activeImageAssetContext) {
+      markMissingImageFill(result, "missing-image");
+      return result;
+    }
+    const asset = registerImageAsset(sourceRef);
+    result.imageRef = asset.key;
+    return result;
+  }
+  function detectImageExtension(bytes) {
+    if (bytes.length >= 8 && bytes[0] === 137 && bytes[1] === 80 && bytes[2] === 78 && bytes[3] === 71 && bytes[4] === 13 && bytes[5] === 10 && bytes[6] === 26 && bytes[7] === 10) {
+      return "png";
+    }
+    if (bytes.length >= 3 && bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255) return "jpg";
+    if (bytes.length >= 3 && bytes[0] === 71 && bytes[1] === 73 && bytes[2] === 70) return "gif";
+    if (bytes.length >= 12 && bytes[0] === 82 && bytes[1] === 73 && bytes[2] === 70 && bytes[3] === 71 && bytes[8] === 87 && bytes[9] === 69 && bytes[10] === 66 && bytes[11] === 80) {
+      return "webp";
+    }
+    return "bin";
+  }
+  function markImageAssetMissing(asset, context, reason, error) {
     asset.missing = true;
     asset.bytes = null;
     asset.fileName = `missing-image-${padNumber(asset.index)}.png`;
     asset.path = `assets/${asset.fileName}`;
     context.missingImageAssetCount++;
-    logDiagnostic("warn", "[MasterGo2Figma] Unable to export image asset", {
-        reason,
-        sourceRef: asset.sourceRef,
-        assetKey: asset.key,
-        error: describeError(error),
-        debugState: exportDebugState
+    state.logDiagnostic("warn", "[MasterGo2Figma] Unable to export image asset", {
+      reason,
+      sourceRef: asset.sourceRef,
+      assetKey: asset.key,
+      error: describeError(error),
+      debugState: state.exportDebugState
     });
-}
-function markMissingImageFill(fill, fileName, shouldCount = true) {
-    fill.imageRef = fileName;
-    fill.missingAsset = true;
-    if (shouldCount && activeImageAssetContext)
-        activeImageAssetContext.missingImageAssetCount++;
-}
-function detectImageExtension(bytes) {
-    if (bytes.length >= 8 &&
-        bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47 &&
-        bytes[4] === 0x0d && bytes[5] === 0x0a && bytes[6] === 0x1a && bytes[7] === 0x0a) {
-        return "png";
+  }
+  function loadAndStreamImageAsset(asset, context, transfer) {
+    return __async(this, null, function* () {
+      let bytes = null;
+      try {
+        state.setExportDebugState({
+          phase: "asset:get-image",
+          file: asset.path,
+          transferId: transfer.transferId,
+          fileIndex: transfer.fileIndex,
+          streamedBytes: transfer.streamedBytes
+        });
+        const image = mg.getImageByHref(asset.sourceRef);
+        if (!image || typeof image.getBytesAsync !== "function") throw new Error("\u56FE\u7247\u8D44\u6E90\u4E0D\u53EF\u8BFB\u53D6");
+        state.setExportDebugState({
+          phase: "asset:get-bytes",
+          file: asset.path,
+          transferId: transfer.transferId,
+          fileIndex: transfer.fileIndex,
+          streamedBytes: transfer.streamedBytes
+        });
+        bytes = yield image.getBytesAsync();
+        if (!bytes || bytes.length === 0) throw new Error("\u56FE\u7247\u8D44\u6E90\u4E3A\u7A7A");
+      } catch (error) {
+        markImageAssetMissing(asset, context, "read", error);
+        return;
+      }
+      const extension = detectImageExtension(bytes);
+      asset.bytes = bytes;
+      asset.fileName = `image-${padNumber(asset.index)}.${extension}`;
+      asset.path = `assets/${asset.fileName}`;
+      try {
+        yield streamExportFileToUI(transfer, {
+          path: asset.path,
+          bytes
+        });
+      } catch (error) {
+        asset.bytes = null;
+        state.logDiagnostic("error", "[MasterGo2Figma] Unable to transfer image asset", {
+          sourceRef: asset.sourceRef,
+          assetKey: asset.key,
+          path: asset.path,
+          error: describeError(error),
+          debugState: state.exportDebugState
+        });
+        throw error;
+      }
+    });
+  }
+
+  // src/serializers/universal.ts
+  function readNodeProperty(node, property, fallback) {
+    try {
+      const value = node ? node[property] : void 0;
+      return value === void 0 || value === null ? fallback : value;
+    } catch (error) {
+      if (isOutOfMemoryError(error)) {
+        state.logDiagnostic("error", "[MasterGo2Figma] Node property read OOM", {
+          property,
+          node: getNodeProbe(node),
+          error: describeError(error),
+          debugState: state.exportDebugState
+        });
+      }
+      return fallback;
     }
-    if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff)
-        return "jpg";
-    if (bytes.length >= 3 && bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46)
-        return "gif";
-    if (bytes.length >= 12 &&
-        bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 &&
-        bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50) {
-        return "webp";
-    }
-    return "bin";
-}
-function fillsAndStrokes2Json(fills, strokes) {
-    const resultFills = [];
-    if (Array.isArray(fills)) {
-        for (const fill of fills) {
-            let tempResultFill = {};
-            if (fill.type == "SOLID") {
-                tempResultFill = {
-                    "type": fill.type,
-                    "visible": fill.isVisible,
-                    "opacity": clamp01(fill.color && fill.color.a, 1),
-                    "blendMode": processBlendMode(fill.blendMode),
-                    "color": cloneRgbColor(fill.color)
-                };
-            }
-            else if (fill.type == "GRADIENT_LINEAR") {
-                tempResultFill = {
-                    "type": fill.type,
-                    "visible": fill.isVisible,
-                    "opacity": clamp01(fill.alpha, 1),
-                    "blendMode": processBlendMode(fill.blendMode),
-                    "gradientStops": cloneGradientStops(fill.gradientStops),
-                    "gradientTransform": getResultArrayByTwoPoint(fill.gradientHandlePositions || [])
-                };
-            }
-            else if (fill.type == "GRADIENT_RADIAL" || fill.type == "GRADIENT_ANGULAR" || fill.type == "GRADIENT_DIAMOND") {
-                tempResultFill = {
-                    "type": fill.type,
-                    "visible": fill.isVisible,
-                    "opacity": clamp01(fill.alpha, 1),
-                    "blendMode": processBlendMode(fill.blendMode),
-                    "gradientStops": cloneGradientStops(fill.gradientStops),
-                    "gradientTransform": [[0, 1, 0], [-1, 0, 1]]
-                };
-            }
-            else if (fill.type == "IMAGE") {
-                tempResultFill = createImageFillJson(fill);
-            }
-            if (tempResultFill.type)
-                resultFills.push(tempResultFill);
-        }
-    }
-    const resultStrokes = [];
-    if (Array.isArray(strokes)) {
-        for (const stroke of strokes) {
-            let tempResultStroke = {};
-            if (stroke.type == "SOLID") {
-                tempResultStroke = {
-                    "type": stroke.type,
-                    "visible": stroke.isVisible,
-                    "opacity": clamp01(stroke.color && stroke.color.a, 1),
-                    "blendMode": processBlendMode(stroke.blendMode),
-                    "color": cloneRgbColor(stroke.color)
-                };
-            }
-            else if (stroke.type == "GRADIENT_LINEAR") {
-                tempResultStroke = {
-                    "type": stroke.type,
-                    "visible": stroke.isVisible,
-                    "opacity": clamp01(stroke.alpha, 1),
-                    "blendMode": processBlendMode(stroke.blendMode),
-                    "gradientStops": cloneGradientStops(stroke.gradientStops),
-                    "gradientTransform": getResultArrayByTwoPoint(stroke.gradientHandlePositions || [])
-                };
-            }
-            else if (stroke.type == "GRADIENT_RADIAL" || stroke.type == "GRADIENT_ANGULAR" || stroke.type == "GRADIENT_DIAMOND") {
-                tempResultStroke = {
-                    "type": stroke.type,
-                    "visible": stroke.isVisible,
-                    "opacity": clamp01(stroke.alpha, 1),
-                    "blendMode": processBlendMode(stroke.blendMode),
-                    "gradientStops": cloneGradientStops(stroke.gradientStops),
-                    "gradientTransform": [[0, 1, 0], [-1, 0, 1]]
-                };
-            }
-            if (tempResultStroke.type)
-                resultStrokes.push(tempResultStroke);
-        }
-    }
-    return { fills: resultFills, strokes: resultStrokes };
-}
-function rountGradientStops(gradientStops) {
-    return gradientStops.map(stop => ({
-        position: stop.position > 1 ? 1 : stop.position,
-        color: Object.assign(Object.assign({}, stop.color), { a: stop.color.a > 1 ? 1 : stop.color.a })
+  }
+  function getNodeProbe(node) {
+    if (!node) return { id: "", name: "", type: "NULL" };
+    return {
+      id: String(node.id || ""),
+      name: String(node.name || "Untitled"),
+      type: String(node.type || "UNKNOWN")
+    };
+  }
+  function clamp01(value, fallback = 0) {
+    const numberValue = finiteNumber(value, fallback);
+    if (numberValue < 0) return 0;
+    if (numberValue > 1) return 1;
+    return numberValue;
+  }
+  function cloneRgbColor(color) {
+    return {
+      r: finiteNumber(color && color.r, 0),
+      g: finiteNumber(color && color.g, 0),
+      b: finiteNumber(color && color.b, 0)
+    };
+  }
+  function cloneRgbaColor(color) {
+    return {
+      r: finiteNumber(color && color.r, 0),
+      g: finiteNumber(color && color.g, 0),
+      b: finiteNumber(color && color.b, 0),
+      a: clamp01(color && color.a, 1)
+    };
+  }
+  function cloneVector2(point) {
+    return {
+      x: finiteNumber(point && point.x, 0),
+      y: finiteNumber(point && point.y, 0)
+    };
+  }
+  function cloneGradientStops(stops) {
+    if (!Array.isArray(stops)) return [];
+    return stops.map((stop) => ({
+      position: clamp01(stop && stop.position, 0),
+      color: cloneRgbaColor(stop && stop.color)
     }));
-}
-function getResultArrayByTwoPoint(points) {
-    if (points == undefined || points.length < 2) {
-        return [[1, 0, 0], [0, 1, 0]];
+  }
+  function matrixMultiplication(m1, m2) {
+    let res = [];
+    for (let i = 0; i < m1.length; i++) {
+      res[i] = [];
+      for (let j = 0; j < m2[0].length; j++) {
+        let sum = 0;
+        for (let k = 0; k < m2.length; k++) {
+          sum += m1[i][k] * m2[k][j];
+        }
+        res[i][j] = sum;
+      }
+    }
+    return res;
+  }
+  function getResultArrayByTwoPoint(points) {
+    if (points === void 0 || points.length < 2) {
+      return [[1, 0, 0], [0, 1, 0]];
     }
     const first = cloneVector2(points[0]);
     const second = cloneVector2(points[1]);
-    var x3 = first.x, y3 = first.y, x4 = second.x, y4 = second.y;
+    const x3 = first.x, y3 = first.y, x4 = second.x, y4 = second.y;
     const m1 = [[1, 0, 0], [0, 1, 0.5], [0, 0, 1]];
-    const len = Math.sqrt(Math.pow((x4 - x3), 2) + Math.pow((y4 - y3), 2));
-    if (!Number.isFinite(len) || len <= 0)
-        return [[1, 0, 0], [0, 1, 0]];
+    const len = Math.sqrt(__pow(x4 - x3, 2) + __pow(y4 - y3, 2));
+    if (!Number.isFinite(len) || len <= 0) return [[1, 0, 0], [0, 1, 0]];
     const m2 = [[1 / len, 0, 0], [0, 1, 0], [0, 0, 1]];
     const sina = (y3 - y4) / len, cosa = (x4 - x3) / len;
     const m3 = [[cosa, -sina, 0], [sina, cosa, 0], [0, 0, 1]];
@@ -3114,216 +623,2354 @@ function getResultArrayByTwoPoint(points) {
     const m123 = matrixMultiplication(m12, m3);
     const m1234 = matrixMultiplication(m123, m4);
     return [m1234[0], m1234[1]];
-    function matrixMultiplication(m1, m2) {
-        let res = [];
-        for (let i = 0; i < m1.length; i++) {
-            res[i] = [];
-            for (let j = 0; j < m2[0].length; j++) {
-                let sum = 0;
-                for (let k = 0; k < m2.length; k++)
-                    sum += m1[i][k] * m2[k][j];
-                res[i][j] = sum;
-            }
+  }
+  function processBlendMode(blendMode) {
+    if (!blendMode) return "NORMAL";
+    const value = String(blendMode).toUpperCase();
+    if (value === "PASS_THROUGH") return "PASS_THROUGH";
+    if (value === "NORMAL") return "NORMAL";
+    if (value === "DARKEN") return "DARKEN";
+    if (value === "MULTIPLY") return "MULTIPLY";
+    if (value === "COLOR_BURN") return "COLOR_BURN";
+    if (value === "LIGHTEN") return "LIGHTEN";
+    if (value === "SCREEN") return "SCREEN";
+    if (value === "COLOR_DODGE") return "COLOR_DODGE";
+    if (value === "OVERLAY") return "OVERLAY";
+    if (value === "SOFT_LIGHT") return "SOFT_LIGHT";
+    if (value === "HARD_LIGHT") return "HARD_LIGHT";
+    if (value === "DIFFERENCE") return "DIFFERENCE";
+    if (value === "EXCLUSION") return "EXCLUSION";
+    if (value === "HUE") return "HUE";
+    if (value === "SATURATION") return "SATURATION";
+    if (value === "COLOR") return "COLOR";
+    if (value === "LUMINOSITY") return "LUMINOSITY";
+    if (value === "PLUS_DARKER") return "PLUS_DARKER";
+    if (value === "PLUS_LIGHTER") return "PLUS_LIGHTER";
+    return "NORMAL";
+  }
+  function fillsAndStrokes2Json(fills, strokes) {
+    const resultFills = [];
+    if (Array.isArray(fills)) {
+      for (const fill of fills) {
+        let tempResultFill = {};
+        if (fill.type === "SOLID") {
+          tempResultFill = {
+            "type": fill.type,
+            "visible": fill.isVisible,
+            "opacity": clamp01(fill.color && fill.color.a, 1),
+            "blendMode": processBlendMode(fill.blendMode),
+            "color": cloneRgbColor(fill.color)
+          };
+        } else if (fill.type === "GRADIENT_LINEAR") {
+          tempResultFill = {
+            "type": fill.type,
+            "visible": fill.isVisible,
+            "opacity": clamp01(fill.alpha, 1),
+            "blendMode": processBlendMode(fill.blendMode),
+            "gradientStops": cloneGradientStops(fill.gradientStops),
+            "gradientTransform": getResultArrayByTwoPoint(fill.gradientHandlePositions || [])
+          };
+        } else if (fill.type === "GRADIENT_RADIAL" || fill.type === "GRADIENT_ANGULAR" || fill.type === "GRADIENT_DIAMOND") {
+          tempResultFill = {
+            "type": fill.type,
+            "visible": fill.isVisible,
+            "opacity": clamp01(fill.alpha, 1),
+            "blendMode": processBlendMode(fill.blendMode),
+            "gradientStops": cloneGradientStops(fill.gradientStops),
+            "gradientTransform": [[0, 1, 0], [-1, 0, 1]]
+          };
+        } else if (fill.type === "IMAGE") {
+          tempResultFill = createImageFillJson(fill);
         }
-        return res;
+        if (tempResultFill.type) resultFills.push(tempResultFill);
+      }
     }
-}
-function getUniversalProperty(selection, sourceType, restoreType) {
+    const resultStrokes = [];
+    if (Array.isArray(strokes)) {
+      for (const stroke of strokes) {
+        let tempResultStroke = {};
+        if (stroke.type === "SOLID") {
+          tempResultStroke = {
+            "type": stroke.type,
+            "visible": stroke.isVisible,
+            "opacity": clamp01(stroke.color && stroke.color.a, 1),
+            "blendMode": processBlendMode(stroke.blendMode),
+            "color": cloneRgbColor(stroke.color)
+          };
+        } else if (stroke.type === "GRADIENT_LINEAR") {
+          tempResultStroke = {
+            "type": stroke.type,
+            "visible": stroke.isVisible,
+            "opacity": clamp01(stroke.alpha, 1),
+            "blendMode": processBlendMode(stroke.blendMode),
+            "gradientStops": cloneGradientStops(stroke.gradientStops),
+            "gradientTransform": getResultArrayByTwoPoint(stroke.gradientHandlePositions || [])
+          };
+        } else if (stroke.type === "GRADIENT_RADIAL" || stroke.type === "GRADIENT_ANGULAR" || stroke.type === "GRADIENT_DIAMOND") {
+          tempResultStroke = {
+            "type": stroke.type,
+            "visible": stroke.isVisible,
+            "opacity": clamp01(stroke.alpha, 1),
+            "blendMode": processBlendMode(stroke.blendMode),
+            "gradientStops": cloneGradientStops(stroke.gradientStops),
+            "gradientTransform": [[0, 1, 0], [-1, 0, 1]]
+          };
+        }
+        if (tempResultStroke.type) resultStrokes.push(tempResultStroke);
+      }
+    }
+    return { fills: resultFills, strokes: resultStrokes };
+  }
+  function getLayoutMode(node) {
+    const mode = readNodeProperty(node, "layoutMode", "NONE");
+    if (mode === "HORIZONTAL" || mode === "VERTICAL" || mode === "NONE") return mode;
+    return "NONE";
+  }
+  function getAxisAlign(value) {
+    if (value === "MIN" || value === "CENTER" || value === "MAX" || value === "SPACE_BETWEEN") return value;
+    return "MIN";
+  }
+  function getCounterAxisAlignContent(node) {
+    const value = readNodeProperty(node, "counterAxisAlignContent", "AUTO");
+    if (value === "AUTO" || value === "SPACE_BETWEEN") return value;
+    return "AUTO";
+  }
+  function getLayoutAlign(value) {
+    if (value === "INHERIT" || value === "MIN" || value === "CENTER" || value === "MAX" || value === "STRETCH") return value;
+    return "INHERIT";
+  }
+  function getRelativeLayoutTransform(selection) {
+    return cloneTransform(readNodeProperty(selection, "relativeTransform", [[1, 0, 0], [0, 1, 0]]));
+  }
+  function getUniversalProperty(selection, sourceType, restoreType) {
     const resolvedSourceType = sourceType || readNodeProperty(selection, "type", "UNKNOWN");
     const resolvedRestoreType = restoreType || getRestoreType(resolvedSourceType);
     const layoutTransform = getRelativeLayoutTransform(selection);
     const fills = readNodeProperty(selection, "fills", []);
     const strokes = readNodeProperty(selection, "strokes", []);
-    var tFS = fillsAndStrokes2Json(fills, strokes);
-    var fourCR = {
-        tl: readNodeProperty(selection, "topLeftRadius", 0) || 0,
-        tr: readNodeProperty(selection, "topRightRadius", 0) || 0,
-        bl: readNodeProperty(selection, "bottomLeftRadius", 0) || 0,
-        br: readNodeProperty(selection, "bottomRightRadius", 0) || 0
+    const tFS = fillsAndStrokes2Json(fills, strokes);
+    const fourCR = {
+      tl: readNodeProperty(selection, "topLeftRadius", 0) || 0,
+      tr: readNodeProperty(selection, "topRightRadius", 0) || 0,
+      bl: readNodeProperty(selection, "bottomLeftRadius", 0) || 0,
+      br: readNodeProperty(selection, "bottomRightRadius", 0) || 0
     };
-    var resCR = readNodeProperty(selection, "cornerRadius", 0) || 0;
-    if (resCR === "Symbol(mg.mixed)")
-        resCR = -1;
-    var resCS = readNodeProperty(selection, "cornerSmooth", 0) || 0;
-    var effectsArray = [];
+    let resCR = readNodeProperty(selection, "cornerRadius", 0) || 0;
+    if (String(resCR) === "Symbol(mg.mixed)") resCR = -1;
+    const resCS = readNodeProperty(selection, "cornerSmooth", 0) || 0;
+    const effectsArray = [];
     const effects = readNodeProperty(selection, "effects", []);
     for (const tE of effects) {
-        if (tE.type == "DROP_SHADOW" || tE.type == "INNER_SHADOW") {
-            effectsArray.push({
-                "type": tE.type,
-                "color": cloneRgbaColor(tE.color),
-                "offset": cloneVector2(tE.offset),
-                "radius": finiteNumber(tE.radius, 0),
-                "spread": finiteNumber(tE.spread, 0),
-                "visible": tE.isVisible,
-                "blendMode": processBlendMode(tE.blendMode)
-            });
-        }
-        else if (tE.type == 'LAYER_BLUR' || tE.type == 'BACKGROUND_BLUR') {
-            effectsArray.push({ "type": tE.type, "radius": finiteNumber(tE.radius, 0), "visible": tE.isVisible });
-        }
+      if (tE.type === "DROP_SHADOW" || tE.type === "INNER_SHADOW") {
+        effectsArray.push({
+          "type": tE.type,
+          "color": cloneRgbaColor(tE.color),
+          "offset": cloneVector2(tE.offset),
+          "radius": finiteNumber(tE.radius, 0),
+          "spread": finiteNumber(tE.spread, 0),
+          "visible": tE.isVisible,
+          "blendMode": processBlendMode(tE.blendMode)
+        });
+      } else if (tE.type === "LAYER_BLUR" || tE.type === "BACKGROUND_BLUR") {
+        effectsArray.push({
+          "type": tE.type,
+          "radius": finiteNumber(tE.radius, 0),
+          "visible": tE.isVisible
+        });
+      }
     }
     return {
-        "type": resolvedRestoreType,
-        "sourceType": resolvedSourceType,
-        "restoreType": resolvedRestoreType,
-        "id": readNodeProperty(selection, "id", ""),
-        "name": readNodeProperty(selection, "name", "Untitled"),
-        "parentID": safeRead(() => { var _a; return selection.parent && selection.parent.type == "PAGE" ? null : (_a = selection.parent) === null || _a === void 0 ? void 0 : _a.id; }, null),
-        "constraints": cloneJsonCompatible(readNodeProperty(selection, "constraints", undefined), undefined),
-        "exportSettings": cloneJsonCompatible(readNodeProperty(selection, "exportSettings", []), []),
-        "scence": {
-            "visible": readNodeProperty(selection, "isVisible", true),
-            "locked": readNodeProperty(selection, "isLocked", false)
-        },
-        "blend": {
-            "opacity": readNodeProperty(selection, "opacity", 1),
-            "isMask": readNodeProperty(selection, "isMask", false) || false,
-            "blendMode": processBlendMode(readNodeProperty(selection, "blendMode", "NORMAL")),
-            "effects": effectsArray
-        },
-        "corner": {
-            "topLeftRadius": fourCR.tl, "topRightRadius": fourCR.tr,
-            "bottomLeftRadius": fourCR.bl, "bottomRightRadius": fourCR.br,
-            "cornerRadius": resCR, "cornerSmoothing": resCS
-        },
-        "geometry": {
-            "fills": tFS.fills, "strokes": tFS.strokes,
-            "strokeWeight": readNodeProperty(selection, "strokeWeight", 0) || 0,
-            "strokeAlign": readNodeProperty(selection, "strokeAlign", "CENTER"),
-            "strokeJoin": readNodeProperty(selection, "strokeJoin", "MITER"),
-            "dashPattern": cloneJsonCompatible(readNodeProperty(selection, "strokeDashes", []), []),
-            "strokeCap": readNodeProperty(selection, "strokeCap", "NONE"),
-            "strokeTopWeight": (selection.strokeTopWeight !== undefined) ? readNodeProperty(selection, "strokeTopWeight", 0) : undefined,
-            "strokeBottomWeight": (selection.strokeBottomWeight !== undefined) ? readNodeProperty(selection, "strokeBottomWeight", 0) : undefined,
-            "strokeLeftWeight": (selection.strokeLeftWeight !== undefined) ? readNodeProperty(selection, "strokeLeftWeight", 0) : undefined,
-            "strokeRightWeight": (selection.strokeRightWeight !== undefined) ? readNodeProperty(selection, "strokeRightWeight", 0) : undefined,
-        },
-        "layout": {
-            "relativeTransform": layoutTransform,
-            "x": layoutTransform[0][2], "y": layoutTransform[1][2],
-            "rotation": -readNodeProperty(selection, "rotation", 0) || 0,
-            "width": readNodeProperty(selection, "width", 0),
-            "height": readNodeProperty(selection, "height", 0),
-            "constrainProportions": readNodeProperty(selection, "constrainProportions", false) || false,
-            "layoutMode": getLayoutMode(selection),
-            "itemSpacing": readNodeProperty(selection, "itemSpacing", 0) || 0,
-            "paddingLeft": readNodeProperty(selection, "paddingLeft", 0) || 0,
-            "paddingRight": readNodeProperty(selection, "paddingRight", 0) || 0,
-            "paddingTop": readNodeProperty(selection, "paddingTop", 0) || 0,
-            "paddingBottom": readNodeProperty(selection, "paddingBottom", 0) || 0,
-            "primaryAxisAlignItems": getAxisAlign(readNodeProperty(selection, "primaryAxisAlignItems", readNodeProperty(selection, "mainAxisAlignItems", "MIN"))),
-            "counterAxisAlignItems": getAxisAlign(readNodeProperty(selection, "counterAxisAlignItems", readNodeProperty(selection, "crossAxisAlignItems", "MIN"))),
-            "counterAxisAlignContent": getCounterAxisAlignContent(selection),
-            "primaryAxisSizingMode": readNodeProperty(selection, "primaryAxisSizingMode", readNodeProperty(selection, "mainAxisSizingMode", "FIXED")),
-            "counterAxisSizingMode": readNodeProperty(selection, "counterAxisSizingMode", readNodeProperty(selection, "crossAxisSizingMode", "FIXED")),
-            "itemReverseZIndex": readNodeProperty(selection, "itemReverseZIndex", false) || false,
-            "strokesIncludedInLayout": readNodeProperty(selection, "strokesIncludedInLayout", false) || false,
-            "layoutAlign": getLayoutAlign(readNodeProperty(selection, "layoutAlign", readNodeProperty(selection, "alignSelf", "INHERIT"))),
-            "layoutGrow": readNodeProperty(selection, "layoutGrow", readNodeProperty(selection, "flexGrow", 0)),
-            "layoutPositioning": readNodeProperty(selection, "layoutPositioning", "AUTO")
-        }
+      "type": resolvedRestoreType,
+      "sourceType": resolvedSourceType,
+      "restoreType": resolvedRestoreType,
+      "id": readNodeProperty(selection, "id", ""),
+      "name": readNodeProperty(selection, "name", "Untitled"),
+      "parentID": safeRead(() => {
+        var _a;
+        return selection.parent && selection.parent.type === "PAGE" ? null : (_a = selection.parent) == null ? void 0 : _a.id;
+      }, null),
+      "constraints": cloneJsonCompatible(readNodeProperty(selection, "constraints", void 0), void 0),
+      "exportSettings": cloneJsonCompatible(readNodeProperty(selection, "exportSettings", []), []),
+      // NOTE: "scence" is a historical typo in the schema that cannot be changed to maintain backwards compatibility
+      "scence": {
+        "visible": readNodeProperty(selection, "isVisible", true),
+        "locked": readNodeProperty(selection, "isLocked", false)
+      },
+      "blend": {
+        "opacity": readNodeProperty(selection, "opacity", 1),
+        "isMask": readNodeProperty(selection, "isMask", false) || false,
+        "blendMode": processBlendMode(readNodeProperty(selection, "blendMode", "NORMAL")),
+        "effects": effectsArray
+      },
+      "corner": {
+        "topLeftRadius": fourCR.tl,
+        "topRightRadius": fourCR.tr,
+        "bottomLeftRadius": fourCR.bl,
+        "bottomRightRadius": fourCR.br,
+        "cornerRadius": resCR,
+        "cornerSmoothing": resCS
+      },
+      "geometry": {
+        "fills": tFS.fills,
+        "strokes": tFS.strokes,
+        "strokeWeight": readNodeProperty(selection, "strokeWeight", 0) || 0,
+        "strokeAlign": readNodeProperty(selection, "strokeAlign", "CENTER"),
+        "strokeJoin": readNodeProperty(selection, "strokeJoin", "MITER"),
+        "dashPattern": cloneJsonCompatible(readNodeProperty(selection, "strokeDashes", []), []),
+        "strokeCap": readNodeProperty(selection, "strokeCap", "NONE"),
+        "strokeTopWeight": selection.strokeTopWeight !== void 0 ? readNodeProperty(selection, "strokeTopWeight", 0) : void 0,
+        "strokeBottomWeight": selection.strokeBottomWeight !== void 0 ? readNodeProperty(selection, "strokeBottomWeight", 0) : void 0,
+        "strokeLeftWeight": selection.strokeLeftWeight !== void 0 ? readNodeProperty(selection, "strokeLeftWeight", 0) : void 0,
+        "strokeRightWeight": selection.strokeRightWeight !== void 0 ? readNodeProperty(selection, "strokeRightWeight", 0) : void 0
+      },
+      "layout": {
+        "relativeTransform": layoutTransform,
+        "x": layoutTransform[0][2],
+        "y": layoutTransform[1][2],
+        "rotation": -readNodeProperty(selection, "rotation", 0) || 0,
+        "width": readNodeProperty(selection, "width", 0),
+        "height": readNodeProperty(selection, "height", 0),
+        "constrainProportions": readNodeProperty(selection, "constrainProportions", false) || false,
+        "layoutMode": getLayoutMode(selection),
+        "itemSpacing": readNodeProperty(selection, "itemSpacing", 0) || 0,
+        "paddingLeft": readNodeProperty(selection, "paddingLeft", 0) || 0,
+        "paddingRight": readNodeProperty(selection, "paddingRight", 0) || 0,
+        "paddingTop": readNodeProperty(selection, "paddingTop", 0) || 0,
+        "paddingBottom": readNodeProperty(selection, "paddingBottom", 0) || 0,
+        "primaryAxisAlignItems": getAxisAlign(readNodeProperty(selection, "primaryAxisAlignItems", readNodeProperty(selection, "mainAxisAlignItems", "MIN"))),
+        "counterAxisAlignItems": getAxisAlign(readNodeProperty(selection, "counterAxisAlignItems", readNodeProperty(selection, "crossAxisAlignItems", "MIN"))),
+        "counterAxisAlignContent": getCounterAxisAlignContent(selection),
+        "primaryAxisSizingMode": readNodeProperty(selection, "primaryAxisSizingMode", readNodeProperty(selection, "mainAxisSizingMode", "FIXED")),
+        "counterAxisSizingMode": readNodeProperty(selection, "counterAxisSizingMode", readNodeProperty(selection, "crossAxisSizingMode", "FIXED")),
+        "itemReverseZIndex": readNodeProperty(selection, "itemReverseZIndex", false) || false,
+        "strokesIncludedInLayout": readNodeProperty(selection, "strokesIncludedInLayout", false) || false,
+        "layoutAlign": getLayoutAlign(readNodeProperty(selection, "layoutAlign", readNodeProperty(selection, "alignSelf", "INHERIT"))),
+        "layoutGrow": readNodeProperty(selection, "layoutGrow", readNodeProperty(selection, "flexGrow", 0)),
+        "layoutPositioning": readNodeProperty(selection, "layoutPositioning", "AUTO")
+      }
     };
-}
-function getRelativeLayoutTransform(selection) {
-    // MasterGo reports absoluteTransform inconsistently for some grouped node
-    // types. The node's own relativeTransform is the reliable local transform
-    // and is also what we use when replacing the layer with a JSON text marker.
-    return cloneTransform(readNodeProperty(selection, "relativeTransform", [[1, 0, 0], [0, 1, 0]]));
-}
-function overrideLayoutTransform(nodeJson, transform) {
-    if (!nodeJson || !nodeJson.layout || !transform)
+  }
+
+  // ../shared/vectorUtils.ts
+  function normalizeVectorWindingRule(value) {
+    if (value === "Evenodd" || value === "EVENODD") return "EVENODD";
+    if (value === "Nonzero" || value === "NONZERO") return "NONZERO";
+    return "NONZERO";
+  }
+  function normalizeVectorWindingRuleForFigma(value) {
+    return normalizeVectorWindingRule(value);
+  }
+
+  // src/serializers/vector.ts
+  function normalizeVectorRegionLoops(loops) {
+    if (!Array.isArray(loops)) return [];
+    const result = [];
+    for (const loop of loops) {
+      if (!Array.isArray(loop)) continue;
+      const segmentIndexes = loop.map((value) => Number(value)).filter((value) => Number.isFinite(value));
+      if (segmentIndexes.length > 0) result.push(segmentIndexes);
+    }
+    return result;
+  }
+  function normalizeVectorRegions(regions) {
+    if (!Array.isArray(regions)) return [];
+    const result = [];
+    for (const region of regions) {
+      if (!region || typeof region !== "object") continue;
+      const loops = normalizeVectorRegionLoops(region.loops);
+      if (loops.length === 0) continue;
+      result.push({
+        windingRule: normalizeVectorWindingRuleForFigma(region.windingRule),
+        loops
+      });
+    }
+    return result;
+  }
+  function cloneVectorNetworkForExport(vectorNetwork) {
+    if (!vectorNetwork || typeof vectorNetwork !== "object") return void 0;
+    return {
+      vertices: cloneJsonCompatible(vectorNetwork.vertices, []),
+      segments: cloneJsonCompatible(vectorNetwork.segments, []),
+      regions: normalizeVectorRegions(vectorNetwork.regions)
+    };
+  }
+  function transPenNode(selection, sourceType, restoreType) {
+    const universalStruct = getUniversalProperty(selection, sourceType, restoreType);
+    const originJson = selection.penNetwork;
+    if (!originJson || !originJson.ctrlNodes || !originJson.nodes || !originJson.paths) {
+      const vectorNetwork = cloneVectorNetworkForExport(selection.vectorNetwork);
+      const resultStruct2 = Object.assign(vectorNetwork ? { vectorNetwork } : {}, universalStruct);
+      resultStruct2.type = restoreType || getRuleRestoreType(sourceType || selection.type);
+      return resultStruct2;
+    }
+    const originCtrlNodes = originJson.ctrlNodes;
+    const originNodes = originJson.nodes;
+    const originPaths = originJson.paths;
+    const resultSegments = [];
+    for (let j = 0; j < originPaths.length; j++) {
+      const tempStart = originPaths[j][0];
+      const tempEnd = originPaths[j][3];
+      const tempTangentStart = { x: 0, y: 0 };
+      const tempTangentEnd = { x: 0, y: 0 };
+      if (originPaths[j][1] !== -1 && originCtrlNodes[originPaths[j][1]]) {
+        tempTangentStart.x = originCtrlNodes[originPaths[j][1]].x - originNodes[tempStart].x;
+        tempTangentStart.y = originCtrlNodes[originPaths[j][1]].y - originNodes[tempStart].y;
+      }
+      if (originPaths[j][2] !== -1 && originCtrlNodes[originPaths[j][2]]) {
+        tempTangentEnd.x = originCtrlNodes[originPaths[j][2]].x - originNodes[tempEnd].x;
+        tempTangentEnd.y = originCtrlNodes[originPaths[j][2]].y - originNodes[tempEnd].y;
+      }
+      resultSegments.push({
+        start: tempStart,
+        end: tempEnd,
+        tangentStart: tempTangentStart,
+        tangentEnd: tempTangentEnd
+      });
+    }
+    const finalPathJson = {
+      "segments": resultSegments,
+      "vertices": cloneJsonCompatible(originNodes, []),
+      "regions": normalizeVectorRegions(originJson.regions)
+    };
+    const otherStruct = {
+      "vectorNetwork": finalPathJson
+    };
+    const resultStruct = Object.assign(otherStruct, universalStruct);
+    resultStruct.type = restoreType || getRuleRestoreType(sourceType || selection.type);
+    return resultStruct;
+  }
+
+  // src/serializers/shapes.ts
+  function transEllipseNode(selection) {
+    const universalStruct = getUniversalProperty(selection);
+    const otherStruct = { "arcData": cloneJsonCompatible(selection.arcData, void 0) };
+    return Object.assign(otherStruct, universalStruct);
+  }
+  function transStarNode(selection) {
+    const universalStruct = getUniversalProperty(selection);
+    const otherStruct = {
+      "pointCount": selection.pointCount,
+      "innerRadius": selection.innerRadius
+    };
+    return Object.assign(otherStruct, universalStruct);
+  }
+  function transPolygonNode(selection) {
+    const universalStruct = getUniversalProperty(selection);
+    const otherStruct = { "pointCount": selection.pointCount };
+    return Object.assign(otherStruct, universalStruct);
+  }
+
+  // src/serializers/text.ts
+  function transTextNode(selection) {
+    var _a, _b, _c;
+    const universalStruct = getUniversalProperty(selection);
+    const textStyles = readNodeProperty(selection, "textStyles", []);
+    let tempFontName = cloneJsonCompatible((_b = (_a = textStyles == null ? void 0 : textStyles[0]) == null ? void 0 : _a.textStyle) == null ? void 0 : _b.fontName, void 0);
+    if (tempFontName && tempFontName.family === "AlibabaPuHuiTi") {
+      tempFontName = {
+        family: "Alibaba PuHuiTi",
+        style: tempFontName.style
+      };
+    }
+    const style = ((_c = textStyles == null ? void 0 : textStyles[0]) == null ? void 0 : _c.textStyle) || {};
+    const otherStruct = {
+      "textAlignHorizontal": readNodeProperty(selection, "textAlignHorizontal", "LEFT"),
+      "textAlignVertical": readNodeProperty(selection, "textAlignVertical", "TOP"),
+      "textAutoResize": readNodeProperty(selection, "textAutoResize", "NONE"),
+      "paragraphIndent": 0,
+      "paragraphSpacing": readNodeProperty(selection, "paragraphSpacing", 0),
+      "autoRename": false,
+      "characters": readNodeProperty(selection, "characters", ""),
+      "fontSize": style.fontSize,
+      "fontName": tempFontName,
+      "fontWeight": style.fontWeight,
+      "textCase": style.textCase,
+      "textDecoration": style.textDecoration,
+      "letterSpacing": cloneJsonCompatible(style.letterSpacing, style.letterSpacing),
+      "lineHeight": cloneJsonCompatible(style.lineHeight, style.lineHeight)
+    };
+    return Object.assign(otherStruct, universalStruct);
+  }
+
+  // ../shared/connectorUtils.ts
+  function normalizeConnectorPoint(point) {
+    return {
+      x: Number(point && point.x) || 0,
+      y: Number(point && point.y) || 0
+    };
+  }
+  function isSameConnectorAxis(start, end) {
+    return Math.abs(start.x - end.x) < 0.01 || Math.abs(start.y - end.y) < 0.01;
+  }
+  function shouldConnectorRouteStartHorizontal(start, end, startEndpoint, endEndpoint) {
+    const startMagnet = startEndpoint && startEndpoint.magnet;
+    if (startMagnet === "LEFT" || startMagnet === "RIGHT") return true;
+    if (startMagnet === "TOP" || startMagnet === "BOTTOM") return false;
+    const endMagnet = endEndpoint && endEndpoint.magnet;
+    if (endMagnet === "TOP" || endMagnet === "BOTTOM") return true;
+    if (endMagnet === "LEFT" || endMagnet === "RIGHT") return false;
+    return Math.abs(end.x - start.x) >= Math.abs(end.y - start.y);
+  }
+  function dedupeConnectorPoints(points) {
+    const result = [];
+    for (const point of points) {
+      const previous = result[result.length - 1];
+      if (!previous || Math.abs(previous.x - point.x) >= 0.01 || Math.abs(previous.y - point.y) >= 0.01) {
+        result.push(point);
+      }
+    }
+    return result.length > 1 ? result : [points[0], points[points.length - 1]];
+  }
+  function getConnectorCornerRadius(points, index, requestedRadius) {
+    const radius = Number(requestedRadius) || 0;
+    if (radius <= 0) return 0;
+    const previous = points[index - 1];
+    const current = points[index];
+    const next = points[index + 1];
+    const previousLength = Math.abs(current.x - previous.x) + Math.abs(current.y - previous.y);
+    const nextLength = Math.abs(next.x - current.x) + Math.abs(next.y - current.y);
+    return Math.min(radius, previousLength / 2, nextLength / 2);
+  }
+  function normalizeConnectorVectorStrokeCap(value) {
+    if (value === "ARROW_EQUILATERAL" || value === "ARROW_LINES" || value === "TRIANGLE_FILLED" || value === "DIAMOND_FILLED" || value === "CIRCLE_FILLED" || value === "ROUND" || value === "SQUARE" || value === "NONE") {
+      return value;
+    }
+    if (value === "LINE_ARROW" || value === "LINE") return "ARROW_LINES";
+    if (value === "TRIANGLE_ARROW") return "ARROW_EQUILATERAL";
+    if (value === "DIAMOND") return "DIAMOND_FILLED";
+    if (value === "ROUND_ARROW" || value === "RING") return "CIRCLE_FILLED";
+    return "NONE";
+  }
+  function createConnectorRoutePoints(start, end, startEndpoint, endEndpoint, lineType) {
+    const startPoint = normalizeConnectorPoint(start);
+    const endPoint = normalizeConnectorPoint(end);
+    if (lineType !== "ELBOWED" || isSameConnectorAxis(startPoint, endPoint)) {
+      return dedupeConnectorPoints([startPoint, endPoint]);
+    }
+    const horizontalFirst = shouldConnectorRouteStartHorizontal(startPoint, endPoint, startEndpoint, endEndpoint);
+    const middlePoint = horizontalFirst ? { x: endPoint.x, y: startPoint.y } : { x: startPoint.x, y: endPoint.y };
+    return dedupeConnectorPoints([startPoint, middlePoint, endPoint]);
+  }
+  function createConnectorVectorNetwork(start, end, startEndpoint, endEndpoint, lineType, cornerRadius, startStrokeCap, endStrokeCap) {
+    const points = createConnectorRoutePoints(start, end, startEndpoint, endEndpoint, lineType);
+    const vertices = points.map((point, index) => {
+      const vertex = { x: point.x, y: point.y };
+      if (index === 0) vertex.strokeCap = normalizeConnectorVectorStrokeCap(startStrokeCap);
+      if (index === points.length - 1) vertex.strokeCap = normalizeConnectorVectorStrokeCap(endStrokeCap);
+      if (index > 0 && index < points.length - 1) {
+        const radius = getConnectorCornerRadius(points, index, cornerRadius);
+        if (radius > 0) vertex.cornerRadius = radius;
+      }
+      return vertex;
+    });
+    const segments = [];
+    for (let index = 0; index < points.length - 1; index++) {
+      segments.push({
+        start: index,
+        end: index + 1,
+        tangentStart: { x: 0, y: 0 },
+        tangentEnd: { x: 0, y: 0 }
+      });
+    }
+    return { vertices, segments, regions: [] };
+  }
+
+  // src/serializers/connector.ts
+  function normalizeConnectorEndpoint(endpoint) {
+    if (!endpoint || typeof endpoint !== "object") return void 0;
+    const result = {};
+    if (endpoint.position) {
+      result.position = {
+        x: Number(endpoint.position.x) || 0,
+        y: Number(endpoint.position.y) || 0
+      };
+    }
+    if (typeof endpoint.endpointNodeId === "string" && endpoint.endpointNodeId) {
+      result.endpointNodeId = endpoint.endpointNodeId;
+    }
+    if (typeof endpoint.magnet === "string" && endpoint.magnet) {
+      result.magnet = endpoint.magnet;
+    }
+    return result.position || result.endpointNodeId ? result : void 0;
+  }
+  function absolutePointToNodeLocal(node, point) {
+    const transform = safeRead(() => node.absoluteTransform, null);
+    if (!transform || !transform[0] || !transform[1]) return { x: Number(point.x) || 0, y: Number(point.y) || 0 };
+    const a = Number(transform[0][0]) || 0;
+    const c = Number(transform[0][1]) || 0;
+    const e = Number(transform[0][2]) || 0;
+    const b = Number(transform[1][0]) || 0;
+    const d = Number(transform[1][1]) || 0;
+    const f = Number(transform[1][2]) || 0;
+    const det = a * d - b * c;
+    if (Math.abs(det) < 1e-6) return { x: (Number(point.x) || 0) - e, y: (Number(point.y) || 0) - f };
+    const dx = (Number(point.x) || 0) - e;
+    const dy = (Number(point.y) || 0) - f;
+    return {
+      x: (d * dx - c * dy) / det,
+      y: (-b * dx + a * dy) / det
+    };
+  }
+  function connectorEndpointToLocalPoint(selection, endpoint, isStart) {
+    const point = endpoint && endpoint.position ? endpoint.position : null;
+    if (point) return absolutePointToNodeLocal(selection, point);
+    const width = Number(safeRead(() => selection.width, 0)) || 0;
+    const height = Number(safeRead(() => selection.height, 0)) || 0;
+    return isStart ? { x: 0, y: 0 } : { x: width, y: height };
+  }
+  function transConnectorNode(selection) {
+    const universalStruct = getUniversalProperty(selection, "CONNECTOR", "CONNECTOR");
+    const connectorStart = normalizeConnectorEndpoint(selection.connectorStart);
+    const connectorEnd = normalizeConnectorEndpoint(selection.connectorEnd);
+    const connectorLineType = selection.connectorLineType || "ELBOWED";
+    const connectorCornerRadius = selection.cornerRadius || 0;
+    const connectorStartStrokeCap = selection.connectorStartStrokeCap || "NONE";
+    const connectorEndStrokeCap = selection.connectorEndStrokeCap || "NONE";
+    const otherStruct = {
+      "connectorStart": connectorStart,
+      "connectorEnd": connectorEnd,
+      "connectorStartLocal": connectorEndpointToLocalPoint(selection, connectorStart, true),
+      "connectorEndLocal": connectorEndpointToLocalPoint(selection, connectorEnd, false),
+      "connectorStartStrokeCap": connectorStartStrokeCap,
+      "connectorEndStrokeCap": connectorEndStrokeCap,
+      "connectorLineType": connectorLineType,
+      "connectorCornerRadius": connectorCornerRadius,
+      "vectorNetwork": void 0
+    };
+    otherStruct.vectorNetwork = createConnectorVectorNetwork(
+      otherStruct.connectorStartLocal,
+      otherStruct.connectorEndLocal,
+      connectorStart,
+      connectorEnd,
+      connectorLineType,
+      connectorCornerRadius,
+      connectorStartStrokeCap,
+      connectorEndStrokeCap
+    );
+    return Object.assign(otherStruct, universalStruct);
+  }
+
+  // src/serializers/container.ts
+  function transFrameNode(selection, sourceType) {
+    const universalStruct = getUniversalProperty(selection, sourceType);
+    const otherStruct = { "clipsContent": selection.clipsContent };
+    return Object.assign(otherStruct, universalStruct);
+  }
+  function transGroupNode(selection) {
+    const universalStruct = getUniversalProperty(selection, "GROUP", "GROUP");
+    const otherStruct = { "clipsContent": false };
+    return Object.assign(otherStruct, universalStruct);
+  }
+  function transBONode(node) {
+    const json = transPenNode(node, "BOOLEAN_OPERATION", getRuleRestoreType("BOOLEAN_OPERATION"));
+    json.booleanOperation = safeRead(() => node.booleanOperation, "UNION");
+    return json;
+  }
+  function transBooleanTreeNode(node, restoreType) {
+    const json = getUniversalProperty(node, "BOOLEAN_OPERATION", restoreType);
+    json.booleanOperation = safeRead(() => node.booleanOperation, "UNION");
+    return json;
+  }
+
+  // src/nodeSerializer.ts
+  function hasUsableVectorNetwork(vectorNetwork) {
+    return !!(vectorNetwork && Array.isArray(vectorNetwork.vertices) && vectorNetwork.vertices.length > 0 && Array.isArray(vectorNetwork.segments));
+  }
+  function createFallbackNodeJson(node, sourceType) {
+    const resolvedSourceType = sourceType || safeRead(() => node.type, "UNKNOWN");
+    const restoreType = getRuleRestoreType(resolvedSourceType);
+    const layoutTransform = safeRead(() => cloneTransform(node.relativeTransform), [[1, 0, 0], [0, 1, 0]]);
+    return {
+      type: restoreType,
+      sourceType: resolvedSourceType,
+      restoreType,
+      id: safeRead(() => node.id, ""),
+      name: safeRead(() => node.name, "Untitled"),
+      parentID: safeRead(() => {
+        var _a;
+        return node.parent && node.parent.type === "PAGE" ? null : (_a = node.parent) == null ? void 0 : _a.id;
+      }, null),
+      constraints: cloneJsonCompatible(safeRead(() => node.constraints, void 0), void 0),
+      exportSettings: [],
+      scence: {
+        visible: safeRead(() => node.isVisible, true),
+        locked: safeRead(() => node.isLocked, false)
+      },
+      blend: {
+        opacity: safeRead(() => node.opacity, 1),
+        isMask: safeRead(() => node.isMask, false),
+        blendMode: "NORMAL",
+        effects: []
+      },
+      corner: {
+        topLeftRadius: 0,
+        topRightRadius: 0,
+        bottomLeftRadius: 0,
+        bottomRightRadius: 0,
+        cornerRadius: 0,
+        cornerSmoothing: 0
+      },
+      geometry: {
+        fills: [],
+        strokes: [],
+        strokeWeight: 0,
+        strokeAlign: "CENTER",
+        strokeJoin: "MITER",
+        dashPattern: [],
+        strokeCap: "NONE",
+        strokeTopWeight: void 0,
+        strokeBottomWeight: void 0,
+        strokeLeftWeight: void 0,
+        strokeRightWeight: void 0
+      },
+      layout: {
+        relativeTransform: layoutTransform,
+        x: layoutTransform[0][2],
+        y: layoutTransform[1][2],
+        rotation: safeRead(() => -(node.rotation || 0), 0),
+        width: safeRead(() => node.width, 0),
+        height: safeRead(() => node.height, 0),
+        constrainProportions: false,
+        layoutMode: "NONE",
+        itemSpacing: 0,
+        paddingLeft: 0,
+        paddingRight: 0,
+        paddingTop: 0,
+        paddingBottom: 0,
+        primaryAxisAlignItems: "MIN",
+        counterAxisAlignItems: "MIN",
+        counterAxisAlignContent: "AUTO",
+        primaryAxisSizingMode: "FIXED",
+        counterAxisSizingMode: "FIXED",
+        itemReverseZIndex: false,
+        strokesIncludedInLayout: false,
+        layoutAlign: "INHERIT",
+        layoutGrow: 0,
+        layoutPositioning: "AUTO"
+      },
+      fallbackExport: true
+    };
+  }
+  function analyseNodes(node, sourceType) {
+    try {
+      return sanitizeExportNodeJson(analyseNodesUnsafe(node, sourceType));
+    } catch (error) {
+      if (isOutOfMemoryError(error)) {
+        state.logDiagnostic("error", "[MasterGo2Figma] Analyse node OOM", {
+          node: getNodeProbe(node),
+          sourceType,
+          error: describeError(error)
+        });
+        throw error;
+      }
+      state.logDiagnostic("warn", "[MasterGo2Figma] Unable to fully analyse node, exporting fallback", {
+        node: getNodeProbe(node),
+        sourceType,
+        error: describeError(error),
+        debugState: state.exportDebugState
+      });
+      return sanitizeExportNodeJson(createFallbackNodeJson(node, sourceType));
+    }
+  }
+  function analyseNodesUnsafe(node, sourceType) {
+    const resolvedSourceType = sourceType || node.type;
+    const rule = getLayerRule(resolvedSourceType) || getLayerRule(node.type);
+    if (!rule) {
+      console.warn("Unsupported layer type:", resolvedSourceType, node.type);
+      return {};
+    }
+    if (rule.sendStrategy === "flattenBoolean") return transBONode(node);
+    if (rule.sendStrategy === "booleanTree") return transBooleanTreeNode(node, rule.restoreType);
+    if (rule.sendStrategy === "penNetwork") return transPenNode(node, resolvedSourceType, rule.restoreType);
+    if (rule.sendStrategy === "ellipseArc") return transEllipseNode(node);
+    if (rule.sendStrategy === "text") return transTextNode(node);
+    if (rule.sendStrategy === "star") return transStarNode(node);
+    if (rule.sendStrategy === "polygon") return transPolygonNode(node);
+    if (rule.sendStrategy === "connector") return transConnectorNode(node);
+    if (rule.sendStrategy === "frameLike") return transFrameNode(node, resolvedSourceType);
+    if (rule.sendStrategy === "groupLike") return transGroupNode(node);
+    return getUniversalProperty(node, resolvedSourceType, rule.restoreType);
+  }
+  function sanitizeExportNodeJson(nodeJson) {
+    if (!nodeJson || typeof nodeJson !== "object") return nodeJson;
+    if (nodeJson.constraints !== void 0) nodeJson.constraints = cloneJsonCompatible(nodeJson.constraints, void 0);
+    if (nodeJson.exportSettings !== void 0) nodeJson.exportSettings = cloneJsonCompatible(nodeJson.exportSettings, []);
+    if (nodeJson.arcData !== void 0) nodeJson.arcData = cloneJsonCompatible(nodeJson.arcData, void 0);
+    if (nodeJson.fontName !== void 0) nodeJson.fontName = cloneJsonCompatible(nodeJson.fontName, nodeJson.fontName);
+    if (nodeJson.letterSpacing !== void 0) nodeJson.letterSpacing = cloneJsonCompatible(nodeJson.letterSpacing, nodeJson.letterSpacing);
+    if (nodeJson.lineHeight !== void 0) nodeJson.lineHeight = cloneJsonCompatible(nodeJson.lineHeight, nodeJson.lineHeight);
+    return nodeJson;
+  }
+  function countExportableSubtreeNodes(node) {
+    let count = 1;
+    const children = getSafeExportableChildren(node);
+    for (const child of children) {
+      count += countExportableSubtreeNodes(child);
+      if (count > 48) return count;
+    }
+    return count;
+  }
+  function tryExportSvgMarkup(node, label) {
+    return __async(this, null, function* () {
+      if (state.totalNodes === 0 && label !== "Boolean") return "";
+      if (state.totalNodes > 5e3) return "";
+      const subtreeNodeCount = countExportableSubtreeNodes(node);
+      const width = Number(safeRead(() => node.width, 0)) || 0;
+      const height = Number(safeRead(() => node.height, 0)) || 0;
+      const area = Math.abs(width * height);
+      if (subtreeNodeCount <= 48 && // SVG_FALLBACK_MAX_NODES
+      area <= 64 * 1024 && // SVG_FALLBACK_MAX_AREA
+      Math.max(Math.abs(width), Math.abs(height)) <= 256) {
+        try {
+          state.logDebug(`    * [SVG-Export] calling exportAsync for ${node.id} (${node.type}) - name=${node.name}, dims=${width}x${height}`);
+          const svg = yield node.exportAsync({ format: "SVG" });
+          state.logDebug(`    * [SVG-Export] completed exportAsync for ${node.id}: bytes=${svg ? svg.length : 0}`);
+          if (typeof svg === "string" && svg.trim()) {
+            if (svg.length > 64 * 1024) {
+              console.warn(`[MasterGo2Figma] ${label} SVG fallback skipped because SVG is too large: ${getNodeDebugLabel(node)}, bytes=${svg.length}`);
+              return "";
+            }
+            return svg;
+          }
+        } catch (error) {
+          state.logDebug(`    * [SVG-Export] exportAsync failed for ${node.id}:`, describeError(error));
+          console.warn(`Unable to export ${label} as SVG fallback:`, getNodeDebugLabel(node), error);
+        }
+      }
+      return "";
+    });
+  }
+  function clearNodePaint(nodeJson) {
+    if (!nodeJson.geometry) return;
+    nodeJson.geometry.fills = [];
+    nodeJson.geometry.strokes = [];
+    nodeJson.geometry.strokeWeight = 0;
+    nodeJson.geometry.strokeTopWeight = void 0;
+    nodeJson.geometry.strokeBottomWeight = void 0;
+    nodeJson.geometry.strokeLeftWeight = void 0;
+    nodeJson.geometry.strokeRightWeight = void 0;
+  }
+  function markBooleanAsFrameFallback(nodeJson) {
+    nodeJson.type = "FRAME";
+    nodeJson.restoreType = "FRAME";
+    nodeJson.receiveCreateOverride = "FRAME";
+    nodeJson.booleanFallback = "frameContainer";
+    nodeJson.clipsContent = false;
+    clearNodePaint(nodeJson);
+  }
+  function enrichBooleanOperationExport(node, nodeJson, childNodes) {
+    return __async(this, null, function* () {
+      if (!nodeJson || safeRead(() => node.type, "") !== "BOOLEAN_OPERATION") return;
+      const rule = getLayerRule("BOOLEAN_OPERATION");
+      if (rule && rule.sendStrategy === "booleanTree") {
         return;
-    const layoutTransform = cloneTransform(transform);
-    nodeJson.layout.relativeTransform = layoutTransform;
-    nodeJson.layout.x = layoutTransform[0][2];
-    nodeJson.layout.y = layoutTransform[1][2];
-}
-function cloneTransform(transform) {
-    return [
-        [transform[0][0], transform[0][1], transform[0][2]],
-        [transform[1][0], transform[1][1], transform[1][2]]
-    ];
-}
-function getRestoreType(sourceType) {
-    return getRuleRestoreType(sourceType);
-}
-function getLayoutMode(selection) {
-    const layoutMode = readNodeProperty(selection, "layoutMode", readNodeProperty(selection, "flexMode", "NONE"));
-    if (layoutMode === "ROW")
-        return "HORIZONTAL";
-    if (layoutMode === "COLUMN")
-        return "VERTICAL";
-    return layoutMode;
-}
-function getAxisAlign(value) {
-    if (value === "FLEX_START")
-        return "MIN";
-    if (value === "FLEX_END")
-        return "MAX";
-    if (value === "SPACING_BETWEEN")
-        return "SPACE_BETWEEN";
-    return value;
-}
-function getCounterAxisAlignContent(selection) {
-    return readNodeProperty(selection, "counterAxisAlignContent", readNodeProperty(selection, "crossAxisAlignContent", "AUTO"));
-}
-function getLayoutAlign(value) {
-    if (value === "STRETCH" || value === "INHERIT")
-        return value;
-    return getAxisAlign(value);
-}
-function multiplyTransform(a, b) {
-    return [
-        [
-            a[0][0] * b[0][0] + a[0][1] * b[1][0],
-            a[0][0] * b[0][1] + a[0][1] * b[1][1],
-            a[0][0] * b[0][2] + a[0][1] * b[1][2] + a[0][2]
-        ],
-        [
-            a[1][0] * b[0][0] + a[1][1] * b[1][0],
-            a[1][0] * b[0][1] + a[1][1] * b[1][1],
-            a[1][0] * b[0][2] + a[1][1] * b[1][2] + a[1][2]
-        ]
-    ];
-}
-function invertTransform(transform) {
-    const a = transform[0][0];
-    const b = transform[0][1];
-    const c = transform[0][2];
-    const d = transform[1][0];
-    const e = transform[1][1];
-    const f = transform[1][2];
-    const det = a * e - b * d;
-    if (Math.abs(det) < 0.000001)
-        return [[1, 0, 0], [0, 1, 0]];
-    return [
-        [e / det, -b / det, (b * f - e * c) / det],
-        [-d / det, a / det, (d * c - a * f) / det]
-    ];
-}
-function createJsonCarrierFrame(name) {
-    const frame = mg.createFrame();
-    frame.name = name;
-    frame.fills = [{
-            type: "SOLID",
-            color: { r: 0, g: 0, b: 0, a: 0.1 }
-        }];
-    return frame;
-}
-/**
- * 规范化并清洗混合模式（BlendMode）
- *
- * 必要性说明：
- * 1. 在 Figma 插件 API 中，`PASS_THROUGH` 是合法的图层级别（Layer/Container）混合模式，
- *    但绝不能应用于 Paint 对象（如 Fills 填充或 Strokes 描边）。
- * 2. 如果将 `PASS_THROUGH` 写入描边或填充的 blendMode 并尝试在 Figma 中恢复，
- *    Figma Plugin API 会抛出错误，导致整个描边/填充赋值失败。
- * 3. 因此，必须在导出端（或导入端）将 Paint 对象中的 `PASS_THROUGH` 自动规范化为 `NORMAL`。
- */
-function processBlendMode(blendMode) {
-    var resultBlenderMode = blendMode;
-    if (resultBlenderMode == "PLUS_DARKER" || resultBlenderMode == "PASS_THROUGH")
-        resultBlenderMode = "NORMAL";
-    return resultBlenderMode;
-}
+      }
+      if (hasUsableVectorNetwork(nodeJson.vectorNetwork) || childNodes.length === 0) return;
+      const svg = yield tryExportSvgMarkup(node, "Boolean");
+      if (svg) {
+        nodeJson.svgMarkup = svg;
+        nodeJson.svgFallback = true;
+        nodeJson.receiveCreateOverride = "SVG";
+        nodeJson.omitChildrenOnRestore = true;
+        nodeJson.omittedChildNodeCount = Math.max(0, countExportableSubtreeNodes(node) - 1);
+        return;
+      }
+      markBooleanAsFrameFallback(nodeJson);
+    });
+  }
+  function hasVisibleFill(fills) {
+    if (!Array.isArray(fills)) return false;
+    return fills.some((fill) => fill && fill.type && fill.visible !== false && (fill.opacity === void 0 || fill.opacity > 0));
+  }
+  function shouldUseSvgFallbackForFilledVector(nodeJson) {
+    if (!nodeJson || nodeJson.receiveCreateOverride || nodeJson.svgFallback) return false;
+    if (nodeJson.sourceType !== "PEN" && nodeJson.sourceType !== "VECTOR") return false;
+    if (!hasVisibleFill(nodeJson.geometry && nodeJson.geometry.fills)) return false;
+    const vectorNetwork = nodeJson.vectorNetwork;
+    if (!vectorNetwork || !Array.isArray(vectorNetwork.segments) || vectorNetwork.segments.length < 2) return false;
+    if (Array.isArray(vectorNetwork.regions) && vectorNetwork.regions.length > 0) return false;
+    return true;
+  }
+  function enrichFilledVectorExport(node, nodeJson) {
+    return __async(this, null, function* () {
+      if (!shouldUseSvgFallbackForFilledVector(nodeJson)) return;
+      const svg = yield tryExportSvgMarkup(node, "Filled vector");
+      if (!svg) return;
+      nodeJson.svgMarkup = svg;
+      nodeJson.svgFallback = true;
+      nodeJson.receiveCreateOverride = "SVG";
+      nodeJson.vectorFallback = "svgMissingRegions";
+    });
+  }
+  function getRawChildCount(node) {
+    return safeRead(() => {
+      const children = node && node.children;
+      return children && typeof children.length === "number" ? children.length : void 0;
+    }, void 0);
+  }
+  function createNodeComplexitySnapshot(node, childNodes, nodeJson) {
+    const vectorNetwork = nodeJson && nodeJson.vectorNetwork ? nodeJson.vectorNetwork : null;
+    const regions = vectorNetwork && Array.isArray(vectorNetwork.regions) ? vectorNetwork.regions : void 0;
+    return {
+      id: safeRead(() => node.id, "unknown-id"),
+      name: safeRead(() => node.name, "Untitled"),
+      type: safeRead(() => node.type, "UNKNOWN"),
+      sourceType: nodeJson && typeof nodeJson.sourceType === "string" ? nodeJson.sourceType : void 0,
+      restoreType: nodeJson && typeof nodeJson.restoreType === "string" ? nodeJson.restoreType : void 0,
+      width: safeRead(() => Number(node.width), void 0),
+      height: safeRead(() => Number(node.height), void 0),
+      childCount: childNodes ? childNodes.length : getRawChildCount(node),
+      rawChildCount: getRawChildCount(node),
+      textLength: nodeJson && typeof nodeJson.characters === "string" ? nodeJson.characters.length : void 0,
+      fillCount: nodeJson && nodeJson.geometry && Array.isArray(nodeJson.geometry.fills) ? nodeJson.geometry.fills.length : void 0,
+      strokeCount: nodeJson && nodeJson.geometry && Array.isArray(nodeJson.geometry.strokes) ? nodeJson.geometry.strokes.length : void 0,
+      effectCount: nodeJson && nodeJson.blend && Array.isArray(nodeJson.blend.effects) ? nodeJson.blend.effects.length : void 0,
+      vectorNetwork: vectorNetwork ? {
+        vertices: Array.isArray(vectorNetwork.vertices) ? vectorNetwork.vertices.length : void 0,
+        segments: Array.isArray(vectorNetwork.segments) ? vectorNetwork.segments.length : void 0,
+        regions: regions ? regions.length : void 0,
+        loops: regions ? regions.reduce((sum, region) => sum + (region && Array.isArray(region.loops) ? region.loops.length : 0), 0) : void 0
+      } : void 0
+    };
+  }
+  function shouldLogStringifyProbe(complexity) {
+    const vertexCount = complexity.vectorNetwork && complexity.vectorNetwork.vertices || 0;
+    const segmentCount = complexity.vectorNetwork && complexity.vectorNetwork.segments || 0;
+    const regionCount = complexity.vectorNetwork && complexity.vectorNetwork.regions || 0;
+    const childCount = complexity.childCount || complexity.rawChildCount || 0;
+    return vertexCount >= 1e3 || // STRINGIFY_PROBE_VERTEX_THRESHOLD
+    segmentCount >= 1e3 || regionCount >= 50 || childCount >= 300;
+  }
+  function getNodeDebugLabel(node) {
+    const nodeId = safeRead(() => node.id, "");
+    const nodeType = safeRead(() => node.type, "");
+    if (node && node.id) {
+      return `[HostNode: ${safeRead(() => node.name, "Untitled")} (${nodeType}, id=${nodeId})]`;
+    }
+    return `[JSON-Payload: ${safeRead(() => node.name, "Untitled")} (${nodeType}, id=${nodeId})]`;
+  }
+  function stringifyLayerPayload(payload, node, nodeComplexity) {
+    try {
+      return JSON.stringify(payload);
+    } catch (error) {
+      const fatalOom = isOutOfMemoryError(error);
+      state.logDiagnostic(fatalOom ? "error" : "warn", fatalOom ? "[MasterGo2Figma] Stringify OOM" : "[MasterGo2Figma] Stringify failed, exporting fallback", {
+        error: describeError(error),
+        complexity: nodeComplexity || createNodeComplexitySnapshot(node)
+      });
+      if (fatalOom) throw error;
+      const fallbackPayload = __spreadProps(__spreadValues({}, payload), {
+        props: createFallbackNodeJson(node, safeRead(() => node.type, "UNKNOWN"))
+      });
+      return JSON.stringify(fallbackPayload);
+    }
+  }
+  function isRecoverableNodeExportError(error) {
+    if (isOutOfMemoryError(error)) return false;
+    let message = "";
+    try {
+      message = String(error && error.message !== void 0 ? error.message : error).toLowerCase();
+    } catch (_) {
+      message = "";
+    }
+    if (message.indexOf("ui zip") !== -1 || message.indexOf("timed out waiting for ui zip") !== -1) return false;
+    return true;
+  }
+  function markLayerWritten(chunk, nodeId) {
+    if (nodeId) chunk.writtenNodeIds[nodeId] = true;
+  }
+  function summarizeTransfer(transfer) {
+    return {
+      transferId: transfer.transferId,
+      filename: transfer.filename,
+      fileIndex: transfer.fileIndex,
+      postedChunks: transfer.postedChunks,
+      streamedBytes: transfer.streamedBytes
+    };
+  }
+  function appendFallbackLayerRecord(node, page, parentId, index, pageIndex, chunk, transfer) {
+    return __async(this, null, function* () {
+      const nodeId = safeRead(() => node.id, `node-fallback-${pageIndex.layerCount + 1}`);
+      const fallbackJson = createFallbackNodeJson(node);
+      const layerRecord = {
+        id: nodeId,
+        pageId: safeRead(() => page.id, ""),
+        parentId,
+        index,
+        name: safeRead(() => node.name, "Untitled (Fallback)"),
+        childIds: [],
+        props: fallbackJson
+      };
+      const nodeComplexity = createNodeComplexitySnapshot(node, [], fallbackJson);
+      const recordJson = stringifyLayerPayload(layerRecord, node, nodeComplexity);
+      pageIndex.layerCount++;
+      state.noteExportLayerRecord();
+      yield appendLayerRecord(recordJson, pageIndex, chunk, transfer);
+      markLayerWritten(chunk, nodeId);
+    });
+  }
+  function collectSingleNodeExport(node, page, pageFolder, parentId, index, pageIndex, chunk, transfer, relation) {
+    return __async(this, null, function* () {
+      state.processedNodes++;
+      const nodeDebug = getNodeDebugLabel(node);
+      const pageName = safeRead(() => page.name, pageIndex.name);
+      let phase = "start";
+      const nodeId = safeRead(() => node.id, `node-${pageIndex.layerCount + 1}`);
+      const nodeName = safeRead(() => node.name, "Untitled");
+      let recordAppended = false;
+      let childNodes = [];
+      let shouldExportChildren = false;
+      state.logDebug(`[DFS] Start node: id=${nodeId}, name=${nodeName}, type=${node.type}, page=${pageName}`);
+      const setNodeDebug = (nextPhase, nodeComplexity) => {
+        phase = nextPhase;
+        state.logDebug(`  - [DFS] Node ${nodeId} enter phase: ${nextPhase}`);
+        state.setExportDebugState({
+          phase: `node:${nextPhase}`,
+          page: pageName,
+          node: nodeDebug,
+          nodeComplexity,
+          parentId,
+          nodeIndex: index,
+          transferId: transfer.transferId,
+          fileIndex: transfer.fileIndex,
+          streamedBytes: transfer.streamedBytes
+        });
+      };
+      try {
+        setNodeDebug("read-children");
+        childNodes = getSafeExportableChildren(node);
+        state.logDebug(`  - [DFS] Node ${nodeId} read-children done: childCount=${childNodes.length}`);
+        setNodeDebug("analyse");
+        let nodeJson = analyseNodes(node);
+        state.logDebug(`  - [DFS] Node ${nodeId} analyse done`);
+        setNodeDebug("enrich-boolean");
+        yield enrichBooleanOperationExport(node, nodeJson, childNodes);
+        state.logDebug(`  - [DFS] Node ${nodeId} enrich-boolean done`);
+        setNodeDebug("enrich-vector");
+        yield enrichFilledVectorExport(node, nodeJson);
+        state.logDebug(`  - [DFS] Node ${nodeId} enrich-vector done`);
+        setNodeDebug("override-layout");
+        overrideExportLayoutFromSourceNode(nodeJson, node);
+        state.logDebug(`  - [DFS] Node ${nodeId} override-layout done`);
+        setNodeDebug("build-record");
+        shouldExportChildren = !nodeJson || !nodeJson.omitChildrenOnRestore;
+        const childIds = shouldExportChildren ? childNodes.map((child) => safeRead(() => child.id, "")) : [];
+        const omittedChildNodeCount = !shouldExportChildren && nodeJson && nodeJson.omittedChildNodeCount ? nodeJson.omittedChildNodeCount : 0;
+        let layerRecord = {
+          id: nodeId,
+          pageId: safeRead(() => page.id, ""),
+          parentId,
+          index,
+          name: nodeName,
+          childIds,
+          props: nodeJson
+        };
+        let nodeComplexity = createNodeComplexitySnapshot(node, childNodes, nodeJson);
+        childNodes = [];
+        if (shouldLogStringifyProbe(nodeComplexity)) {
+          state.logDiagnostic("log", "[MasterGo2Figma] Stringify probe", {
+            page: pageName,
+            processedNodes: state.processedNodes,
+            totalNodes: state.totalNodes,
+            complexity: nodeComplexity
+          });
+        }
+        setNodeDebug("stringify", nodeComplexity);
+        let recordJson = stringifyLayerPayload(layerRecord, node, nodeComplexity);
+        const recordBytes = recordJson.length;
+        if (recordBytes >= 48 * 1024) {
+          state.logDiagnostic("warn", "[MasterGo2Figma] Large layer record", {
+            page: pageName,
+            node: nodeDebug,
+            recordBytes,
+            chunkBytes: chunk.bytes,
+            chunkRecords: chunk.recordJsons.length,
+            complexity: nodeComplexity,
+            transfer: summarizeTransfer(transfer)
+          });
+        }
+        state.logDebug(`  - [DFS] Node ${nodeId} stringify done: length=${recordBytes}`);
+        layerRecord = null;
+        nodeJson = null;
+        nodeComplexity = null;
+        pageIndex.layerCount++;
+        state.noteExportLayerRecord();
+        setNodeDebug("append-record");
+        yield appendLayerRecord(recordJson, pageIndex, chunk, transfer);
+        markLayerWritten(chunk, nodeId);
+        recordAppended = true;
+        state.logDebug(`  - [DFS] Node ${nodeId} append done`);
+        if (omittedChildNodeCount) {
+          state.processedNodes += omittedChildNodeCount;
+        }
+        setNodeDebug("progress");
+        yield state.maybeReportExportProgress(state.processedNodes, state.totalNodes, "\u6B63\u5728\u5BFC\u51FA\u56FE\u5C42...");
+        recordJson = null;
+        childNodes = null;
+        state.logDebug(`[DFS] Complete node: id=${nodeId}`);
+        return { nodeId, shouldExportChildren, childIds };
+      } catch (error) {
+        state.logDebug(`[DFS] Node export caught error: id=${nodeId}, phase=${phase}, error=`, describeError(error));
+        const fatalOom = isOutOfMemoryError(error);
+        state.logDiagnostic("error", fatalOom ? `[MasterGo2Figma] Fatal node OOM, stopping export: ${nodeId}` : `[MasterGo2Figma] Node export failed: ${nodeId}`, {
+          phase,
+          error: describeError(error),
+          nodeId,
+          page: pageName,
+          debugState: state.exportDebugState
+        });
+        if (fatalOom) throw error;
+        if (isRecoverableNodeExportError(error)) {
+          if (nodeId && chunk.writtenNodeIds[nodeId]) {
+            return null;
+          }
+          try {
+            yield appendFallbackLayerRecord(node, page, parentId, index, pageIndex, chunk, transfer);
+          } catch (fallbackError) {
+            state.logDiagnostic("error", "[MasterGo2Figma] Recoverable node fallback failed, skipping node", {
+              relation,
+              parentId,
+              node: getNodeProbe(node),
+              originalError: describeError(error),
+              fallbackError: describeError(fallbackError)
+            });
+          }
+        } else {
+          throw error;
+        }
+        return null;
+      }
+    });
+  }
+  function overrideExportLayoutFromSourceNode(nodeJson, node) {
+    if (!nodeJson || !nodeJson.layout) return;
+    try {
+      const layoutTransform = cloneTransform(node.relativeTransform);
+      nodeJson.layout.relativeTransform = layoutTransform;
+      nodeJson.layout.x = layoutTransform[0][2];
+      nodeJson.layout.y = layoutTransform[1][2];
+      nodeJson.layout.rotation = -safeRead(() => node.rotation, 0) || 0;
+      nodeJson.layout.width = safeRead(() => node.width, 0);
+      nodeJson.layout.height = safeRead(() => node.height, 0);
+    } catch (error) {
+      if (isOutOfMemoryError(error)) throw error;
+      state.logDiagnostic("warn", "[MasterGo2Figma] Unable to override layout properties for export, using analysed properties", {
+        node: getNodeProbe(node),
+        error: describeError(error)
+      });
+    }
+  }
+
+  // src/nodeTraverser.ts
+  var INTERNAL_PROPS_PREFIX = "[PROPS]";
+  var SIBLING_PROPS_PREFIX = "[PROPS_SIBLING]";
+  function isGeneratedCarrierName(name) {
+    return name.startsWith(INTERNAL_PROPS_PREFIX) || name.startsWith(SIBLING_PROPS_PREFIX);
+  }
+  function getExportableChildren(node) {
+    const rawChildren = safeRead(() => node.children, null);
+    if (!rawChildren) return [];
+    const result = [];
+    const count = safeRead(() => rawChildren.length, 0);
+    for (let i = 0; i < count; i++) {
+      try {
+        const child = rawChildren[i];
+        if (child && !isGeneratedCarrierName(safeRead(() => child.name, ""))) {
+          result.push(child);
+        }
+      } catch (error) {
+        if (isOutOfMemoryError(error)) {
+          state.logDiagnostic("error", "[MasterGo2Figma] Child access OOM", {
+            parent: getNodeProbe(node),
+            childIndex: i,
+            error: describeError(error)
+          });
+          throw error;
+        }
+      }
+    }
+    return result;
+  }
+  function getSafeExportableChildren(node) {
+    try {
+      return getExportableChildren(node);
+    } catch (error) {
+      if (isOutOfMemoryError(error)) throw error;
+      state.logDiagnostic("warn", "[MasterGo2Figma] Unable to read children for export", {
+        node: getNodeProbe(node),
+        error: describeError(error)
+      });
+      return [];
+    }
+  }
+  function collectSubtreeIterative(rootNode, page, pageFolder, parentId, rootIndex, pageIndexRecord, chunk, transfer, relation) {
+    return __async(this, null, function* () {
+      const rootNodeId = safeRead(() => rootNode.id, "");
+      if (!rootNodeId) return;
+      const stack = [{
+        nodeId: rootNodeId,
+        parentId,
+        index: rootIndex,
+        relation
+      }];
+      while (stack.length > 0) {
+        const item = stack.pop();
+        const { nodeId, parentId: currentParentId, index: currentIndex, relation: currentRelation } = item;
+        try {
+          const node = mg.getNodeById(nodeId);
+          if (!node) {
+            state.logDiagnostic("warn", `[MasterGo2Figma] DFS node not found by ID: ${nodeId}`, {
+              nodeId,
+              debugState: state.exportDebugState
+            });
+            continue;
+          }
+          const result = yield collectSingleNodeExport(
+            node,
+            page,
+            pageFolder,
+            currentParentId,
+            currentIndex,
+            pageIndexRecord,
+            chunk,
+            transfer,
+            currentRelation
+          );
+          if (result && result.shouldExportChildren && result.childIds && result.childIds.length > 0) {
+            for (let i = result.childIds.length - 1; i >= 0; i--) {
+              const childId = result.childIds[i];
+              if (childId) {
+                stack.push({
+                  nodeId: childId,
+                  parentId: result.nodeId,
+                  index: i,
+                  relation: "child"
+                });
+              }
+            }
+          }
+        } catch (error) {
+          if (isOutOfMemoryError(error)) throw error;
+          state.logDiagnostic("error", `[MasterGo2Figma] Iterative DFS node traversal failed: ${nodeId}`, {
+            error: describeError(error),
+            nodeId,
+            debugState: state.exportDebugState
+          });
+        }
+      }
+    });
+  }
+
+  // src/transferStream.ts
+  var EXPORT_TARGET_ZIP = "zip";
+  var EXPORT_TARGET_LOCAL_RELAY = "local-relay";
+  var EXPORT_TRANSFER_CHUNK_SIZE = 64 * 1024;
+  var EXPORT_TEXT_CHUNK_CHAR_LIMIT = 4 * 1024;
+  var SEND_TEXT_CHUNKS_AS_BYTES = true;
+  var EXPORT_TRANSFER_YIELD_EVERY_CHUNKS = 32;
+  var LAYER_CHUNK_MAX_RECORDS = 16;
+  var LAYER_CHUNK_MAX_BYTES = 64 * 1024;
+  var LAYER_CHUNK_LOG_BYTES = 48 * 1024;
+  var PAGE_SEGMENT_TARGET_LAYERS = 8e3;
+  var ENABLE_IMAGE_EXPORT = true;
+  var ENABLE_SPLIT_EXPORT = true;
+  var DEBUG_LOGGING_PAGE_INDEX_START = 9999;
+  function safeStringifyForLog(value) {
+    try {
+      return JSON.stringify(value);
+    } catch (_) {
+      return "[Unstringifyable Object]";
+    }
+  }
+  function getExportFileAckKey(transferId, index) {
+    return `${transferId}:${index}`;
+  }
+  function getExportTransferMessageMeta(transfer) {
+    return {
+      target: transfer.target,
+      relayUrl: transfer.relayUrl || ""
+    };
+  }
+  function startExportTransfer(transfer) {
+    state.postUI(__spreadValues({
+      type: "export-transfer-start",
+      transferId: transfer.transferId,
+      filename: transfer.filename,
+      fileCount: 0,
+      totalBytes: 0
+    }, getExportTransferMessageMeta(transfer)));
+  }
+  function abortExportFileToUI(transfer, index, path, error) {
+    try {
+      state.postUI(__spreadValues({
+        type: "export-file-abort",
+        transferId: transfer.transferId,
+        index,
+        path,
+        reason: safeStringifyForLog(describeError(error))
+      }, getExportTransferMessageMeta(transfer)));
+    } catch (abortError) {
+      state.logDiagnostic("warn", "[MasterGo2Figma] Unable to send export-file-abort", {
+        abortError: describeError(abortError),
+        originalError: describeError(error),
+        transfer: summarizeTransfer2(transfer),
+        file: { index, path }
+      });
+    }
+  }
+  function clearPendingExportFileAck(transfer, index) {
+    const key = getExportFileAckKey(transfer.transferId, index);
+    const resolver = state.exportFileAckResolvers[key];
+    if (!resolver) return;
+    clearTimeout(resolver.timeoutId);
+    delete state.exportFileAckResolvers[key];
+  }
+  function waitForExportFileAck(transfer, index, path, timeoutMs = 6e4) {
+    return new Promise((resolve, reject) => {
+      const key = getExportFileAckKey(transfer.transferId, index);
+      const timeoutId = setTimeout(() => {
+        delete state.exportFileAckResolvers[key];
+        reject(new Error(`Timed out waiting for UI file ack: ${path}`));
+      }, timeoutMs);
+      state.exportFileAckResolvers[key] = {
+        resolve,
+        reject,
+        timeoutId,
+        path
+      };
+    });
+  }
+  function streamExportFileToUI(transfer, file) {
+    return __async(this, null, function* () {
+      const index = transfer.fileIndex++;
+      const canSendTextAsBytes = file.bytes === void 0 && SEND_TEXT_CHUNKS_AS_BYTES && typeof TextEncoder !== "undefined";
+      const kind = file.bytes !== void 0 || canSendTextAsBytes ? "bytes" : "content";
+      const contentParts = file.contentParts || (file.content !== void 0 ? [file.content] : []);
+      const size = kind === "bytes" ? file.bytes ? file.bytes.length : contentParts.reduce((sum, part) => sum + part.length, 0) : contentParts.reduce((sum, part) => sum + part.length, 0);
+      const totalChunks = kind === "bytes" ? Math.ceil(size / EXPORT_TRANSFER_CHUNK_SIZE) : Math.max(1, Math.ceil(size / EXPORT_TEXT_CHUNK_CHAR_LIMIT));
+      let fileStarted = false;
+      let fileEnded = false;
+      try {
+        state.setExportDebugState({
+          phase: "transfer:file-start",
+          file: file.path,
+          transferId: transfer.transferId,
+          fileIndex: index,
+          fileSize: size,
+          streamedBytes: transfer.streamedBytes
+        });
+        state.postUI(__spreadValues({
+          type: "export-file-start",
+          transferId: transfer.transferId,
+          index,
+          path: file.path,
+          kind,
+          size,
+          totalChunks
+        }, getExportTransferMessageMeta(transfer)));
+        fileStarted = true;
+        if (file.bytes !== void 0) {
+          const bytes = file.bytes || new Uint8Array(0);
+          for (let offset = 0, chunkIndex = 0; offset < bytes.length; offset += EXPORT_TRANSFER_CHUNK_SIZE, chunkIndex++) {
+            state.setExportDebugState({
+              phase: "transfer:bytes-chunk",
+              file: file.path,
+              transferId: transfer.transferId,
+              fileIndex: index,
+              chunkIndex,
+              fileSize: size,
+              streamedBytes: transfer.streamedBytes
+            });
+            state.postUI(__spreadValues({
+              type: "export-file-chunk",
+              transferId: transfer.transferId,
+              index,
+              chunkIndex,
+              bytes: bytes.slice(offset, offset + EXPORT_TRANSFER_CHUNK_SIZE)
+            }, getExportTransferMessageMeta(transfer)));
+            transfer.postedChunks++;
+            if (transfer.postedChunks % EXPORT_TRANSFER_YIELD_EVERY_CHUNKS === 0) yield yieldToHost();
+          }
+        } else {
+          let chunkIndex = 0;
+          const textEncoder = canSendTextAsBytes ? new TextEncoder() : null;
+          const postContentChunk = (content) => __async(null, null, function* () {
+            state.setExportDebugState({
+              phase: textEncoder ? "transfer:content-bytes-chunk" : "transfer:content-chunk",
+              file: file.path,
+              transferId: transfer.transferId,
+              fileIndex: index,
+              chunkIndex,
+              fileSize: size,
+              streamedBytes: transfer.streamedBytes
+            });
+            const message = textEncoder ? __spreadValues({
+              type: "export-file-chunk",
+              transferId: transfer.transferId,
+              index,
+              chunkIndex,
+              bytes: textEncoder.encode(content)
+            }, getExportTransferMessageMeta(transfer)) : __spreadValues({
+              type: "export-file-chunk",
+              transferId: transfer.transferId,
+              index,
+              chunkIndex,
+              content
+            }, getExportTransferMessageMeta(transfer));
+            state.postUI(message);
+            chunkIndex++;
+            transfer.postedChunks++;
+            if (transfer.postedChunks % EXPORT_TRANSFER_YIELD_EVERY_CHUNKS === 0) yield yieldToHost();
+          });
+          for (const part of contentParts) {
+            if (!part) continue;
+            let offset = 0;
+            while (offset < part.length) {
+              const nextLength = Math.min(EXPORT_TEXT_CHUNK_CHAR_LIMIT, part.length - offset);
+              const chunkStr = part.slice(offset, offset + nextLength);
+              yield postContentChunk(chunkStr);
+              offset += nextLength;
+            }
+          }
+          if (size === 0) yield postContentChunk("");
+        }
+        transfer.streamedBytes += size;
+        state.setExportDebugState({
+          phase: "transfer:file-end",
+          file: file.path,
+          transferId: transfer.transferId,
+          fileIndex: index,
+          fileSize: size,
+          streamedBytes: transfer.streamedBytes
+        });
+        const fileAckPromise = waitForExportFileAck(transfer, index, file.path);
+        state.postUI(__spreadValues({ type: "export-file-end", transferId: transfer.transferId, index }, getExportTransferMessageMeta(transfer)));
+        fileEnded = true;
+        yield fileAckPromise;
+        state.noteExportFileTransfer(file, size, totalChunks);
+        if (index % 25 === 0) yield yieldToHost();
+      } catch (error) {
+        state.logDiagnostic("error", "[MasterGo2Figma] Transfer file failed", {
+          error: describeError(error),
+          file: {
+            path: file.path,
+            kind,
+            index,
+            size,
+            started: fileStarted,
+            ended: fileEnded
+          },
+          debugState: state.exportDebugState
+        });
+        if (fileStarted && !fileEnded) abortExportFileToUI(transfer, index, file.path, error);
+        clearPendingExportFileAck(transfer, index);
+        throw error;
+      }
+    });
+  }
+  function resolveExportFileAck(message) {
+    const transferId = String(message && message.transferId || "");
+    const index = Number(message && message.index);
+    const key = getExportFileAckKey(transferId, index);
+    const resolver = state.exportFileAckResolvers[key];
+    if (!resolver) return;
+    clearTimeout(resolver.timeoutId);
+    delete state.exportFileAckResolvers[key];
+    const ack = {
+      transferId,
+      index,
+      success: message && message.success === true,
+      path: typeof message.path === "string" ? message.path : resolver.path,
+      error: typeof message.error === "string" ? message.error : void 0,
+      pendingCount: typeof message.pendingCount === "number" ? message.pendingCount : void 0
+    };
+    if (ack.success) {
+      resolver.resolve(ack);
+    } else {
+      resolver.reject(new Error(`UI failed to write ${ack.path || resolver.path}: ${ack.error || "unknown error"}; pending=${ack.pendingCount === void 0 ? "unknown" : ack.pendingCount}`));
+    }
+  }
+  function completeExportTransfer(transfer, manifest, isFinal = true, stats = manifest.stats) {
+    state.postUI(__spreadValues({
+      type: "export-transfer-complete",
+      transferId: transfer.transferId,
+      filename: transfer.filename,
+      fileCount: transfer.fileIndex,
+      totalBytes: transfer.streamedBytes,
+      stats,
+      isFinal
+    }, getExportTransferMessageMeta(transfer)));
+  }
+  function resolveExportTransferAck(message) {
+    const transferId = String(message && message.transferId || "");
+    const resolver = state.exportTransferAckResolvers[transferId];
+    if (!resolver) return;
+    clearTimeout(resolver.timeoutId);
+    delete state.exportTransferAckResolvers[transferId];
+    const ack = {
+      transferId,
+      success: message && message.success === true,
+      filename: typeof message.filename === "string" ? message.filename : void 0,
+      error: typeof message.error === "string" ? message.error : void 0,
+      pendingCount: typeof message.pendingCount === "number" ? message.pendingCount : void 0
+    };
+    if (ack.success) {
+      resolver.resolve(ack);
+    } else {
+      resolver.reject(new Error(`UI zip failed for ${ack.filename || transferId}: ${ack.error || "unknown error"}; pending=${ack.pendingCount === void 0 ? "unknown" : ack.pendingCount}`));
+    }
+  }
+  function waitForExportTransferAck(transfer, timeoutMs = 12e4) {
+    return new Promise((resolve, reject) => {
+      const timeoutId = setTimeout(() => {
+        delete state.exportTransferAckResolvers[transfer.transferId];
+        reject(new Error(`Timed out waiting for UI zip ack: ${transfer.filename}`));
+      }, timeoutMs);
+      state.exportTransferAckResolvers[transfer.transferId] = {
+        resolve,
+        reject,
+        timeoutId
+      };
+    });
+  }
+  function yieldToHost() {
+    return new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  function createExportFilename(manifest) {
+    const date = manifest.exportedAt.replace(/[:.]/g, "-");
+    return `mastergo2figma-${manifest.scope}-${date}.zip`;
+  }
+  function createPageExportFilename(scope, page, pageIndex, pageCount, exportedAt, segmentIndex = 0, segmentCount = 1) {
+    const date = exportedAt.replace(/[:.]/g, "-");
+    const pageName = createFileSafeName(safeRead(() => page.name, ""), `page-${pageIndex + 1}`);
+    const segmentName = segmentCount > 1 ? `-segment-${padNumber(segmentIndex + 1)}-of-${padNumber(segmentCount)}` : segmentCount === 0 ? `-segment-${padNumber(segmentIndex + 1)}` : "";
+    return `mastergo2figma-${scope}-part-${padNumber(pageIndex + 1)}-of-${padNumber(pageCount)}${segmentName}-${pageName}-${date}.zip`;
+  }
+  function createFileSafeName(value, fallback) {
+    const cleaned = String(value || "").trim().replace(/[\\/:*?"<>|]/g, "-").replace(/\s+/g, "-").replace(/-+/g, "-").slice(0, 48);
+    return cleaned || fallback;
+  }
+  function getExportTargets(options) {
+    const pages = [...mg.document.children].filter((page) => !page.name.endsWith("_Process"));
+    const selectedPageIds = new Set(options.pageIds);
+    if (options.scope === "all-pages") {
+      return pages.filter((page) => selectedPageIds.size === 0 || selectedPageIds.has(page.id)).map((page) => ({ page }));
+    }
+    if (options.scope === "partial-pages") {
+      if (selectedPageIds.size === 0) throw new Error("\u8BF7\u81F3\u5C11\u9009\u62E9\u4E00\u4E2A\u9875\u9762");
+      return pages.filter((page) => selectedPageIds.has(page.id)).map((page) => ({ page }));
+    }
+    if (options.scope === "selected") {
+      const nodes = getTopLevelSelectedNodes(mg.document.currentPage.selection);
+      return [{ page: mg.document.currentPage, nodes }];
+    }
+    return [{ page: mg.document.currentPage }];
+  }
+  function getTopLevelSelectedNodes(selection) {
+    const selectedSet = new Set(selection.map((node) => node.id));
+    return selection.filter((node) => !hasSelectedAncestor(node, selectedSet));
+  }
+  function hasSelectedAncestor(node, selectedSet) {
+    let parent = node.parent;
+    while (parent && parent.type !== "PAGE" && parent.type !== "DOCUMENT") {
+      if (selectedSet.has(parent.id)) return true;
+      parent = parent.parent;
+    }
+    return false;
+  }
+  function ensureTargetNodes(target) {
+    if (!target.nodes) {
+      target.nodes = getSafeExportableChildren(target.page);
+    }
+    return target.nodes;
+  }
+  function clearTargetNodes(target) {
+    if (target.nodes) {
+      target.nodes.length = 0;
+      delete target.nodes;
+    }
+  }
+  function shouldSplitExportPackages(options, targets) {
+    if (!ENABLE_SPLIT_EXPORT) return false;
+    if (options.transferMode === "direct-zip") return false;
+    if (targets.length > 1) return true;
+    const nodes = ensureTargetNodes(targets[0]);
+    return nodes.length > 1;
+  }
+  function createBaseExportManifest(options, pageCount) {
+    return {
+      schema: "mastergo2figma.package.v2",
+      version: 2,
+      source: "mastergo",
+      documentId: mg.documentId,
+      exportedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      scope: options.scope,
+      pages: [],
+      assets: {},
+      stats: {
+        pageCount,
+        layerCount: 0,
+        imageAssetCount: 0,
+        missingImageAssetCount: 0
+      }
+    };
+  }
+  function createExportTransfer(manifest, filename, options) {
+    const transferId = `export-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const target = options && options.transferMode === "local-json-stream" ? EXPORT_TARGET_LOCAL_RELAY : EXPORT_TARGET_ZIP;
+    return {
+      transferId,
+      filename: filename || createExportFilename(manifest),
+      fileIndex: 0,
+      postedChunks: 0,
+      streamedBytes: 0,
+      target,
+      relayUrl: target === EXPORT_TARGET_LOCAL_RELAY && options ? options.relayUrl : void 0
+    };
+  }
+  function summarizeTransfer2(transfer) {
+    return {
+      transferId: transfer.transferId,
+      filename: transfer.filename,
+      fileIndex: transfer.fileIndex,
+      postedChunks: transfer.postedChunks,
+      streamedBytes: transfer.streamedBytes
+    };
+  }
+  function releaseExportPackageMemory(manifest, imageAssetContext) {
+    manifest.pages = [];
+    manifest.assets = {};
+    imageAssetContext.assets.length = 0;
+    imageAssetContext.bySourceRef = {};
+  }
+  function appendLayerRecord(recordJson, pageIndex, chunk, transfer) {
+    return __async(this, null, function* () {
+      const nextBytes = recordJson.length + (chunk.recordJsons.length > 0 ? 1 : 0);
+      if (recordJson.length > LAYER_CHUNK_MAX_BYTES) {
+        state.logDiagnostic("warn", "[MasterGo2Figma] Single layer record exceeds chunk byte target", {
+          recordBytes: recordJson.length,
+          chunkMaxBytes: LAYER_CHUNK_MAX_BYTES,
+          page: pageIndex.name,
+          transfer: summarizeTransfer2(transfer)
+        });
+      }
+      if (chunk.recordJsons.length > 0 && (chunk.recordJsons.length >= LAYER_CHUNK_MAX_RECORDS || chunk.bytes + nextBytes > LAYER_CHUNK_MAX_BYTES)) {
+        yield flushLayerChunk(pageIndex, chunk, transfer);
+      }
+      chunk.recordJsons.push(recordJson);
+      chunk.bytes += nextBytes;
+      if (chunk.recordJsons.length >= LAYER_CHUNK_MAX_RECORDS || chunk.bytes >= LAYER_CHUNK_MAX_BYTES) {
+        yield flushLayerChunk(pageIndex, chunk, transfer);
+      }
+    });
+  }
+  function flushLayerChunk(pageIndex, chunk, transfer) {
+    return __async(this, null, function* () {
+      if (chunk.recordJsons.length === 0) return;
+      const fileIndex = chunk.chunkIndex++;
+      const path = `pages/${chunk.pageFolder}/layers/layers-${padNumber(fileIndex)}.json`;
+      const recordCount = chunk.recordJsons.length;
+      const byteCount = chunk.bytes;
+      state.setExportDebugState({
+        phase: "chunk:flush",
+        page: pageIndex.name,
+        file: path,
+        transferId: transfer.transferId,
+        fileIndex: transfer.fileIndex,
+        chunkIndex: fileIndex,
+        fileSize: byteCount,
+        streamedBytes: transfer.streamedBytes
+      });
+      if (fileIndex === 1 || fileIndex % 50 === 0 || byteCount >= LAYER_CHUNK_LOG_BYTES) {
+        state.logDiagnostic("log", "[MasterGo2Figma] Layer chunk flush", {
+          page: pageIndex.name,
+          path,
+          chunkIndex: fileIndex,
+          records: recordCount,
+          bytes: byteCount,
+          processedNodes: state.processedNodes,
+          transfer: summarizeTransfer2(transfer)
+        });
+      }
+      const contentParts = [
+        `{"schema":"mastergo2figma.layers.v2","version":2,"pageId":${JSON.stringify(chunk.pageId)},"records":[`
+      ];
+      for (let index = 0; index < chunk.recordJsons.length; index++) {
+        contentParts.push(index > 0 ? `,${chunk.recordJsons[index]}` : chunk.recordJsons[index]);
+      }
+      contentParts.push("]}");
+      yield streamExportFileToUI(transfer, { path, contentParts });
+      pageIndex.layerChunks.push(path);
+      chunk.recordJsons = [];
+      chunk.bytes = 0;
+    });
+  }
+  function getDocumentPageSummaries() {
+    return [...mg.document.children].filter((page) => !page.name.endsWith("_Process")).map((page) => ({
+      id: page.id,
+      name: page.name,
+      isCurrent: page.id === mg.document.currentPage.id,
+      childCount: page.children.length
+    }));
+  }
+  function createPageFolderName(page, index) {
+    const label = safeRead(() => page.name, "") || safeRead(() => page.id, "page");
+    return `page-${padNumber(index + 1)}-${slugifyPathPart(label)}`;
+  }
+  function slugifyPathPart(value) {
+    const normalized = value.toLowerCase().trim().replace(/[\\/:*?"<>|]/g, "-").replace(/\s+/g, "-").replace(/-+/g, "-").slice(0, 32);
+    return normalized || "untitled";
+  }
+  function countNodes(node) {
+    return __async(this, null, function* () {
+      state.totalNodes++;
+      state.processedNodes++;
+      if (state.processedNodes % 500 === 0) yield yieldToEventLoop();
+      try {
+        let childNodes = getSafeExportableChildren(node);
+        for (let i = 0; i < childNodes.length; i++) {
+          const child = childNodes[i];
+          childNodes[i] = null;
+          yield countNodes(child);
+        }
+        childNodes = null;
+      } catch (error) {
+        const canMark = !!(error && typeof error === "object");
+        if (!canMark || !error.__mastergo2figmaScanLogged) {
+          if (canMark) error.__mastergo2figmaScanLogged = true;
+          state.logDiagnostic("error", "[MasterGo2Figma] Scan node failed", {
+            error: describeError(error),
+            node: getNodeProbe(node),
+            totalNodes: state.totalNodes
+          });
+        }
+        throw error;
+      }
+    });
+  }
+  function createImageAssetContext() {
+    return {
+      bySourceRef: {},
+      assets: [],
+      missingImageAssetCount: 0
+    };
+  }
+  function streamPageRootSegmentToTransfer(pageTarget, pageIndex, pageCount, startRootIndex, targetLayerCount, manifest, transfer, pageNameOverride) {
+    return __async(this, null, function* () {
+      const pageFolder = createPageFolderName(pageTarget.page, pageIndex);
+      const pageId = safeRead(() => pageTarget.page.id, `page-${pageIndex + 1}`);
+      const pageName = pageNameOverride || safeRead(() => pageTarget.page.name, "Untitled");
+      const pageIndexRecord = {
+        schema: "mastergo2figma.page.v2",
+        version: 2,
+        id: pageId,
+        name: pageName,
+        folder: pageFolder,
+        rootNodeIds: [],
+        layerChunks: [],
+        layerCount: 0
+      };
+      const chunk = {
+        pageId,
+        pageFolder,
+        chunkIndex: 1,
+        recordJsons: [],
+        bytes: 0,
+        writtenNodeIds: {}
+      };
+      const nodes = ensureTargetNodes(pageTarget);
+      let rootIndex = startRootIndex;
+      while (rootIndex < nodes.length) {
+        const node = nodes[rootIndex];
+        pageIndexRecord.rootNodeIds.push(safeRead(() => node.id, `root-${pageIndex + 1}-${rootIndex + 1}`));
+        yield collectSubtreeIterative(node, pageTarget.page, pageFolder, null, rootIndex, pageIndexRecord, chunk, transfer, "root");
+        rootIndex++;
+        if (pageIndexRecord.layerCount >= targetLayerCount) break;
+      }
+      yield flushLayerChunk(pageIndexRecord, chunk, transfer);
+      const pageFile = `pages/${pageFolder}/page.json`;
+      yield streamExportFileToUI(transfer, {
+        path: pageFile,
+        content: JSON.stringify(pageIndexRecord)
+      });
+      manifest.pages.push({
+        id: pageIndexRecord.id,
+        name: pageIndexRecord.name,
+        folder: pageFolder,
+        pageFile,
+        layerCount: pageIndexRecord.layerCount
+      });
+      manifest.stats.layerCount += pageIndexRecord.layerCount;
+      return {
+        nextRootIndex: rootIndex,
+        rootCount: rootIndex - startRootIndex,
+        layerCount: pageIndexRecord.layerCount
+      };
+    });
+  }
+  function streamPageExportToTransfer(pageTarget, pageIndex, pageCount, manifest, transfer, pageNameOverride) {
+    return __async(this, null, function* () {
+      const pageFolder = createPageFolderName(pageTarget.page, pageIndex);
+      const pageId = safeRead(() => pageTarget.page.id, `page-${pageIndex + 1}`);
+      const pageName = pageNameOverride || safeRead(() => pageTarget.page.name, "Untitled");
+      const nodes = ensureTargetNodes(pageTarget);
+      state.isVerboseLoggingActive = pageIndex >= DEBUG_LOGGING_PAGE_INDEX_START;
+      if (state.isVerboseLoggingActive) {
+        console.log(`[MasterGo2Figma] [DEBUG] Verbose logging activated for page: ${pageName}`);
+      }
+      console.log(`[MasterGo2Figma] Page export start ${pageIndex + 1}/${pageCount}: ${pageName}, roots=${nodes.length}`);
+      const pageIndexRecord = {
+        schema: "mastergo2figma.page.v2",
+        version: 2,
+        id: pageId,
+        name: pageName,
+        folder: pageFolder,
+        rootNodeIds: [],
+        layerChunks: [],
+        layerCount: 0
+      };
+      const chunk = {
+        pageId,
+        pageFolder,
+        chunkIndex: 1,
+        recordJsons: [],
+        bytes: 0,
+        writtenNodeIds: {}
+      };
+      for (let index = 0; index < nodes.length; index++) {
+        const node = nodes[index];
+        pageIndexRecord.rootNodeIds.push(safeRead(() => node.id, `root-${pageIndex + 1}-${index + 1}`));
+        yield collectSubtreeIterative(node, pageTarget.page, pageFolder, null, index, pageIndexRecord, chunk, transfer, "root");
+      }
+      yield flushLayerChunk(pageIndexRecord, chunk, transfer);
+      const pageFile = `pages/${pageFolder}/page.json`;
+      yield streamExportFileToUI(transfer, {
+        path: pageFile,
+        content: JSON.stringify(pageIndexRecord)
+      });
+      console.log(`[MasterGo2Figma] Page export complete ${pageIndex + 1}/${pageCount}: ${pageIndexRecord.name}, layers=${pageIndexRecord.layerCount}, files=${pageIndexRecord.layerChunks.length}`);
+      manifest.pages.push({
+        id: pageIndexRecord.id,
+        name: pageIndexRecord.name,
+        folder: pageFolder,
+        pageFile,
+        layerCount: pageIndexRecord.layerCount
+      });
+      manifest.stats.layerCount += pageIndexRecord.layerCount;
+    });
+  }
+  function streamImageAssetsToTransfer(imageAssetContext, manifest, transfer) {
+    return __async(this, null, function* () {
+      if (!ENABLE_IMAGE_EXPORT) return;
+      for (const asset of imageAssetContext.assets) {
+        yield loadAndStreamImageAsset(asset, imageAssetContext, transfer);
+        manifest.assets[asset.key] = {
+          key: asset.key,
+          fileName: asset.fileName,
+          path: asset.path,
+          missing: asset.missing || void 0
+        };
+        if (asset.bytes && !asset.missing) manifest.stats.imageAssetCount++;
+        asset.bytes = null;
+        yield yieldToHost();
+      }
+      manifest.stats.missingImageAssetCount = imageAssetContext.missingImageAssetCount;
+    });
+  }
+  function streamPageRootSegmentsToPackages(options, pageTarget, pageIndex, pageCount, aggregateManifest) {
+    return __async(this, null, function* () {
+      const pageName = safeRead(() => pageTarget.page.name, "Untitled");
+      state.isVerboseLoggingActive = pageIndex >= DEBUG_LOGGING_PAGE_INDEX_START;
+      if (state.isVerboseLoggingActive) {
+        console.log(`[MasterGo2Figma] [DEBUG] Verbose logging activated for split package page: ${pageName}`);
+      }
+      let rootIndex = 0;
+      let segmentIndex = 0;
+      const nodes = ensureTargetNodes(pageTarget);
+      const useSegmentNames = nodes.length > 1;
+      while (rootIndex < nodes.length) {
+        const imageAssetContext = createImageAssetContext();
+        state.activeImageAssetContext = imageAssetContext;
+        const manifest = createBaseExportManifest(options, 1);
+        const filename = createPageExportFilename(
+          options.scope,
+          pageTarget.page,
+          pageIndex,
+          pageCount,
+          manifest.exportedAt,
+          segmentIndex,
+          useSegmentNames ? 0 : 1
+        );
+        const transfer = createExportTransfer(manifest, filename, options);
+        startExportTransfer(transfer);
+        const segmentLabel = useSegmentNames ? ` segment ${segmentIndex + 1}` : "";
+        const pageNameOverride = useSegmentNames ? `${pageName} ${segmentIndex + 1}` : void 0;
+        const startRootIndex = rootIndex;
+        console.log(`[MasterGo2Figma] Split package start ${pageIndex + 1}/${pageCount}${segmentLabel}: ${pageName}, roots=${startRootIndex + 1}-${nodes.length}`);
+        state.logDiagnostic("log", "[MasterGo2Figma] Split package detail", {
+          pageIndex: pageIndex + 1,
+          pageCount,
+          pageName,
+          segmentIndex: segmentIndex + 1,
+          startRootIndex,
+          remainingRootCount: nodes.length - startRootIndex,
+          targetLayerCount: PAGE_SEGMENT_TARGET_LAYERS,
+          chunkMaxRecords: LAYER_CHUNK_MAX_RECORDS,
+          chunkMaxBytes: LAYER_CHUNK_MAX_BYTES,
+          transfer: summarizeTransfer2(transfer)
+        });
+        state.noteExportSplitPackage();
+        const segmentResult = yield state.timeExportPhase("exportMs", () => __async(null, null, function* () {
+          return yield streamPageRootSegmentToTransfer(
+            pageTarget,
+            pageIndex,
+            pageCount,
+            rootIndex,
+            PAGE_SEGMENT_TARGET_LAYERS,
+            manifest,
+            transfer,
+            pageNameOverride
+          );
+        }));
+        rootIndex = segmentResult.nextRootIndex;
+        state.postProgressUI({
+          type: "progress",
+          phase: "assets",
+          current: state.processedNodes,
+          total: 0,
+          label: `\u6B63\u5728\u5BFC\u51FA\u56FE\u7247\u8D44\u6E90 ${pageIndex + 1}/${pageCount}${segmentLabel}...`
+        });
+        yield state.timeExportPhase("assetMs", () => __async(null, null, function* () {
+          yield streamImageAssetsToTransfer(imageAssetContext, manifest, transfer);
+        }));
+        yield state.timeExportPhase("manifestMs", () => __async(null, null, function* () {
+          yield streamExportFileToUI(transfer, {
+            path: "manifest.json",
+            content: JSON.stringify(manifest)
+          });
+        }));
+        const pageSummary = manifest.pages[0];
+        if (pageSummary) aggregateManifest.pages.push(pageSummary);
+        aggregateManifest.stats.pageCount = aggregateManifest.pages.length;
+        aggregateManifest.stats.layerCount += manifest.stats.layerCount;
+        aggregateManifest.stats.imageAssetCount += manifest.stats.imageAssetCount;
+        aggregateManifest.stats.missingImageAssetCount += manifest.stats.missingImageAssetCount;
+        const isFinal = pageIndex === pageCount - 1 && rootIndex >= nodes.length;
+        const ackPromise = waitForExportTransferAck(transfer);
+        completeExportTransfer(transfer, manifest, isFinal, isFinal ? aggregateManifest.stats : manifest.stats);
+        releaseExportPackageMemory(manifest, imageAssetContext);
+        state.activeImageAssetContext = null;
+        const ack = yield state.timeExportPhase("ackMs", () => __async(null, null, function* () {
+          return yield ackPromise;
+        }));
+        console.log(`[MasterGo2Figma] Split package complete ${pageIndex + 1}/${pageCount}${segmentLabel}: ${ack.filename || transfer.filename}, roots=${segmentResult.rootCount}, layers=${segmentResult.layerCount}, files=${transfer.fileIndex}, bytes=${transfer.streamedBytes}`);
+        segmentIndex++;
+        yield yieldToHost();
+      }
+    });
+  }
+  function streamJsonExportPackage(options) {
+    return __async(this, null, function* () {
+      state.totalNodes = 0;
+      state.processedNodes = 0;
+      const previousImageAssetContext = state.activeImageAssetContext;
+      try {
+        const targets = getExportTargets(options);
+        let rootCount = 0;
+        for (const target of targets) {
+          rootCount += ensureTargetNodes(target).length;
+          clearTargetNodes(target);
+        }
+        if (rootCount === 0) {
+          throw new Error(options.scope === "selected" ? "\u8BF7\u5148\u9009\u62E9\u8981\u5BFC\u51FA\u7684\u56FE\u5C42" : "\u6CA1\u6709\u53EF\u5BFC\u51FA\u7684\u56FE\u5C42");
+        }
+        state.resetExportStats(options, targets.length, rootCount);
+        if (shouldSplitExportPackages(options, targets)) {
+          const aggregateManifest = yield streamSplitJsonExportPackages(options, targets);
+          state.logExportPerformanceSummary("split-complete", aggregateManifest);
+          return aggregateManifest;
+        }
+        state.postProgressUI({ type: "progress", phase: "scan", current: 0, total: 0, label: "\u6B63\u5728\u626B\u63CF\u56FE\u5C42..." });
+        state.processedNodes = 0;
+        state.totalNodes = 0;
+        yield state.timeExportPhase("scanMs", () => __async(null, null, function* () {
+          for (const target of targets) {
+            const nodes = ensureTargetNodes(target);
+            for (const node of nodes) yield countNodes(node);
+            clearTargetNodes(target);
+          }
+        }));
+        state.processedNodes = 0;
+        state.postProgressUI({ type: "progress", phase: "prepare", current: 0, total: state.totalNodes, label: "\u51C6\u5907\u5206\u5757\u5BFC\u51FA JSON..." });
+        const imageAssetContext = createImageAssetContext();
+        state.activeImageAssetContext = imageAssetContext;
+        const manifest = createBaseExportManifest(options, targets.length);
+        const transfer = createExportTransfer(manifest, void 0, options);
+        startExportTransfer(transfer);
+        console.log(`[MasterGo2Figma] Export v2 start: ${targets.length} pages, ${rootCount} roots, nodes=${state.totalNodes}.`);
+        yield state.timeExportPhase("exportMs", () => __async(null, null, function* () {
+          for (let pageIndex = 0; pageIndex < targets.length; pageIndex++) {
+            const pageTarget = targets[pageIndex];
+            ensureTargetNodes(pageTarget);
+            yield streamPageExportToTransfer(pageTarget, pageIndex, targets.length, manifest, transfer);
+            clearTargetNodes(pageTarget);
+            targets[pageIndex] = null;
+          }
+        }));
+        state.postProgressUI({ type: "progress", phase: "assets", current: state.processedNodes, total: state.totalNodes, label: "\u6B63\u5728\u5BFC\u51FA\u56FE\u7247\u8D44\u6E90..." });
+        yield state.timeExportPhase("assetMs", () => __async(null, null, function* () {
+          yield streamImageAssetsToTransfer(imageAssetContext, manifest, transfer);
+        }));
+        yield state.timeExportPhase("manifestMs", () => __async(null, null, function* () {
+          yield streamExportFileToUI(transfer, {
+            path: "manifest.json",
+            content: JSON.stringify(manifest)
+          });
+        }));
+        state.postProgressUI({ type: "progress", phase: "complete", current: state.processedNodes, total: state.processedNodes, label: "JSON \u5DF2\u751F\u6210\uFF0C\u6B63\u5728\u51C6\u5907\u4E0B\u8F7D..." });
+        const ackPromise = waitForExportTransferAck(transfer);
+        completeExportTransfer(transfer, manifest);
+        const ack = yield state.timeExportPhase("ackMs", () => __async(null, null, function* () {
+          return yield ackPromise;
+        }));
+        console.log(`[MasterGo2Figma] UI zip complete: ${ack.filename || transfer.filename}, files=${transfer.fileIndex}, bytes=${transfer.streamedBytes}`);
+        state.logExportPerformanceSummary("complete", manifest);
+        return manifest;
+      } catch (error) {
+        state.logExportPerformanceSummary("failed");
+        state.logDiagnostic("error", "[MasterGo2Figma] Export transfer failed", {
+          error: describeError(error),
+          debugState: state.exportDebugState
+        });
+        throw error;
+      } finally {
+        state.activeImageAssetContext = previousImageAssetContext;
+      }
+    });
+  }
+  function streamSplitJsonExportPackages(options, targets) {
+    return __async(this, null, function* () {
+      const aggregateManifest = createBaseExportManifest(options, targets.length);
+      let rootCount = 0;
+      for (const target of targets) {
+        rootCount += ensureTargetNodes(target).length;
+        clearTargetNodes(target);
+      }
+      console.log(`[MasterGo2Figma] Split export start: ${targets.length} pages, ${rootCount} roots. Node pre-scan skipped.`);
+      state.postProgressUI({
+        type: "progress",
+        phase: "prepare",
+        current: 0,
+        total: 0,
+        label: "\u6B63\u5728\u6309\u9875\u9762\u5206\u5305\u5BFC\u51FA..."
+      });
+      for (let pageIndex = 0; pageIndex < targets.length; pageIndex++) {
+        const pageTarget = targets[pageIndex];
+        ensureTargetNodes(pageTarget);
+        yield streamPageRootSegmentsToPackages(options, pageTarget, pageIndex, targets.length, aggregateManifest);
+        clearTargetNodes(pageTarget);
+        targets[pageIndex] = null;
+      }
+      return aggregateManifest;
+    });
+  }
+
+  // src/code.ts
+  var EXPORT_QUEUE_CACHE_KEY = "mastergo2figma.export-queue.v1";
+  var MAX_PAGES_PER_BATCH = 1;
+  try {
+    showPluginUI();
+  } catch (error) {
+    console.error("Unable to open SendToFigma plugin UI:", error);
+    try {
+      mg.notify("\u63D2\u4EF6\u754C\u9762\u6253\u5F00\u5931\u8D25\uFF0C\u8BF7\u67E5\u770B\u63A7\u5236\u53F0", {
+        position: "bottom",
+        timeout: 3e3,
+        type: "error"
+      });
+    } catch (_) {
+    }
+  }
+  function showPluginUI() {
+    mg.ui.onmessage = (rawMessage) => __async(null, null, function* () {
+      const message = unwrapUIMessage(rawMessage);
+      if (!message || typeof message !== "object") return;
+      if (message.type === "ui-ready") {
+        yield safePostInitUI();
+        return;
+      }
+      if (message.type === "close") {
+        mg.closePlugin();
+        return;
+      }
+      if (message.type === "resize") {
+        const width = typeof message.width === "number" ? message.width : 400;
+        const height = typeof message.height === "number" ? message.height : 710;
+        mg.ui.resize(width, height);
+        return;
+      }
+      if (message.type === "export-transfer-finished") {
+        resolveExportTransferAck(message);
+        return;
+      }
+      if (message.type === "export-file-finished") {
+        resolveExportFileAck(message);
+        return;
+      }
+      if (message.type === "test-main-fetch-relay") {
+        yield testMainRelayFetch(typeof message.relayUrl === "string" ? message.relayUrl : "");
+        return;
+      }
+      if (message.type !== "start-export") return;
+      if (state.exportInProgress) return;
+      const options = {
+        scope: normalizeScope(message.scope),
+        pageIds: Array.isArray(message.pageIds) ? message.pageIds : [],
+        transferMode: normalizeTransferMode(message.transferMode),
+        relayUrl: typeof message.relayUrl === "string" ? message.relayUrl : void 0,
+        autoContinue: message.autoContinue === true,
+        sessionId: typeof message.sessionId === "string" ? message.sessionId : void 0,
+        batchIndex: typeof message.batchIndex === "number" ? message.batchIndex : void 0,
+        batchTotal: typeof message.batchTotal === "number" ? message.batchTotal : void 0
+      };
+      state.exportInProgress = true;
+      try {
+        const prepared = yield prepareExportRun(options);
+        state.logDiagnostic("log", "[MasterGo2Figma] Export queue plan", createPreparedExportLog(options, prepared));
+        yield savePendingExportQueueForRecovery(prepared);
+        state.logDiagnostic("log", "[MasterGo2Figma] Export batch start", createPreparedExportLog(options, prepared));
+        const success = yield runWithUI(prepared.options);
+        if (success) {
+          state.logDiagnostic("log", "[MasterGo2Figma] Export batch complete", createPreparedExportLog(options, prepared));
+          yield updatePendingExportQueue(prepared);
+        } else if (prepared.remainingPageIds.length > 0) {
+          state.logDiagnostic("warn", "[MasterGo2Figma] Export queue not advanced because current run failed", {
+            sessionId: prepared.options.sessionId,
+            batchIndex: prepared.options.batchIndex,
+            batchTotal: prepared.options.batchTotal,
+            remainingPageCount: prepared.remainingPageIds.length,
+            remainingPages: summarizePageIds(prepared.remainingPageIds.slice(0, 5)),
+            debugState: state.exportDebugState
+          });
+        }
+      } catch (error) {
+        state.logDiagnostic("error", "[MasterGo2Figma] Export run failed before completion", {
+          error: describeError(error),
+          debugState: state.exportDebugState
+        });
+        state.postUI({
+          type: "error",
+          message: error instanceof Error ? error.message : "\u5BFC\u51FA\u5931\u8D25\uFF0C\u8BF7\u67E5\u770B\u63A7\u5236\u53F0"
+        });
+      } finally {
+        state.exportInProgress = false;
+      }
+    });
+    openPluginUI();
+    startLayerRulesLoad();
+  }
+  function openPluginUI() {
+    try {
+      mg.showUI(__html__, { width: 400, height: 710 });
+    } catch (error) {
+      console.warn("Unable to open preferred SendToFigma UI size, retrying with compact size:", error);
+      mg.showUI(__html__, { width: 400, height: 710 });
+    }
+  }
+  function unwrapUIMessage(rawMessage) {
+    if (rawMessage && rawMessage.pluginMessage) return rawMessage.pluginMessage;
+    return rawMessage;
+  }
+  function testMainRelayFetch(rawRelayUrl) {
+    return __async(this, null, function* () {
+      const relayUrl = normalizeRelayUrl(rawRelayUrl);
+      state.postUI({
+        type: "main-relay-test-result",
+        ok: false,
+        relayUrl,
+        fetchAvailable: false,
+        elapsedMs: 0,
+        error: "MasterGo \u63D2\u4EF6\u4E3B\u7EBF\u7A0B\u6C99\u76D2\u4E2D\u6CA1\u6709\u5185\u7F6E fetch API\uFF0C\u8BF7\u901A\u8FC7 UI \u7EBF\u7A0B\u8FDB\u884C\u8BF7\u6C42\u3002"
+      });
+    });
+  }
+  function normalizeRelayUrl(value) {
+    const text = String(value || "").trim() || "http://127.0.0.1:8765";
+    return text.replace(/\/+$/, "");
+  }
+  function postInitUI() {
+    return __async(this, null, function* () {
+      yield ensureLayerRulesLoaded();
+      state.postUI({
+        type: "init",
+        command: normalizeScope(mg.command),
+        selectionCount: mg.document.currentPage.selection.length,
+        pageCount: mg.document.children.length,
+        currentPageName: mg.document.currentPage.name,
+        currentPageId: mg.document.currentPage.id,
+        pages: getDocumentPageSummaries(),
+        exportQueue: yield getPendingExportQueueStatus(),
+        rules: getLayerRuleStatus()
+      });
+    });
+  }
+  function safePostInitUI() {
+    return __async(this, null, function* () {
+      try {
+        yield postInitUI();
+      } catch (error) {
+        console.warn("Unable to initialize SendToFigma UI:", error);
+        try {
+          state.postUI({
+            type: "error",
+            message: error instanceof Error ? error.message : "\u63D2\u4EF6\u521D\u59CB\u5316\u5931\u8D25"
+          });
+        } catch (_) {
+        }
+      }
+    });
+  }
+  function normalizeScope(scope) {
+    if (scope === "all-pages") return "all-pages";
+    if (scope === "selected") return "selected";
+    if (scope === "partial-pages") return "partial-pages";
+    return "current-page";
+  }
+  function normalizeTransferMode(mode) {
+    return mode === "local-json-stream" ? "local-json-stream" : "direct-zip";
+  }
+  function runWithUI(options) {
+    return __async(this, null, function* () {
+      try {
+        yield ensureLayerRulesLoaded();
+        if (options.transferMode === "local-json-stream") {
+          if (!options.relayUrl) throw new Error("\u8BF7\u586B\u5199\u672C\u5730\u6D41\u4F20\u8F93\u670D\u52A1\u5730\u5740");
+          state.postProgressUI({ type: "progress", phase: "start", current: 0, total: 0, label: "\u6B63\u5728\u51C6\u5907\u6D41\u4F20\u8F93 JSON..." });
+          const manifest2 = yield streamJsonExportPackage(options);
+          cacheLatestExportSummary(manifest2);
+          return true;
+        }
+        state.postProgressUI({ type: "progress", phase: "start", current: 0, total: 0, label: "\u6B63\u5728\u51C6\u5907\u751F\u6210 zip..." });
+        const manifest = yield streamJsonExportPackage(options);
+        cacheLatestExportSummary(manifest);
+        return true;
+      } catch (error) {
+        state.logDiagnostic("error", "[MasterGo2Figma] Export failed", {
+          error: describeError(error),
+          debugState: state.exportDebugState
+        });
+        state.postUI({
+          type: "error",
+          message: error instanceof Error ? error.message : "\u5BFC\u51FA\u5931\u8D25\uFF0C\u8BF7\u67E5\u770B\u63A7\u5236\u53F0"
+        });
+        return false;
+      }
+    });
+  }
+  function createPreparedExportLog(requested, prepared) {
+    return {
+      sessionId: requested.sessionId || "",
+      autoContinue: requested.autoContinue === true,
+      batchIndex: requested.batchIndex || 0,
+      batchTotal: requested.batchTotal || 0,
+      scope: requested.scope,
+      transferMode: requested.transferMode,
+      requestedPageCount: requested.pageIds.length,
+      requestedPages: summarizePageIds(requested.pageIds.slice(0, 5)),
+      runPageCount: prepared.options.pageIds.length,
+      runPages: summarizePageIds(prepared.options.pageIds),
+      remainingPageCount: prepared.remainingPageIds.length,
+      remainingPages: summarizePageIds(prepared.remainingPageIds.slice(0, 5)),
+      limitedToSinglePage: prepared.limitedToSinglePage,
+      maxPagesPerBatch: MAX_PAGES_PER_BATCH
+    };
+  }
+  function summarizePageIds(pageIds) {
+    if (!Array.isArray(pageIds) || pageIds.length === 0) return [];
+    const pageById = {};
+    for (const page of mg.document.children) {
+      pageById[page.id] = safeRead(() => page.name, "Untitled");
+    }
+    return pageIds.map((id) => ({
+      id,
+      name: pageById[id] || ""
+    }));
+  }
+  function prepareExportRun(options) {
+    return __async(this, null, function* () {
+      if (options.scope !== "partial-pages") {
+        return { options, remainingPageIds: [], limitedToSinglePage: false };
+      }
+      const pageIds = filterExistingPageIds(options.pageIds);
+      if (pageIds.length === 0) return { options: __spreadProps(__spreadValues({}, options), { pageIds }), remainingPageIds: [], limitedToSinglePage: false };
+      if (pageIds.length > MAX_PAGES_PER_BATCH) {
+        return {
+          options: __spreadProps(__spreadValues({}, options), { pageIds: pageIds.slice(0, MAX_PAGES_PER_BATCH) }),
+          remainingPageIds: pageIds.slice(MAX_PAGES_PER_BATCH),
+          limitedToSinglePage: true
+        };
+      }
+      const pendingQueue = yield readPendingExportQueue();
+      const isQueuedNextPage = !!(pendingQueue && pendingQueue.pageIds[0] === pageIds[0]);
+      return {
+        options: __spreadProps(__spreadValues({}, options), { pageIds }),
+        remainingPageIds: isQueuedNextPage && pendingQueue ? pendingQueue.pageIds.slice(1) : [],
+        limitedToSinglePage: false
+      };
+    });
+  }
+  function savePendingExportQueueForRecovery(prepared) {
+    return __async(this, null, function* () {
+      if (prepared.options.scope !== "partial-pages") {
+        yield clearPendingExportQueue();
+        return;
+      }
+      const recoveryPageIds = filterExistingPageIds([
+        ...prepared.options.pageIds,
+        ...prepared.remainingPageIds
+      ]);
+      if (recoveryPageIds.length === 0) {
+        yield clearPendingExportQueue();
+        return;
+      }
+      const now = (/* @__PURE__ */ new Date()).toISOString();
+      const existing = yield readPendingExportQueue();
+      const queue = {
+        pageIds: recoveryPageIds,
+        createdAt: existing && existing.createdAt ? existing.createdAt : now,
+        updatedAt: now
+      };
+      yield mg.clientStorage.setAsync(EXPORT_QUEUE_CACHE_KEY, queue);
+      state.logDiagnostic("log", "[MasterGo2Figma] Export recovery queue saved", {
+        sessionId: prepared.options.sessionId || "",
+        batchIndex: prepared.options.batchIndex || 0,
+        runningPages: summarizePageIds(prepared.options.pageIds),
+        recoveryPageCount: recoveryPageIds.length,
+        nextPage: summarizePageIds(recoveryPageIds.slice(0, 1))[0] || null
+      });
+    });
+  }
+  function updatePendingExportQueue(prepared) {
+    return __async(this, null, function* () {
+      if (prepared.options.scope !== "partial-pages") {
+        yield clearPendingExportQueue();
+        return;
+      }
+      const remainingPageIds = filterExistingPageIds(prepared.remainingPageIds);
+      if (remainingPageIds.length === 0) {
+        yield clearPendingExportQueue();
+        state.postUI({ type: "export-queue-cleared" });
+        if (prepared.options.scope === "partial-pages") {
+          state.logDiagnostic("log", "[MasterGo2Figma] Export queue complete", {
+            sessionId: prepared.options.sessionId || "",
+            autoContinue: prepared.options.autoContinue === true,
+            exportedPages: summarizePageIds(prepared.options.pageIds),
+            remainingPageCount: 0
+          });
+        }
+        return;
+      }
+      const now = (/* @__PURE__ */ new Date()).toISOString();
+      const existing = yield readPendingExportQueue();
+      const queue = {
+        pageIds: remainingPageIds,
+        createdAt: existing && existing.createdAt ? existing.createdAt : now,
+        updatedAt: now
+      };
+      yield mg.clientStorage.setAsync(EXPORT_QUEUE_CACHE_KEY, queue);
+      const queueStatus = createExportQueueStatus(queue);
+      state.logDiagnostic("log", "[MasterGo2Figma] Export queue saved", {
+        sessionId: prepared.options.sessionId || "",
+        autoContinue: prepared.options.autoContinue === true,
+        exportedPages: summarizePageIds(prepared.options.pageIds),
+        remainingPageCount: remainingPageIds.length,
+        nextPage: summarizePageIds(remainingPageIds.slice(0, 1))[0] || null
+      });
+      state.postUI({ type: "export-queue-updated", exportQueue: queueStatus });
+      if (!prepared.options.autoContinue) {
+        mg.notify(`\u5DF2\u5BFC\u51FA\u5F53\u524D\u9875\u9762\uFF0C\u8FD8\u5269 ${remainingPageIds.length} \u4E2A\u9875\u9762\uFF0C\u53EF\u70B9\u51FB\u5F00\u59CB\u7EE7\u7EED\u3002`, {
+          position: "bottom",
+          timeout: 5e3,
+          type: "highlight"
+        });
+      }
+    });
+  }
+  function clearPendingExportQueue() {
+    return __async(this, null, function* () {
+      try {
+        yield mg.clientStorage.deleteAsync(EXPORT_QUEUE_CACHE_KEY);
+      } catch (error) {
+        console.warn("Unable to clear export queue:", error);
+      }
+    });
+  }
+  function readPendingExportQueue() {
+    return __async(this, null, function* () {
+      try {
+        const cached = yield mg.clientStorage.getAsync(EXPORT_QUEUE_CACHE_KEY);
+        if (!cached || !Array.isArray(cached.pageIds)) return null;
+        const pageIds = filterExistingPageIds(cached.pageIds);
+        if (pageIds.length === 0) {
+          yield clearPendingExportQueue();
+          return null;
+        }
+        return {
+          pageIds,
+          createdAt: String(cached.createdAt || cached.updatedAt || ""),
+          updatedAt: String(cached.updatedAt || "")
+        };
+      } catch (error) {
+        console.warn("Unable to read export queue:", error);
+        return null;
+      }
+    });
+  }
+  function getPendingExportQueueStatus() {
+    return __async(this, null, function* () {
+      const queue = yield readPendingExportQueue();
+      return queue ? createExportQueueStatus(queue) : null;
+    });
+  }
+  function createExportQueueStatus(queue) {
+    const nextPageId = queue.pageIds[0] || "";
+    return {
+      pageIds: queue.pageIds,
+      remainingCount: queue.pageIds.length,
+      nextPageId,
+      nextPageName: getPageNameById(nextPageId),
+      updatedAt: queue.updatedAt
+    };
+  }
+  function filterExistingPageIds(pageIds) {
+    const existingPageIds = new Set([...mg.document.children].map((page) => page.id));
+    const result = [];
+    const seen = {};
+    for (const pageId of pageIds) {
+      if (typeof pageId !== "string" || !existingPageIds.has(pageId) || seen[pageId]) continue;
+      seen[pageId] = true;
+      result.push(pageId);
+    }
+    return result;
+  }
+  function getPageNameById(pageId) {
+    const page = [...mg.document.children].find((nextPage) => nextPage.id === pageId);
+    return page ? safeRead(() => page.name, "Untitled") : "Untitled";
+  }
+  function cacheLatestExportSummary(manifest) {
+    mg.clientStorage.setAsync("latest-mastergo2figma-export", {
+      manifest: {
+        schema: manifest.schema,
+        version: manifest.version,
+        source: manifest.source,
+        documentId: manifest.documentId,
+        exportedAt: manifest.exportedAt,
+        scope: manifest.scope,
+        stats: manifest.stats
+      },
+      savedAt: (/* @__PURE__ */ new Date()).toISOString()
+    }).catch((error) => {
+      console.warn("Unable to cache latest export summary:", error);
+    });
+  }
+})();

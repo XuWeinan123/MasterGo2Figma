@@ -4,13 +4,14 @@
   "description": "MasterGo plugin to export layers to JSON for Figma",
   "main": "code.js",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "watch": "npm run build -- --watch"
+    "build": "tsc -p tsconfig.json --noEmit && esbuild src/code.ts --bundle --outfile=code.js --target=es6 --log-level=warning",
+    "watch": "esbuild src/code.ts --bundle --outfile=code.js --target=es6 --watch"
   },
   "author": "",
   "license": "MIT",
   "devDependencies": {
     "@mastergo/plugin-typings": "latest",
+    "esbuild": "^0.28.0",
     "typescript": "^5.0.0"
   }
 }

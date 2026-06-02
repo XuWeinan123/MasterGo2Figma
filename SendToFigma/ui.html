@@ -10,20 +10,20 @@
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
   <style>
     :root {
-      --background: #ffffff;
-      --foreground: #09090b;
-      --muted: #f4f4f5;
-      --muted-foreground: #71717a;
+      --background: #f8fafc;
+      --foreground: #0f172a;
+      --muted: #f1f5f9;
+      --muted-foreground: #64748b;
       --card: #ffffff;
-      --border: #e4e4e7;
-      --input: #e4e4e7;
+      --border: #e2e8f0;
+      --input: #f8fafc;
       --primary: #0066cc;
       --primary-hover: #0052a3;
       --primary-foreground: #ffffff;
-      --secondary: #f4f4f5;
-      --secondary-foreground: #09090b;
-      --ring: rgba(0, 102, 204, 0.2);
-      --destructive: #dc2626;
+      --secondary: #f1f5f9;
+      --secondary-foreground: #0f172a;
+      --ring: rgba(0, 102, 204, 0.15);
+      --destructive: #ef4444;
       --radius: 12px;
       --font-sans: 'Outfit', 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
@@ -39,6 +39,11 @@
       color: var(--foreground);
       background: var(--background);
       -webkit-font-smoothing: antialiased;
+      width: 400px;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
     }
 
     /* App Header */
@@ -52,7 +57,7 @@
     .app-title {
       font-size: 22px;
       font-weight: 700;
-      letter-spacing: -0.5px;
+      letter-spacing: -0.02em;
       background: linear-gradient(135deg, #09090b 30%, var(--primary) 100%);
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
@@ -66,11 +71,13 @@
     }
 
     main {
-      min-height: 100vh;
-      padding: 0 16px 24px 16px;
+      flex: 1;
+      min-height: 0;
+      padding: 0 16px 16px 16px;
       display: flex;
       flex-direction: column;
       gap: 16px;
+      overflow: hidden;
     }
 
     h1, p {
@@ -89,15 +96,19 @@
       padding: 16px;
       display: grid;
       gap: 12px;
-      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.04);
+      box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05), 0 1px 2px -1px rgba(0, 0, 0, 0.05);
+    }
+
+    .card:hover {
+      box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.05), 0 2px 8px -1px rgba(0, 0, 0, 0.03);
     }
 
     .card-title {
-      font-size: 13px;
-      font-weight: 650;
+      font-size: 11px;
+      font-weight: 600;
       color: var(--muted-foreground);
       text-transform: uppercase;
-      letter-spacing: 0.5px;
+      letter-spacing: 0.05em;
     }
 
     .select-trigger {
@@ -115,7 +126,7 @@
 
     .select-trigger:focus {
       border-color: var(--primary);
-      box-shadow: 0 0 0 3px rgba(0, 102, 204, 0.15);
+      box-shadow: 0 0 0 3px var(--ring);
     }
 
     .file-input {
@@ -156,7 +167,7 @@
       grid-template-columns: 1fr auto;
       align-items: center;
       border-bottom: 1px solid var(--border);
-      background: rgba(0, 0, 0, 0.02);
+      background: rgba(0, 0, 0, 0.01);
     }
 
     .page-row {
@@ -171,7 +182,7 @@
     }
 
     .page-row:hover:not(.disabled) {
-      background: rgba(0, 0, 0, 0.03);
+      background: rgba(0, 102, 204, 0.03);
     }
 
     .page-row:last-child {
@@ -212,7 +223,7 @@
       padding: 0 10px;
       color: var(--muted-foreground);
       font-size: 11px;
-      background: rgba(0, 0, 0, 0.03);
+      background: rgba(0, 0, 0, 0.02);
       white-space: nowrap;
     }
 
@@ -221,7 +232,7 @@
       height: 8px;
       overflow: hidden;
       border-radius: 999px;
-      background: rgba(0, 0, 0, 0.06);
+      background: rgba(0, 0, 0, 0.04);
     }
 
     .progress-bar {
@@ -268,7 +279,7 @@
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 8px;
-      background: rgba(0, 0, 0, 0.04);
+      background: rgba(0, 0, 0, 0.03);
       padding: 4px;
       border-radius: 8px;
     }
@@ -299,7 +310,7 @@
     .segment:has(input:checked) {
       background: var(--card);
       color: var(--primary);
-      box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+      box-shadow: 0 1px 3px rgba(0,0,0,0.05), 0 1px 2px rgba(0,0,0,0.05);
     }
 
     .relay-row {
@@ -333,7 +344,7 @@
 
     .text-input:focus {
       border-color: var(--primary);
-      box-shadow: 0 0 0 3px rgba(0, 102, 204, 0.15);
+      box-shadow: 0 0 0 3px var(--ring);
     }
 
     .file-name {
@@ -387,12 +398,12 @@
     }
 
     .button:hover:not(:disabled) {
-      background: #e4e4e7;
-      border-color: rgba(0, 0, 0, 0.1);
+      background: #e2e8f0;
+      border-color: rgba(0, 0, 0, 0.05);
     }
 
     .button:active:not(:disabled) {
-      transform: scale(0.97);
+      transform: scale(0.98);
     }
 
     .button-primary {
@@ -405,7 +416,7 @@
 
     .button-primary:hover:not(:disabled) {
       background: var(--primary-hover);
-      box-shadow: 0 0 12px rgba(0, 102, 204, 0.2);
+      box-shadow: 0 2px 8px rgba(0, 102, 204, 0.15);
     }
 
     .button-primary:disabled {
@@ -426,21 +437,7 @@
       cursor: not-allowed;
     }
 
-    body {
-      font: 13px/1.5 var(--font-sans);
-      color: var(--foreground);
-      background: var(--background);
-      -webkit-font-smoothing: antialiased;
-    }
 
-    main {
-      width: 400px;
-      height: 100vh;
-      min-height: 0;
-      padding: 16px;
-      gap: 16px;
-      overflow: hidden;
-    }
 
     .card {
       border-color: var(--border);
@@ -450,8 +447,8 @@
     }
 
     .page-card {
-      height: 374px;
-      flex: 0 0 374px;
+      height: 280px;
+      flex: 0 0 280px;
       padding: 0;
     }
 
@@ -459,13 +456,13 @@
       height: 48px;
       min-height: 48px;
       padding: 16px;
-      border-bottom-color: var(--divider);
+      border-bottom-color: var(--border);
       grid-template-columns: minmax(0, 1fr) auto;
     }
 
     .page-list {
-      height: 326px;
-      max-height: 326px;
+      height: 232px;
+      max-height: 232px;
       border: 0;
       border-radius: 0;
       background: var(--background);
@@ -646,9 +643,9 @@
     .status-card {
       height: 96px;
       flex: 0 0 96px;
-      margin-top: 32px;
+      margin-top: 16px;
       padding: 16px;
-      gap: 8px;
+      gap: 6px;
     }
 
     .progress-track {
@@ -826,10 +823,19 @@
 
     function updateTransferMode() {
       currentTransferMode = getTransferMode();
-      relayConfig.classList.toggle("hidden", currentTransferMode !== TRANSFER_MODE_LOCAL_JSON_STREAM);
+      const isStream = currentTransferMode === TRANSFER_MODE_LOCAL_JSON_STREAM;
+      relayConfig.classList.toggle("hidden", !isStream);
+
+      // Dynamic resize post message
+      send({
+        type: "resize",
+        width: 400,
+        height: isStream ? 790 : 710
+      });
+
       if (pendingExportQueue && pendingExportQueue.nextPageId && !isBusy) {
         renderExportQueueStatus(pendingExportQueue);
-      } else if (currentTransferMode === TRANSFER_MODE_LOCAL_JSON_STREAM) {
+      } else if (isStream) {
         summary.textContent = "JSON 和图片会流式写入本地服务，完成后生成 zip。";
         relayDiagnostic.textContent = "先启动本地 Python 中继服务，再开始流传输。";
         relayDiagnostic.classList.remove("error");

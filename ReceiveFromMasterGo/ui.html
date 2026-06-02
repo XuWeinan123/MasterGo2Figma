@@ -1,5 +1,6 @@
 <!doctype html>
 <html lang="zh-CN">
+
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -7,23 +8,25 @@
   <meta name="description" content="Import and restore design asset zip bundles in Figma with pixel-perfect fidelity.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <link
+    href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap"
+    rel="stylesheet">
   <style>
     :root {
-      --background: #ffffff;
-      --foreground: #09090b;
-      --muted: #f4f4f5;
-      --muted-foreground: #71717a;
+      --background: #f8fafc;
+      --foreground: #0f172a;
+      --muted: #f1f5f9;
+      --muted-foreground: #64748b;
       --card: #ffffff;
-      --border: #e4e4e7;
-      --input: #e4e4e7;
+      --border: #e2e8f0;
+      --input: #f8fafc;
       --primary: #0066cc;
       --primary-hover: #0052a3;
       --primary-foreground: #ffffff;
-      --secondary: #f4f4f5;
-      --secondary-foreground: #09090b;
-      --ring: rgba(0, 102, 204, 0.2);
-      --destructive: #dc2626;
+      --secondary: #f1f5f9;
+      --secondary-foreground: #0f172a;
+      --ring: rgba(0, 102, 204, 0.15);
+      --destructive: #ef4444;
       --radius: 12px;
       --font-sans: 'Outfit', 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
@@ -39,6 +42,11 @@
       color: var(--foreground);
       background: var(--background);
       -webkit-font-smoothing: antialiased;
+      width: 400px;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
     }
 
     /* App Header */
@@ -52,7 +60,7 @@
     .app-title {
       font-size: 22px;
       font-weight: 700;
-      letter-spacing: -0.5px;
+      letter-spacing: -0.02em;
       background: linear-gradient(135deg, #09090b 30%, var(--primary) 100%);
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
@@ -66,15 +74,17 @@
     }
 
     main {
-      min-height: 100vh;
-      padding: 0 16px 24px 16px;
+      flex: 1;
+      min-height: 0;
+      padding: 0 16px 16px 16px;
       display: flex;
       flex-direction: column;
       gap: 16px;
       overflow: hidden;
     }
 
-    h1, p {
+    h1,
+    p {
       margin: 0;
     }
 
@@ -90,15 +100,19 @@
       padding: 16px;
       display: grid;
       gap: 12px;
-      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.04);
+      box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05), 0 1px 2px -1px rgba(0, 0, 0, 0.05);
+    }
+
+    .card:hover {
+      box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.05), 0 2px 8px -1px rgba(0, 0, 0, 0.03);
     }
 
     .card-title {
-      font-size: 13px;
-      font-weight: 650;
+      font-size: 11px;
+      font-weight: 600;
       color: var(--muted-foreground);
       text-transform: uppercase;
-      letter-spacing: 0.5px;
+      letter-spacing: 0.05em;
     }
 
     .file-input {
@@ -112,10 +126,10 @@
 
     .import-drop-card {
       height: 250px;
-      border: 2px dashed rgba(0, 0, 0, 0.12);
+      border: 2px dashed rgba(0, 102, 204, 0.15);
       border-radius: var(--radius);
       padding: 0;
-      background: rgba(0, 0, 0, 0.01);
+      background: rgba(0, 102, 204, 0.01);
       display: flex;
       align-items: center;
       justify-content: center;
@@ -126,14 +140,14 @@
 
     .import-drop-card:hover {
       border-color: var(--primary);
-      background: rgba(0, 102, 204, 0.02);
-      box-shadow: 0 0 20px rgba(0, 102, 204, 0.04);
+      background: rgba(0, 102, 204, 0.03);
+      box-shadow: 0 4px 20px -2px rgba(0, 102, 204, 0.05);
     }
 
     .import-drop-card.dragover {
       border-color: var(--primary);
-      background: rgba(0, 102, 204, 0.05);
-      box-shadow: 0 0 30px rgba(0, 102, 204, 0.08);
+      background: rgba(0, 102, 204, 0.06);
+      box-shadow: 0 4px 24px -2px rgba(0, 102, 204, 0.08);
       transform: scale(1.01);
     }
 
@@ -225,14 +239,14 @@
       align-items: center;
       justify-content: space-between;
       border-bottom: 1px solid var(--border);
-      background: rgba(0, 0, 0, 0.02);
+      background: rgba(0, 0, 0, 0.01);
     }
 
     .page-list {
       display: grid;
       max-height: 228px;
       overflow: auto;
-      background: var(--muted);
+      background: var(--background);
       align-content: start;
       grid-auto-rows: max-content;
     }
@@ -249,7 +263,7 @@
     }
 
     .page-row:hover:not(.disabled) {
-      background: rgba(0, 0, 0, 0.03);
+      background: rgba(0, 102, 204, 0.03);
     }
 
     .page-row:last-child {
@@ -289,7 +303,7 @@
       padding: 0 10px;
       color: var(--muted-foreground);
       font-size: 11px;
-      background: rgba(0, 0, 0, 0.03);
+      background: rgba(0, 0, 0, 0.02);
       white-space: nowrap;
     }
 
@@ -298,7 +312,7 @@
       height: 8px;
       overflow: hidden;
       border-radius: 999px;
-      background: rgba(0, 0, 0, 0.06);
+      background: rgba(0, 0, 0, 0.04);
     }
 
     .progress-bar {
@@ -355,21 +369,7 @@
       display: none !important;
     }
 
-    body {
-      font: 13px/1.5 var(--font-sans);
-      color: var(--foreground);
-      background: var(--background);
-      -webkit-font-smoothing: antialiased;
-    }
 
-    main {
-      width: 400px;
-      height: 100vh;
-      min-height: 0;
-      padding: 16px;
-      gap: 16px;
-      overflow: hidden;
-    }
 
     .card {
       border-color: var(--border);
@@ -379,8 +379,8 @@
     }
 
     .import-drop-card {
-      height: 454px;
-      flex: 0 0 454px;
+      height: 316px;
+      flex: 0 0 316px;
       padding: 0;
       align-items: center;
       justify-content: center;
@@ -426,8 +426,8 @@
     }
 
     .page-card {
-      height: 374px;
-      flex: 0 0 374px;
+      height: 280px;
+      flex: 0 0 280px;
       padding: 0;
     }
 
@@ -435,14 +435,14 @@
       height: 48px;
       min-height: 48px;
       padding: 16px;
-      border-bottom-color: var(--divider);
+      border-bottom-color: var(--border);
       grid-template-columns: minmax(0, 1fr) max-content;
       column-gap: 12px;
     }
 
     .page-list {
-      height: 326px;
-      max-height: 326px;
+      height: 232px;
+      max-height: 232px;
       border: 0;
       border-radius: 0;
       background: var(--background);
@@ -535,7 +535,7 @@
       white-space: nowrap;
     }
 
-    .page-row input:checked + .page-name {
+    .page-row input:checked+.page-name {
       font-size: 14px;
       line-height: 16px;
     }
@@ -616,10 +616,11 @@
     }
 
     .status-card {
-      min-height: 96px;
-      margin-top: 32px;
+      height: 96px;
+      flex: 0 0 96px;
+      margin-top: 16px;
       padding: 16px;
-      gap: 8px;
+      gap: 6px;
     }
 
     .progress-track {
@@ -680,6 +681,7 @@
     }
   </style>
 </head>
+
 <body>
   <header class="app-header">
     <h1 class="app-title">MasterGo to Figma</h1>
@@ -688,9 +690,9 @@
   <main>
     <section class="card file-state-card hidden" id="fileState">
       <div class="compact-row">
-        <div class="card-title">导入文件</div>
+        <div class="card-title">导入</div>
         <span class="file-name" id="fileNameState"></span>
-        <button class="icon-button" id="deleteZip" type="button" title="移除导入文件">×</button>
+        <button class="icon-button" id="deleteZip" type="button" title="移除文件">×</button>
       </div>
     </section>
 
@@ -826,7 +828,7 @@
 
       try {
         setBusy(true);
-        
+
         // Initialize merged manifest
         const mergedManifest = {
           schema: "mastergo2figma.package.v2",
@@ -847,29 +849,29 @@
         // Reset global entries
         entries = {};
         const fileNames = [];
-        
+
         for (let i = 0; i < files.length; i++) {
           const file = files[i];
           fileNames.push(file.name);
-          
+
           setProgress(0, 0, `正在解析 (${i + 1}/${files.length}): ${file.name}...`);
-          
+
           const buffer = await file.arrayBuffer();
           const zipEntries = await readZipEntries(buffer);
-          
+
           const manifestPath = findManifestPath(zipEntries);
           if (!manifestPath) {
             throw new Error(`文件 "${file.name}" 中没有 manifest.json`);
           }
-          
+
           const zipPackageRoot = manifestPath.slice(0, manifestPath.length - "manifest.json".length);
-          
+
           // Get manifest content
           const manifestBytes = zipEntries[manifestPath];
           if (!manifestBytes) {
             throw new Error(`无法读取 "${file.name}" 的 manifest.json`);
           }
-          
+
           const zipManifest = JSON.parse(decodeUtf8(manifestBytes));
           if (zipManifest.schema !== "mastergo2figma.package.v2" || zipManifest.version !== 2) {
             throw new Error(`文件 "${file.name}" 不是 v2 导出包，请使用新版 SendToFigma 重新导出。`);
@@ -877,12 +879,12 @@
           if (!zipManifest.pages || !Array.isArray(zipManifest.pages)) {
             throw new Error(`文件 "${file.name}" 的 manifest.json 格式不正确`);
           }
-          
+
           // Copy entries into global entries with prefix "zip_${i}/"
           for (const path in zipEntries) {
             entries[`zip_${i}/${path}`] = zipEntries[path];
           }
-          
+
           // Merge pages
           for (const page of zipManifest.pages) {
             const mergedPage = {
@@ -894,7 +896,7 @@
             };
             mergedManifest.pages.push(mergedPage);
           }
-          
+
           // Merge assets
           if (zipManifest.assets && typeof zipManifest.assets === "object") {
             for (const key in zipManifest.assets) {
@@ -909,16 +911,16 @@
               }
             }
           }
-          
+
           // Accumulate stats
           mergedManifest.stats.pageCount += zipManifest.stats?.pageCount || zipManifest.pages.length || 0;
           mergedManifest.stats.layerCount += zipManifest.stats?.layerCount || 0;
           mergedManifest.stats.imageAssetCount += zipManifest.stats?.imageAssetCount || 0;
           mergedManifest.stats.missingImageAssetCount += zipManifest.stats?.missingImageAssetCount || 0;
         }
-        
+
         manifest = mergedManifest;
-        
+
         // Show file state
         const fileCount = files.length;
         if (fileCount === 1) {
@@ -928,17 +930,25 @@
           fileNameState.textContent = `已导入 ${fileCount} 个 zip 文件`;
           fileNameState.title = fileNames.join("\n");
         }
-        
+
         const imageAssetCount = manifest.stats.imageAssetCount || 0;
         const missingImageAssetCount = manifest.stats.missingImageAssetCount || 0;
         fileHint.textContent = `${manifest.pages.length} 个页面，${manifest.stats.layerCount || 0} 个图层，${imageAssetCount} 个图片资源${missingImageAssetCount ? `，${missingImageAssetCount} 个图片缺失` : ""}`;
-        
+
         fileDropCard.classList.add("hidden");
         fileState.classList.remove("hidden");
         renderPages(manifest.pages);
+        
+        // Resize window to show pages list cleanly
+        send({
+          type: "resize",
+          width: 400,
+          height: 630
+        });
+
         bar.style.width = "0%";
         setStatus("zip 已读取", "请选择需要还原的页面。", false);
-        
+
       } catch (error) {
         resetZipState();
         setStatus(error.message || "zip 解析失败", "请确认文件来自 SendToFigma 导出。", true);
@@ -967,6 +977,14 @@
       pageCard.classList.add("hidden");
       fileDropCard.classList.remove("hidden");
       fileState.classList.add("hidden");
+
+      // Resize window to standard size
+      send({
+        type: "resize",
+        width: 400,
+        height: 630
+      });
+
       updatePageSelection();
     }
 
@@ -1115,7 +1133,7 @@
           const bytes = getPackageEntry(fullChunkPath);
           if (!bytes) throw new Error(`缺少图层分块文件：${fullChunkPath}`);
           const chunk = JSON.parse(decodeUtf8(bytes));
-          
+
           if (chunk.schema === "mastergo2figma.layers.v2" && Array.isArray(chunk.records)) {
             for (const record of chunk.records) {
               if (record && record.id) {
@@ -1124,13 +1142,13 @@
                 if (Array.isArray(record.childIds)) {
                   record.childIds = record.childIds.map(cid => `${prefix}${cid}`);
                 }
-                
+
                 // Prefix imageRefs and connector endpoints inside props
                 if (record.props) {
                   prefixImageRefs(record.props, prefix);
                   prefixConnectorEndpointNodeIds(record.props, prefix);
                 }
-                
+
                 layers[record.id] = record;
               }
             }
@@ -1168,12 +1186,12 @@
 
           throw new Error(`图层分块格式不正确：${chunkPath}`);
         }
-        
+
         // Rewrite chunk paths in pageIndex so Figma side can trace them if needed
         if (Array.isArray(pageIndex.layerChunks)) {
           pageIndex.layerChunks = pageIndex.layerChunks.map(chunkPath => `zip_${zipIndex}/${zipPackageRoot}${chunkPath}`);
         }
-        
+
         pageIndexes.push(pageIndex);
       }
 
@@ -1311,4 +1329,5 @@
     }
   </script>
 </body>
+
 </html>
