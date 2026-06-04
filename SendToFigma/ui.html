@@ -777,7 +777,6 @@
     const TRANSFER_MODE_LOCAL_JSON_STREAM = "local-json-stream";
     const EXPORT_TARGET_LOCAL_RELAY = "local-relay";
     const DEFAULT_RELAY_URL = "http://127.0.0.1:8765";
-    const AUTO_CONTINUE_DELAY_MS = 800;
     let isBusy = false;
     let hasRules = true;
     let pages = [];
@@ -787,8 +786,6 @@
     let currentTransferMode = TRANSFER_MODE_DIRECT_ZIP;
     let operationStartMs = 0;
     let pendingExportQueue = null;
-    let autoExportSession = null;
-    let autoContinueTimer = 0;
 
     function send(pluginMessage) {
       parent.postMessage({ pluginMessage }, "*");
@@ -850,10 +847,9 @@
       bar.style.width = `${Math.max(0, Math.min(100, percent))}%`;
       status.textContent = label || "处理中...";
       status.classList.remove("error");
-      const detail = total > 0
+      summary.textContent = total > 0
         ? `${current}/${total} 个图层，${percent}% · 预计剩余 ${formatEta(current, total)}`
         : "正在准备任务...";
-      summary.textContent = withAutoSessionSummary(detail);
     }
 
     function setFileProgress(current, total, label) {
@@ -863,8 +859,7 @@
         status.textContent = label;
         status.classList.remove("error");
       }
-      const detail = total > 0 ? `${current}/${total} 个文件，${percent}%` : `${current} 个文件`;
-      summary.textContent = withAutoSessionSummary(detail);
+      summary.textContent = total > 0 ? `${current}/${total} 个文件，${percent}%` : `${current} 个文件`;
     }
 
     function formatEta(current, total) {
@@ -876,166 +871,6 @@
       const minutes = Math.floor(seconds / 60);
       const rest = seconds % 60;
       return `${minutes}m ${rest}s`;
-    }
-
-    function isAutoSessionActive() {
-      return !!(autoExportSession && autoExportSession.active);
-    }
-
-    function withAutoSessionSummary(detail) {
-      if (!isAutoSessionActive()) return detail;
-      const session = autoExportSession;
-      const currentPage = Math.min(session.completedPages + 1, session.totalPageCount);
-      return `页面 ${currentPage}/${session.totalPageCount} · ${detail} · 已完成 ${session.completedPages} 页 / ${session.completedPackages} 个 zip`;
-    }
-
-    function renderAutoExportSessionStatus(label) {
-      if (!isAutoSessionActive()) return;
-      const session = autoExportSession;
-      const currentPage = Math.min(session.completedPages + 1, session.totalPageCount);
-      status.textContent = label || `正在连续导出 ${currentPage}/${session.totalPageCount}`;
-      status.classList.remove("error");
-      summary.textContent = `已完成 ${session.completedPages}/${session.totalPageCount} 页，${session.completedPackages} 个 zip，${formatBytes(session.totalBytes)}，${session.totalLayers} 个图层`;
-    }
-
-    function createSessionId() {
-      return `session-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    }
-
-    function startAutoExportSession(pageIds, relayUrl) {
-      clearTimeout(autoContinueTimer);
-      autoExportSession = {
-        id: createSessionId(),
-        active: true,
-        relayUrl,
-        totalPageCount: pageIds.length,
-        originalPageIds: pageIds.slice(),
-        pendingPageIds: pageIds.slice(),
-        completedPages: 0,
-        completedPackages: 0,
-        batchesStarted: 0,
-        totalFiles: 0,
-        totalBytes: 0,
-        totalLayers: 0,
-        imageAssetCount: 0,
-        missingImageAssetCount: 0,
-        outputs: [],
-        startedAt: Date.now()
-      };
-      console.log("[MasterGo2Figma UI] Auto export session start", {
-        sessionId: autoExportSession.id,
-        pageCount: pageIds.length,
-        relayUrl
-      });
-      dispatchAutoExportBatch(pageIds);
-    }
-
-    async function dispatchAutoExportBatch(pageIds) {
-      if (!isAutoSessionActive()) return;
-      const session = autoExportSession;
-      const nextPageIds = (pageIds || []).filter(Boolean);
-      if (nextPageIds.length === 0) {
-        finishAutoExportSession();
-        return;
-      }
-
-      session.pendingPageIds = nextPageIds.slice();
-      session.batchesStarted += 1;
-      setBusy(true);
-      renderAutoExportSessionStatus(`正在准备第 ${Math.min(session.completedPages + 1, session.totalPageCount)}/${session.totalPageCount} 页...`);
-
-      try {
-        await ensureLocalRelayAvailable(session.relayUrl);
-      } catch (error) {
-        failAutoExportSession(error.message || "本地中继服务连接失败");
-        return;
-      }
-
-      console.log("[MasterGo2Figma UI] Auto export batch start", {
-        sessionId: session.id,
-        batchIndex: session.batchesStarted,
-        remainingPageCount: nextPageIds.length,
-        nextPageId: nextPageIds[0]
-      });
-      send({
-        type: "start-export",
-        transferMode: TRANSFER_MODE_LOCAL_JSON_STREAM,
-        relayUrl: session.relayUrl,
-        scope: "partial-pages",
-        pageIds: nextPageIds,
-        autoContinue: true,
-        sessionId: session.id,
-        batchIndex: session.batchesStarted,
-        batchTotal: session.totalPageCount
-      });
-    }
-
-    function scheduleNextAutoExportBatch(queue) {
-      if (!isAutoSessionActive()) return;
-      if (!queue || !Array.isArray(queue.pageIds) || queue.pageIds.length === 0) {
-        finishAutoExportSession();
-        return;
-      }
-      autoExportSession.pendingPageIds = queue.pageIds.slice();
-      renderAutoExportSessionStatus(`当前页完成，准备继续下一页...`);
-      clearTimeout(autoContinueTimer);
-      autoContinueTimer = setTimeout(() => {
-        dispatchAutoExportBatch(queue.pageIds);
-      }, AUTO_CONTINUE_DELAY_MS);
-    }
-
-    function noteAutoExportTransferComplete(message, outputPath) {
-      if (!isAutoSessionActive()) return;
-      const session = autoExportSession;
-      const stats = message.stats || {};
-      session.completedPackages += 1;
-      session.totalFiles += message.fileCount || 0;
-      session.totalBytes += message.totalBytes || 0;
-      if (outputPath) session.outputs.push(outputPath);
-
-      if (message.isFinal !== false) {
-        session.completedPages = Math.min(session.completedPages + 1, session.totalPageCount);
-        session.totalLayers += stats.layerCount || 0;
-        session.imageAssetCount += stats.imageAssetCount || 0;
-        session.missingImageAssetCount += stats.missingImageAssetCount || 0;
-      }
-      renderAutoExportSessionStatus(message.isFinal === false ? "当前分包已生成，继续当前页面..." : "当前页面已完成，准备下一页...");
-    }
-
-    function finishAutoExportSession() {
-      if (!autoExportSession) return;
-      const session = autoExportSession;
-      session.active = false;
-      clearTimeout(autoContinueTimer);
-      bar.style.width = "100%";
-      status.textContent = "连续导出完成";
-      status.classList.remove("error");
-      summary.textContent = `${session.completedPages}/${session.totalPageCount} 页，${session.completedPackages} 个 zip，${formatBytes(session.totalBytes)}，${session.totalLayers} 个图层`;
-      console.log("[MasterGo2Figma UI] Auto export session complete", {
-        sessionId: session.id,
-        completedPages: session.completedPages,
-        packages: session.completedPackages,
-        bytes: session.totalBytes,
-        outputs: session.outputs
-      });
-      autoExportSession = null;
-      setBusy(false);
-    }
-
-    function failAutoExportSession(message) {
-      if (autoExportSession) {
-        console.error("[MasterGo2Figma UI] Auto export session failed", {
-          sessionId: autoExportSession.id,
-          message,
-          pendingPageIds: autoExportSession.pendingPageIds
-        });
-        autoExportSession.active = false;
-      }
-      clearTimeout(autoContinueTimer);
-      status.textContent = message || "连续导出失败";
-      status.classList.add("error");
-      summary.textContent = "当前队列已保留，可修复问题后重新打开插件或再次点击开始继续。";
-      setBusy(false);
     }
 
     function formatBytes(value) {
@@ -1141,6 +976,7 @@
       operationStartMs = Date.now();
       const transferMode = getTransferMode();
       const relayUrl = normalizeRelayUrl(relayUrlInput.value);
+
       if (transferMode === TRANSFER_MODE_LOCAL_JSON_STREAM) {
         try {
           relayUrlInput.value = relayUrl;
@@ -1153,11 +989,11 @@
           setBusy(false);
           return;
         }
-        startAutoExportSession(pageIds, relayUrl);
-        return;
+        setProgress(0, 0, pageIds.length > 1 ? `正在导出 ${pageIds.length} 个页面...` : "正在启动流传输...");
       } else {
-        setProgress(0, 0, "正在启动导出...");
+        setProgress(0, 0, pageIds.length > 1 ? `正在导出 ${pageIds.length} 个页面...` : "正在启动导出...");
       }
+
       send({
         type: "start-export",
         transferMode,
@@ -1386,10 +1222,7 @@
         const stats = transfer.stats || {};
         const imageAssetCount = stats.imageAssetCount || 0;
         const missingImageAssetCount = stats.missingImageAssetCount || 0;
-        noteAutoExportTransferComplete(message, zipPath || outputDir || transfer.filename);
-        if (!isAutoSessionActive()) {
-          summary.textContent = `${zipPath || outputDir || transfer.transferId}，${stats.pageCount || 0} 个页面，${stats.layerCount || 0} 个图层，${imageAssetCount} 个图片资源${missingImageAssetCount ? `，${missingImageAssetCount} 个图片缺失` : ""}`;
-        }
+        summary.textContent = `${zipPath || outputDir || transfer.transferId}，${stats.pageCount || 0} 个页面，${stats.layerCount || 0} 个图层，${imageAssetCount} 个图片资源${missingImageAssetCount ? `，${missingImageAssetCount} 个图片缺失` : ""}`;
         success = true;
       } catch (error) {
         errorMessage = error.message || "本地流传输失败";
@@ -1401,7 +1234,8 @@
       }
 
       localRelayTransfer = null;
-      const keepBusy = success && (message.isFinal === false || isAutoSessionActive());
+      // Stay busy between segments (isFinal: false) so the UI doesn't unlock mid-export.
+      const keepBusy = success && message.isFinal === false;
       setBusy(keepBusy);
       send({
         type: "export-transfer-finished",
@@ -1411,9 +1245,6 @@
         pendingCount,
         filename: zipPath || outputDir || transfer.filename
       });
-      if (!success && autoExportSession) {
-        failAutoExportSession(errorMessage);
-      }
     }
 
     function startExportTransfer(message) {
@@ -1628,10 +1459,6 @@
 
       if (message.type === "export-queue-updated") {
         pendingExportQueue = message.exportQueue || null;
-        if (isAutoSessionActive()) {
-          scheduleNextAutoExportBatch(pendingExportQueue);
-          return;
-        }
         applyExportQueueSelection(pendingExportQueue);
         setBusy(false);
         return;
@@ -1639,9 +1466,6 @@
 
       if (message.type === "export-queue-cleared") {
         pendingExportQueue = null;
-        if (isAutoSessionActive()) {
-          finishAutoExportSession();
-        }
         return;
       }
 
@@ -1739,10 +1563,6 @@
 
       if (message.type === "error") {
         exportTransfer = null;
-        if (autoExportSession) {
-          failAutoExportSession(message.message || "导出失败");
-          return;
-        }
         status.textContent = message.message || "导出失败";
         status.classList.add("error");
         summary.textContent = "请查看插件控制台获取更多信息。";

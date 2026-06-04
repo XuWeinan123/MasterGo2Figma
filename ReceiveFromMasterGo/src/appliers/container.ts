@@ -80,6 +80,98 @@ export function createBooleanFrameFallbackProps(data: any): any {
     };
 }
 
+// ---- Native group restoration -------------------------------------------------
+// MasterGo GROUP layers used to be restored as a plain FRAME placeholder. Figma
+// has a real GroupNode, so we restore one by mirroring the boolean-tree shell
+// pattern: build a temporary frame carrying the group's transform so children
+// land in the right place, recurse the children into it, then figma.group() the
+// children and drop the shell. Falls back to keeping the frame if grouping
+// fails or there are no children.
+
+export function shouldRestoreGroupNode(data: any): boolean {
+    if (!data) return false;
+    if (data.receiveCreateOverride === "SVG" || data.svgFallback) return false;
+    return data.sourceType === "GROUP" &&
+        (data.type === "GROUP" || data.restoreType === "GROUP" || data.receiveCreateOverride === "GROUP");
+}
+
+export function createGroupShellFrameProps(data: any): any {
+    return {
+        ...data,
+        type: "FRAME",
+        restoreType: "FRAME",
+        receiveCreateOverride: "FRAME",
+        clipsContent: false,
+        geometry: clearGeometryPaint(data.geometry)
+    };
+}
+
+export async function restoreGroupNode(
+    nodeProps: any,
+    parent: PageNode | SceneNode,
+    layerRecord: ImportLayerRecord,
+    layers: { [id: string]: ImportLayerRecord },
+    restoredBefore: number,
+    totalNodes: number,
+    restoreNodeCallback: (nodeId: string, parent: PageNode | SceneNode, layers: { [id: string]: ImportLayerRecord }, restoredBefore: number, totalNodes: number) => Promise<number>,
+    applyPropertiesCallback: (node: any, data: any) => Promise<void>,
+    maybeReportProgressCallback: (current: number, total: number, label: string) => Promise<void>
+): Promise<number> {
+    const shell = figma.createFrame();
+    const shellProps = createGroupShellFrameProps(nodeProps);
+    let appended = false;
+
+    try {
+        if (!appendRestoredNode(parent, shell)) return 0;
+        appended = true;
+        await applyPropertiesCallback(shell as any, shellProps);
+    } catch (error) {
+        console.warn("Unable to create group restore shell:", nodeProps?.name || layerRecord.name, error);
+        if (appended) safeRemove(shell);
+        return 0;
+    }
+
+    let restoredCount = 1;
+    await maybeReportProgressCallback(restoredBefore + restoredCount, totalNodes, "正在还原：" + (nodeProps.name || layerRecord.name));
+
+    const childIds = nodeProps.omitChildrenOnRestore ? [] : (layerRecord.childIds || []);
+    for (const childId of childIds) {
+        restoredCount += await restoreNodeCallback(childId, shell, layers, restoredBefore + restoredCount, totalNodes);
+    }
+
+    await finalizeGroupShell(shell, nodeProps, applyPropertiesCallback);
+    return restoredCount;
+}
+
+export async function finalizeGroupShell(
+    shell: FrameNode,
+    data: any,
+    applyPropertiesCallback: (node: any, data: any) => Promise<void>
+) {
+    const parent = shell.parent;
+    const children = [...shell.children] as SceneNode[];
+
+    // No children, or nowhere to group into: keep the frame as a placeholder.
+    if (!parent || !("insertChild" in parent) || children.length < 1) {
+        safeSet(shell, "name", data.name);
+        return;
+    }
+
+    try {
+        const parentIndex = parent.children.indexOf(shell);
+        const group = figma.group(
+            children,
+            parent as BaseNode & ChildrenMixin,
+            parentIndex >= 0 ? parentIndex : parent.children.length
+        );
+        safeRemove(shell);
+        await applyPropertiesCallback(group as any, data);
+    } catch (error) {
+        console.warn("Unable to create native group, keeping frame fallback:", data?.name || data?.id || "Untitled", error);
+        safeSet(shell, "name", data.name);
+    }
+}
+
 export async function restoreBooleanOperationTree(
     nodeProps: any,
     parent: PageNode | SceneNode,

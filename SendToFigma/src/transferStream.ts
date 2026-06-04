@@ -12,20 +12,40 @@ import {
 } from "./nodeTraverser";
 import { loadAndStreamImageAsset, padNumber } from "./imageExporter";
 import { getNodeProbe } from "./serializers/universal";
+import {
+    EXPORT_TRANSFER_CHUNK_SIZE,
+    EXPORT_TEXT_CHUNK_CHAR_LIMIT,
+    EXPORT_TRANSFER_YIELD_EVERY_CHUNKS,
+    EXPORT_FILE_YIELD_EVERY_FILES,
+    LAYER_CHUNK_MAX_RECORDS,
+    LAYER_CHUNK_MAX_BYTES,
+    LAYER_CHUNK_LOG_BYTES,
+    LAYER_CHUNK_LOG_EVERY,
+    PAGE_SEGMENT_TARGET_LAYERS,
+    EXPORT_SCAN_YIELD_EVERY_NODES,
+    DEBUG_LOGGING_PAGE_INDEX_START,
+    EXPORT_FILE_ACK_TIMEOUT_MS,
+    EXPORT_TRANSFER_ACK_TIMEOUT_MS,
+} from "./exportConfig";
 
+// Feature flags and transfer-target identifiers (not tuning numbers).
 const EXPORT_TARGET_ZIP = "zip";
 const EXPORT_TARGET_LOCAL_RELAY = "local-relay";
-const EXPORT_TRANSFER_CHUNK_SIZE = 64 * 1024;
-const EXPORT_TEXT_CHUNK_CHAR_LIMIT = 4 * 1024;
 const SEND_TEXT_CHUNKS_AS_BYTES = true;
-const EXPORT_TRANSFER_YIELD_EVERY_CHUNKS = 32;
-const LAYER_CHUNK_MAX_RECORDS = 16;
-const LAYER_CHUNK_MAX_BYTES = 64 * 1024;
-const LAYER_CHUNK_LOG_BYTES = 48 * 1024;
-const PAGE_SEGMENT_TARGET_LAYERS = 8000;
 const ENABLE_IMAGE_EXPORT = true;
 const ENABLE_SPLIT_EXPORT = true;
-const DEBUG_LOGGING_PAGE_INDEX_START = 9999;
+
+// Tagged error for the UI transfer / zip-write boundary. The main thread treats
+// these as non-recoverable (it cannot retry a node when the UI side failed to
+// write or timed out), so we mark them with an explicit, stable `code` instead
+// of relying on substring matching of the human-readable message.
+export const UI_TRANSFER_ERROR_CODE = "UI_TRANSFER";
+
+export function uiTransferError(message: string): Error {
+    const error = new Error(message) as Error & { code?: string };
+    error.code = UI_TRANSFER_ERROR_CODE;
+    return error;
+}
 
 export function safeStringifyForLog(value: any): string {
     try {
@@ -85,12 +105,12 @@ export function clearPendingExportFileAck(transfer: ExportTransferState, index: 
     delete state.exportFileAckResolvers[key];
 }
 
-export function waitForExportFileAck(transfer: ExportTransferState, index: number, path: string, timeoutMs = 60000) {
+export function waitForExportFileAck(transfer: ExportTransferState, index: number, path: string, timeoutMs = EXPORT_FILE_ACK_TIMEOUT_MS) {
     return new Promise<ExportFileAck>((resolve, reject) => {
         const key = getExportFileAckKey(transfer.transferId, index);
         const timeoutId = setTimeout(() => {
             delete state.exportFileAckResolvers[key];
-            reject(new Error(`Timed out waiting for UI file ack: ${path}`));
+            reject(uiTransferError(`Timed out waiting for UI file ack: ${path}`));
         }, timeoutMs) as any as number;
         state.exportFileAckResolvers[key] = {
             resolve,
@@ -221,7 +241,7 @@ export async function streamExportFileToUI(transfer: ExportTransferState, file: 
         fileEnded = true;
         await fileAckPromise;
         state.noteExportFileTransfer(file, size, totalChunks);
-        if (index % 25 === 0) await yieldToHost();
+        if (index % EXPORT_FILE_YIELD_EVERY_FILES === 0) await yieldToHost();
     } catch (error) {
         state.logDiagnostic("error", "[MasterGo2Figma] Transfer file failed", {
             error: describeError(error),
@@ -262,7 +282,7 @@ export function resolveExportFileAck(message: any) {
     if (ack.success) {
         resolver.resolve(ack);
     } else {
-        resolver.reject(new Error(`UI failed to write ${ack.path || resolver.path}: ${ack.error || "unknown error"}; pending=${ack.pendingCount === undefined ? "unknown" : ack.pendingCount}`));
+        resolver.reject(uiTransferError(`UI failed to write ${ack.path || resolver.path}: ${ack.error || "unknown error"}; pending=${ack.pendingCount === undefined ? "unknown" : ack.pendingCount}`));
     }
 }
 
@@ -302,15 +322,15 @@ export function resolveExportTransferAck(message: any) {
     if (ack.success) {
         resolver.resolve(ack);
     } else {
-        resolver.reject(new Error(`UI zip failed for ${ack.filename || transferId}: ${ack.error || "unknown error"}; pending=${ack.pendingCount === undefined ? "unknown" : ack.pendingCount}`));
+        resolver.reject(uiTransferError(`UI zip failed for ${ack.filename || transferId}: ${ack.error || "unknown error"}; pending=${ack.pendingCount === undefined ? "unknown" : ack.pendingCount}`));
     }
 }
 
-export function waitForExportTransferAck(transfer: ExportTransferState, timeoutMs = 120000) {
+export function waitForExportTransferAck(transfer: ExportTransferState, timeoutMs = EXPORT_TRANSFER_ACK_TIMEOUT_MS) {
     return new Promise<ExportTransferAck>((resolve, reject) => {
         const timeoutId = setTimeout(() => {
             delete state.exportTransferAckResolvers[transfer.transferId];
-            reject(new Error(`Timed out waiting for UI zip ack: ${transfer.filename}`));
+            reject(uiTransferError(`Timed out waiting for UI zip ack: ${transfer.filename}`));
         }, timeoutMs) as any as number;
         state.exportTransferAckResolvers[transfer.transferId] = {
             resolve,
@@ -516,7 +536,7 @@ export async function flushLayerChunk(
         fileSize: byteCount,
         streamedBytes: transfer.streamedBytes
     });
-    if (fileIndex === 1 || fileIndex % 50 === 0 || byteCount >= LAYER_CHUNK_LOG_BYTES) {
+    if (fileIndex === 1 || fileIndex % LAYER_CHUNK_LOG_EVERY === 0 || byteCount >= LAYER_CHUNK_LOG_BYTES) {
         state.logDiagnostic("log", "[MasterGo2Figma] Layer chunk flush", {
             page: pageIndex.name,
             path,
@@ -576,7 +596,7 @@ export function slugifyPathPart(value: string) {
 export async function countNodes(node: any) {
     state.totalNodes++;
     state.processedNodes++; // countVisited equivalent
-    if (state.processedNodes % 500 === 0) await yieldToEventLoop(); // EXPORT_SCAN_YIELD_EVERY_NODES = 500
+    if (state.processedNodes % EXPORT_SCAN_YIELD_EVERY_NODES === 0) await yieldToEventLoop();
     try {
         let childNodes = getSafeExportableChildren(node);
         for (let i = 0; i < childNodes.length; i++) {

@@ -147,18 +147,10 @@
     }
     resetExportStats(options, pageCount, rootCount) {
       this.logDiagnostic("log", "[MasterGo2Figma] Export session stats reset", {
-        sessionId: options.sessionId || "",
-        autoContinue: options.autoContinue === true,
-        batchIndex: options.batchIndex || 0,
-        batchTotal: options.batchTotal || 0,
         pageCount,
         rootCount,
         transferMode: options.transferMode,
-        relayUrl: options.relayUrl || "",
-        chunkMaxRecords: 16,
-        // LAYER_CHUNK_MAX_RECORDS
-        chunkMaxBytes: 64 * 1024
-        // LAYER_CHUNK_MAX_BYTES
+        relayUrl: options.relayUrl || ""
       });
       this.totalNodes = 0;
       this.processedNodes = 0;
@@ -166,10 +158,6 @@
         startedAt: Date.now(),
         scope: options.scope,
         transferMode: options.transferMode,
-        sessionId: options.sessionId || "",
-        autoContinue: options.autoContinue === true,
-        batchIndex: options.batchIndex || 0,
-        batchTotal: options.batchTotal || 0,
         pageCount,
         rootCount,
         totalNodes: 0,
@@ -241,10 +229,6 @@
         durationMs,
         duration: formatDurationMs(durationMs),
         nodesPerSecond,
-        sessionId: this.activeExportStats.sessionId,
-        autoContinue: this.activeExportStats.autoContinue,
-        batchIndex: this.activeExportStats.batchIndex,
-        batchTotal: this.activeExportStats.batchTotal,
         scope: this.activeExportStats.scope,
         transferMode: this.activeExportStats.transferMode,
         pageCount: this.activeExportStats.pageCount,
@@ -308,7 +292,7 @@
   };
   var state = new SendToFigmaState();
 
-  // src/layerRules.ts
+  // ../shared/layerRulesConfig.ts
   var LAYER_RULES_SCHEMA = "mastergo2figma.layer-conversion-rules.v1";
   var DEFAULT_LAYER_CONVERSION_CONFIG = {
     schema: LAYER_RULES_SCHEMA,
@@ -333,6 +317,8 @@
       INSTANCE: { sourceType: "INSTANCE", restoreType: "FRAME", sendStrategy: "frameLike", receiveCreate: "FRAME", isContainer: true, visualFrameSource: true }
     }
   };
+
+  // src/layerRules.ts
   function createLayerRuleIndex(config) {
     const result = {};
     for (const sourceType in config.rules) {
@@ -445,7 +431,6 @@
       "scaleMode": normalizeImageScaleModeForFigma(fill.scaleMode),
       "visible": (_b = fill.isVisible) != null ? _b : true
     };
-    if (fill.filters) result.filters = state.cachedLayerRules ? state.cachedLayerRules.config.rules["RECTANGLE"] : void 0;
     if (fill.filters) result.filters = fill.filters;
     if (fill.rotation !== void 0) result.rotation = finiteNumber(fill.rotation, 0);
     if (fill.ratio !== void 0) result.ratio = finiteNumber(fill.ratio, 1);
@@ -624,6 +609,27 @@
     const m1234 = matrixMultiplication(m123, m4);
     return [m1234[0], m1234[1]];
   }
+  function getResultArrayByThreePoints(points) {
+    if (points === void 0 || points.length < 2) {
+      return [[0, 1, 0], [-1, 0, 1]];
+    }
+    const p0 = cloneVector2(points[0]);
+    const p1 = cloneVector2(points[1]);
+    const ux = p1.x - p0.x, uy = p1.y - p0.y;
+    const p2 = points.length >= 3 ? cloneVector2(points[2]) : { x: p0.x - uy, y: p0.y + ux };
+    const vx = p2.x - p0.x, vy = p2.y - p0.y;
+    const det = ux * vy - vx * uy;
+    if (!Number.isFinite(det) || Math.abs(det) < 1e-9) {
+      return [[0, 1, 0], [-1, 0, 1]];
+    }
+    const inv = 0.5 / det;
+    const a00 = vy * inv, a01 = -vx * inv;
+    const a10 = -uy * inv, a11 = ux * inv;
+    const t0 = 0.5 - (a00 * p0.x + a01 * p0.y);
+    const t1 = 0.5 - (a10 * p0.x + a11 * p0.y);
+    const nz = (n) => n === 0 ? 0 : n;
+    return [[nz(a00), nz(a01), nz(t0)], [nz(a10), nz(a11), nz(t1)]];
+  }
   function processBlendMode(blendMode) {
     if (!blendMode) return "NORMAL";
     const value = String(blendMode).toUpperCase();
@@ -668,6 +674,9 @@
             "opacity": clamp01(fill.alpha, 1),
             "blendMode": processBlendMode(fill.blendMode),
             "gradientStops": cloneGradientStops(fill.gradientStops),
+            // MasterGo exposes gradientHandlePositions in 0-1 node-normalized
+            // space. getResultArrayByTwoPoint computes the Figma-compatible
+            // transform (gradient→node, forward) from those positions.
             "gradientTransform": getResultArrayByTwoPoint(fill.gradientHandlePositions || [])
           };
         } else if (fill.type === "GRADIENT_RADIAL" || fill.type === "GRADIENT_ANGULAR" || fill.type === "GRADIENT_DIAMOND") {
@@ -677,7 +686,7 @@
             "opacity": clamp01(fill.alpha, 1),
             "blendMode": processBlendMode(fill.blendMode),
             "gradientStops": cloneGradientStops(fill.gradientStops),
-            "gradientTransform": [[0, 1, 0], [-1, 0, 1]]
+            "gradientTransform": getResultArrayByThreePoints(fill.gradientHandlePositions || [])
           };
         } else if (fill.type === "IMAGE") {
           tempResultFill = createImageFillJson(fill);
@@ -713,7 +722,7 @@
             "opacity": clamp01(stroke.alpha, 1),
             "blendMode": processBlendMode(stroke.blendMode),
             "gradientStops": cloneGradientStops(stroke.gradientStops),
-            "gradientTransform": [[0, 1, 0], [-1, 0, 1]]
+            "gradientTransform": getResultArrayByThreePoints(stroke.gradientHandlePositions || [])
           };
         }
         if (tempResultStroke.type) resultStrokes.push(tempResultStroke);
@@ -961,18 +970,70 @@
   }
 
   // src/serializers/text.ts
+  function normalizeExportFontName(fontName) {
+    if (fontName && fontName.family === "AlibabaPuHuiTi") {
+      return { family: "Alibaba PuHuiTi", style: fontName.style };
+    }
+    return fontName;
+  }
+  function parseTextStyleRange(entry, charLength) {
+    if (!entry || typeof entry !== "object") return null;
+    const range = entry.range && typeof entry.range === "object" ? entry.range : entry;
+    let start;
+    let end;
+    if (typeof range.startIndex === "number" && typeof range.endIndex === "number") {
+      start = range.startIndex;
+      end = range.endIndex;
+    } else if (typeof range.start === "number" && typeof range.end === "number") {
+      start = range.start;
+      end = range.end;
+    } else if (typeof range.start === "number" && typeof range.length === "number") {
+      start = range.start;
+      end = range.start + range.length;
+    }
+    if (start === void 0 || end === void 0) return null;
+    start = Math.max(0, Math.floor(start));
+    end = Math.min(charLength, Math.floor(end));
+    if (!(end > start)) return null;
+    return { start, end };
+  }
+  function buildStyledTextSegment(entry, range) {
+    const style = entry.textStyle || {};
+    const segment = {
+      start: range.start,
+      end: range.end,
+      fontName: normalizeExportFontName(cloneJsonCompatible(style.fontName, void 0)),
+      fontSize: style.fontSize,
+      fontWeight: style.fontWeight,
+      textCase: style.textCase,
+      textDecoration: style.textDecoration,
+      letterSpacing: cloneJsonCompatible(style.letterSpacing, style.letterSpacing),
+      lineHeight: cloneJsonCompatible(style.lineHeight, style.lineHeight)
+    };
+    const runFills = Array.isArray(entry.fills) ? entry.fills : null;
+    if (runFills && runFills.length > 0) {
+      const fills = fillsAndStrokes2Json(runFills, []).fills;
+      if (fills.length > 0) segment.fills = fills;
+    }
+    return segment;
+  }
+  function buildStyledTextSegments(textStyles, charLength) {
+    if (!Array.isArray(textStyles) || textStyles.length < 2 || charLength <= 0) return void 0;
+    const segments = [];
+    for (const entry of textStyles) {
+      const range = parseTextStyleRange(entry, charLength);
+      if (!range) continue;
+      segments.push(buildStyledTextSegment(entry, range));
+    }
+    return segments.length > 0 ? segments : void 0;
+  }
   function transTextNode(selection) {
     var _a, _b, _c;
     const universalStruct = getUniversalProperty(selection);
     const textStyles = readNodeProperty(selection, "textStyles", []);
-    let tempFontName = cloneJsonCompatible((_b = (_a = textStyles == null ? void 0 : textStyles[0]) == null ? void 0 : _a.textStyle) == null ? void 0 : _b.fontName, void 0);
-    if (tempFontName && tempFontName.family === "AlibabaPuHuiTi") {
-      tempFontName = {
-        family: "Alibaba PuHuiTi",
-        style: tempFontName.style
-      };
-    }
+    const tempFontName = normalizeExportFontName(cloneJsonCompatible((_b = (_a = textStyles == null ? void 0 : textStyles[0]) == null ? void 0 : _a.textStyle) == null ? void 0 : _b.fontName, void 0));
     const style = ((_c = textStyles == null ? void 0 : textStyles[0]) == null ? void 0 : _c.textStyle) || {};
+    const characters = readNodeProperty(selection, "characters", "");
     const otherStruct = {
       "textAlignHorizontal": readNodeProperty(selection, "textAlignHorizontal", "LEFT"),
       "textAlignVertical": readNodeProperty(selection, "textAlignVertical", "TOP"),
@@ -980,7 +1041,7 @@
       "paragraphIndent": 0,
       "paragraphSpacing": readNodeProperty(selection, "paragraphSpacing", 0),
       "autoRename": false,
-      "characters": readNodeProperty(selection, "characters", ""),
+      "characters": characters,
       "fontSize": style.fontSize,
       "fontName": tempFontName,
       "fontWeight": style.fontWeight,
@@ -989,6 +1050,8 @@
       "letterSpacing": cloneJsonCompatible(style.letterSpacing, style.letterSpacing),
       "lineHeight": cloneJsonCompatible(style.lineHeight, style.lineHeight)
     };
+    const styledTextSegments = buildStyledTextSegments(textStyles, typeof characters === "string" ? characters.length : 0);
+    if (styledTextSegments) otherStruct.styledTextSegments = styledTextSegments;
     return Object.assign(otherStruct, universalStruct);
   }
 
@@ -1172,6 +1235,30 @@
     return json;
   }
 
+  // src/exportConfig.ts
+  var EXPORT_TRANSFER_CHUNK_SIZE = 64 * 1024;
+  var EXPORT_TEXT_CHUNK_CHAR_LIMIT = 4 * 1024;
+  var EXPORT_TRANSFER_YIELD_EVERY_CHUNKS = 32;
+  var EXPORT_FILE_YIELD_EVERY_FILES = 25;
+  var LAYER_CHUNK_MAX_RECORDS = 16;
+  var LAYER_CHUNK_MAX_BYTES = 64 * 1024;
+  var LAYER_CHUNK_LOG_BYTES = 48 * 1024;
+  var LAYER_CHUNK_LOG_EVERY = 50;
+  var PAGE_SEGMENT_TARGET_LAYERS = 8e3;
+  var EXPORT_SCAN_YIELD_EVERY_NODES = 500;
+  var DEBUG_LOGGING_PAGE_INDEX_START = 9999;
+  var EXPORT_FILE_ACK_TIMEOUT_MS = 6e4;
+  var EXPORT_TRANSFER_ACK_TIMEOUT_MS = 12e4;
+  var SVG_FALLBACK_MAX_NODES = 48;
+  var SVG_FALLBACK_MAX_AREA = 64 * 1024;
+  var SVG_FALLBACK_MAX_DIMENSION = 256;
+  var SVG_FALLBACK_MAX_BYTES = 64 * 1024;
+  var SVG_FALLBACK_MAX_DOCUMENT_NODES = 5e3;
+  var STRINGIFY_PROBE_VERTEX_THRESHOLD = 1e3;
+  var STRINGIFY_PROBE_REGION_THRESHOLD = 50;
+  var STRINGIFY_PROBE_CHILD_THRESHOLD = 300;
+  var STRINGIFY_RECORD_WARN_BYTES = 48 * 1024;
+
   // src/nodeSerializer.ts
   function hasUsableVectorNetwork(vectorNetwork) {
     return !!(vectorNetwork && Array.isArray(vectorNetwork.vertices) && vectorNetwork.vertices.length > 0 && Array.isArray(vectorNetwork.segments));
@@ -1299,6 +1386,7 @@
     if (nodeJson.fontName !== void 0) nodeJson.fontName = cloneJsonCompatible(nodeJson.fontName, nodeJson.fontName);
     if (nodeJson.letterSpacing !== void 0) nodeJson.letterSpacing = cloneJsonCompatible(nodeJson.letterSpacing, nodeJson.letterSpacing);
     if (nodeJson.lineHeight !== void 0) nodeJson.lineHeight = cloneJsonCompatible(nodeJson.lineHeight, nodeJson.lineHeight);
+    if (nodeJson.styledTextSegments !== void 0) nodeJson.styledTextSegments = cloneJsonCompatible(nodeJson.styledTextSegments, nodeJson.styledTextSegments);
     return nodeJson;
   }
   function countExportableSubtreeNodes(node) {
@@ -1306,27 +1394,25 @@
     const children = getSafeExportableChildren(node);
     for (const child of children) {
       count += countExportableSubtreeNodes(child);
-      if (count > 48) return count;
+      if (count > SVG_FALLBACK_MAX_NODES) return count;
     }
     return count;
   }
   function tryExportSvgMarkup(node, label) {
     return __async(this, null, function* () {
       if (state.totalNodes === 0 && label !== "Boolean") return "";
-      if (state.totalNodes > 5e3) return "";
+      if (state.totalNodes > SVG_FALLBACK_MAX_DOCUMENT_NODES) return "";
       const subtreeNodeCount = countExportableSubtreeNodes(node);
       const width = Number(safeRead(() => node.width, 0)) || 0;
       const height = Number(safeRead(() => node.height, 0)) || 0;
       const area = Math.abs(width * height);
-      if (subtreeNodeCount <= 48 && // SVG_FALLBACK_MAX_NODES
-      area <= 64 * 1024 && // SVG_FALLBACK_MAX_AREA
-      Math.max(Math.abs(width), Math.abs(height)) <= 256) {
+      if (subtreeNodeCount <= SVG_FALLBACK_MAX_NODES && area <= SVG_FALLBACK_MAX_AREA && Math.max(Math.abs(width), Math.abs(height)) <= SVG_FALLBACK_MAX_DIMENSION) {
         try {
           state.logDebug(`    * [SVG-Export] calling exportAsync for ${node.id} (${node.type}) - name=${node.name}, dims=${width}x${height}`);
           const svg = yield node.exportAsync({ format: "SVG" });
           state.logDebug(`    * [SVG-Export] completed exportAsync for ${node.id}: bytes=${svg ? svg.length : 0}`);
           if (typeof svg === "string" && svg.trim()) {
-            if (svg.length > 64 * 1024) {
+            if (svg.length > SVG_FALLBACK_MAX_BYTES) {
               console.warn(`[MasterGo2Figma] ${label} SVG fallback skipped because SVG is too large: ${getNodeDebugLabel(node)}, bytes=${svg.length}`);
               return "";
             }
@@ -1438,8 +1524,7 @@
     const segmentCount = complexity.vectorNetwork && complexity.vectorNetwork.segments || 0;
     const regionCount = complexity.vectorNetwork && complexity.vectorNetwork.regions || 0;
     const childCount = complexity.childCount || complexity.rawChildCount || 0;
-    return vertexCount >= 1e3 || // STRINGIFY_PROBE_VERTEX_THRESHOLD
-    segmentCount >= 1e3 || regionCount >= 50 || childCount >= 300;
+    return vertexCount >= STRINGIFY_PROBE_VERTEX_THRESHOLD || segmentCount >= STRINGIFY_PROBE_VERTEX_THRESHOLD || regionCount >= STRINGIFY_PROBE_REGION_THRESHOLD || childCount >= STRINGIFY_PROBE_CHILD_THRESHOLD;
   }
   function getNodeDebugLabel(node) {
     const nodeId = safeRead(() => node.id, "");
@@ -1467,6 +1552,7 @@
   }
   function isRecoverableNodeExportError(error) {
     if (isOutOfMemoryError(error)) return false;
+    if (error && error.code === UI_TRANSFER_ERROR_CODE) return false;
     let message = "";
     try {
       message = String(error && error.message !== void 0 ? error.message : error).toLowerCase();
@@ -1578,7 +1664,7 @@
         setNodeDebug("stringify", nodeComplexity);
         let recordJson = stringifyLayerPayload(layerRecord, node, nodeComplexity);
         const recordBytes = recordJson.length;
-        if (recordBytes >= 48 * 1024) {
+        if (recordBytes >= STRINGIFY_RECORD_WARN_BYTES) {
           state.logDiagnostic("warn", "[MasterGo2Figma] Large layer record", {
             page: pageName,
             node: nodeDebug,
@@ -1764,17 +1850,15 @@
   // src/transferStream.ts
   var EXPORT_TARGET_ZIP = "zip";
   var EXPORT_TARGET_LOCAL_RELAY = "local-relay";
-  var EXPORT_TRANSFER_CHUNK_SIZE = 64 * 1024;
-  var EXPORT_TEXT_CHUNK_CHAR_LIMIT = 4 * 1024;
   var SEND_TEXT_CHUNKS_AS_BYTES = true;
-  var EXPORT_TRANSFER_YIELD_EVERY_CHUNKS = 32;
-  var LAYER_CHUNK_MAX_RECORDS = 16;
-  var LAYER_CHUNK_MAX_BYTES = 64 * 1024;
-  var LAYER_CHUNK_LOG_BYTES = 48 * 1024;
-  var PAGE_SEGMENT_TARGET_LAYERS = 8e3;
   var ENABLE_IMAGE_EXPORT = true;
   var ENABLE_SPLIT_EXPORT = true;
-  var DEBUG_LOGGING_PAGE_INDEX_START = 9999;
+  var UI_TRANSFER_ERROR_CODE = "UI_TRANSFER";
+  function uiTransferError(message) {
+    const error = new Error(message);
+    error.code = UI_TRANSFER_ERROR_CODE;
+    return error;
+  }
   function safeStringifyForLog(value) {
     try {
       return JSON.stringify(value);
@@ -1825,12 +1909,12 @@
     clearTimeout(resolver.timeoutId);
     delete state.exportFileAckResolvers[key];
   }
-  function waitForExportFileAck(transfer, index, path, timeoutMs = 6e4) {
+  function waitForExportFileAck(transfer, index, path, timeoutMs = EXPORT_FILE_ACK_TIMEOUT_MS) {
     return new Promise((resolve, reject) => {
       const key = getExportFileAckKey(transfer.transferId, index);
       const timeoutId = setTimeout(() => {
         delete state.exportFileAckResolvers[key];
-        reject(new Error(`Timed out waiting for UI file ack: ${path}`));
+        reject(uiTransferError(`Timed out waiting for UI file ack: ${path}`));
       }, timeoutMs);
       state.exportFileAckResolvers[key] = {
         resolve,
@@ -1948,7 +2032,7 @@
         fileEnded = true;
         yield fileAckPromise;
         state.noteExportFileTransfer(file, size, totalChunks);
-        if (index % 25 === 0) yield yieldToHost();
+        if (index % EXPORT_FILE_YIELD_EVERY_FILES === 0) yield yieldToHost();
       } catch (error) {
         state.logDiagnostic("error", "[MasterGo2Figma] Transfer file failed", {
           error: describeError(error),
@@ -1987,7 +2071,7 @@
     if (ack.success) {
       resolver.resolve(ack);
     } else {
-      resolver.reject(new Error(`UI failed to write ${ack.path || resolver.path}: ${ack.error || "unknown error"}; pending=${ack.pendingCount === void 0 ? "unknown" : ack.pendingCount}`));
+      resolver.reject(uiTransferError(`UI failed to write ${ack.path || resolver.path}: ${ack.error || "unknown error"}; pending=${ack.pendingCount === void 0 ? "unknown" : ack.pendingCount}`));
     }
   }
   function completeExportTransfer(transfer, manifest, isFinal = true, stats = manifest.stats) {
@@ -2017,14 +2101,14 @@
     if (ack.success) {
       resolver.resolve(ack);
     } else {
-      resolver.reject(new Error(`UI zip failed for ${ack.filename || transferId}: ${ack.error || "unknown error"}; pending=${ack.pendingCount === void 0 ? "unknown" : ack.pendingCount}`));
+      resolver.reject(uiTransferError(`UI zip failed for ${ack.filename || transferId}: ${ack.error || "unknown error"}; pending=${ack.pendingCount === void 0 ? "unknown" : ack.pendingCount}`));
     }
   }
-  function waitForExportTransferAck(transfer, timeoutMs = 12e4) {
+  function waitForExportTransferAck(transfer, timeoutMs = EXPORT_TRANSFER_ACK_TIMEOUT_MS) {
     return new Promise((resolve, reject) => {
       const timeoutId = setTimeout(() => {
         delete state.exportTransferAckResolvers[transfer.transferId];
-        reject(new Error(`Timed out waiting for UI zip ack: ${transfer.filename}`));
+        reject(uiTransferError(`Timed out waiting for UI zip ack: ${transfer.filename}`));
       }, timeoutMs);
       state.exportTransferAckResolvers[transfer.transferId] = {
         resolve,
@@ -2181,7 +2265,7 @@
         fileSize: byteCount,
         streamedBytes: transfer.streamedBytes
       });
-      if (fileIndex === 1 || fileIndex % 50 === 0 || byteCount >= LAYER_CHUNK_LOG_BYTES) {
+      if (fileIndex === 1 || fileIndex % LAYER_CHUNK_LOG_EVERY === 0 || byteCount >= LAYER_CHUNK_LOG_BYTES) {
         state.logDiagnostic("log", "[MasterGo2Figma] Layer chunk flush", {
           page: pageIndex.name,
           path,
@@ -2225,7 +2309,7 @@
     return __async(this, null, function* () {
       state.totalNodes++;
       state.processedNodes++;
-      if (state.processedNodes % 500 === 0) yield yieldToEventLoop();
+      if (state.processedNodes % EXPORT_SCAN_YIELD_EVERY_NODES === 0) yield yieldToEventLoop();
       try {
         let childNodes = getSafeExportableChildren(node);
         for (let i = 0; i < childNodes.length; i++) {
@@ -2577,7 +2661,6 @@
 
   // src/code.ts
   var EXPORT_QUEUE_CACHE_KEY = "mastergo2figma.export-queue.v1";
-  var MAX_PAGES_PER_BATCH = 1;
   try {
     showPluginUI();
   } catch (error) {
@@ -2627,31 +2710,17 @@
         scope: normalizeScope(message.scope),
         pageIds: Array.isArray(message.pageIds) ? message.pageIds : [],
         transferMode: normalizeTransferMode(message.transferMode),
-        relayUrl: typeof message.relayUrl === "string" ? message.relayUrl : void 0,
-        autoContinue: message.autoContinue === true,
-        sessionId: typeof message.sessionId === "string" ? message.sessionId : void 0,
-        batchIndex: typeof message.batchIndex === "number" ? message.batchIndex : void 0,
-        batchTotal: typeof message.batchTotal === "number" ? message.batchTotal : void 0
+        relayUrl: typeof message.relayUrl === "string" ? message.relayUrl : void 0
       };
       state.exportInProgress = true;
       try {
         const prepared = yield prepareExportRun(options);
-        state.logDiagnostic("log", "[MasterGo2Figma] Export queue plan", createPreparedExportLog(options, prepared));
+        state.logDiagnostic("log", "[MasterGo2Figma] Export start", createPreparedExportLog(options, prepared));
         yield savePendingExportQueueForRecovery(prepared);
-        state.logDiagnostic("log", "[MasterGo2Figma] Export batch start", createPreparedExportLog(options, prepared));
         const success = yield runWithUI(prepared.options);
         if (success) {
-          state.logDiagnostic("log", "[MasterGo2Figma] Export batch complete", createPreparedExportLog(options, prepared));
+          state.logDiagnostic("log", "[MasterGo2Figma] Export complete", createPreparedExportLog(options, prepared));
           yield updatePendingExportQueue(prepared);
-        } else if (prepared.remainingPageIds.length > 0) {
-          state.logDiagnostic("warn", "[MasterGo2Figma] Export queue not advanced because current run failed", {
-            sessionId: prepared.options.sessionId,
-            batchIndex: prepared.options.batchIndex,
-            batchTotal: prepared.options.batchTotal,
-            remainingPageCount: prepared.remainingPageIds.length,
-            remainingPages: summarizePageIds(prepared.remainingPageIds.slice(0, 5)),
-            debugState: state.exportDebugState
-          });
         }
       } catch (error) {
         state.logDiagnostic("error", "[MasterGo2Figma] Export run failed before completion", {
@@ -2769,20 +2838,12 @@
   }
   function createPreparedExportLog(requested, prepared) {
     return {
-      sessionId: requested.sessionId || "",
-      autoContinue: requested.autoContinue === true,
-      batchIndex: requested.batchIndex || 0,
-      batchTotal: requested.batchTotal || 0,
       scope: requested.scope,
       transferMode: requested.transferMode,
       requestedPageCount: requested.pageIds.length,
       requestedPages: summarizePageIds(requested.pageIds.slice(0, 5)),
       runPageCount: prepared.options.pageIds.length,
-      runPages: summarizePageIds(prepared.options.pageIds),
-      remainingPageCount: prepared.remainingPageIds.length,
-      remainingPages: summarizePageIds(prepared.remainingPageIds.slice(0, 5)),
-      limitedToSinglePage: prepared.limitedToSinglePage,
-      maxPagesPerBatch: MAX_PAGES_PER_BATCH
+      runPages: summarizePageIds(prepared.options.pageIds)
     };
   }
   function summarizePageIds(pageIds) {
@@ -2802,98 +2863,28 @@
         return { options, remainingPageIds: [], limitedToSinglePage: false };
       }
       const pageIds = filterExistingPageIds(options.pageIds);
-      if (pageIds.length === 0) return { options: __spreadProps(__spreadValues({}, options), { pageIds }), remainingPageIds: [], limitedToSinglePage: false };
-      if (pageIds.length > MAX_PAGES_PER_BATCH) {
-        return {
-          options: __spreadProps(__spreadValues({}, options), { pageIds: pageIds.slice(0, MAX_PAGES_PER_BATCH) }),
-          remainingPageIds: pageIds.slice(MAX_PAGES_PER_BATCH),
-          limitedToSinglePage: true
-        };
-      }
-      const pendingQueue = yield readPendingExportQueue();
-      const isQueuedNextPage = !!(pendingQueue && pendingQueue.pageIds[0] === pageIds[0]);
-      return {
-        options: __spreadProps(__spreadValues({}, options), { pageIds }),
-        remainingPageIds: isQueuedNextPage && pendingQueue ? pendingQueue.pageIds.slice(1) : [],
-        limitedToSinglePage: false
-      };
+      return { options: __spreadProps(__spreadValues({}, options), { pageIds }), remainingPageIds: [], limitedToSinglePage: false };
     });
   }
   function savePendingExportQueueForRecovery(prepared) {
     return __async(this, null, function* () {
-      if (prepared.options.scope !== "partial-pages") {
-        yield clearPendingExportQueue();
-        return;
-      }
-      const recoveryPageIds = filterExistingPageIds([
-        ...prepared.options.pageIds,
-        ...prepared.remainingPageIds
-      ]);
-      if (recoveryPageIds.length === 0) {
+      if (prepared.options.scope !== "partial-pages" || prepared.options.pageIds.length === 0) {
         yield clearPendingExportQueue();
         return;
       }
       const now = (/* @__PURE__ */ new Date()).toISOString();
-      const existing = yield readPendingExportQueue();
       const queue = {
-        pageIds: recoveryPageIds,
-        createdAt: existing && existing.createdAt ? existing.createdAt : now,
+        pageIds: prepared.options.pageIds,
+        createdAt: now,
         updatedAt: now
       };
       yield mg.clientStorage.setAsync(EXPORT_QUEUE_CACHE_KEY, queue);
-      state.logDiagnostic("log", "[MasterGo2Figma] Export recovery queue saved", {
-        sessionId: prepared.options.sessionId || "",
-        batchIndex: prepared.options.batchIndex || 0,
-        runningPages: summarizePageIds(prepared.options.pageIds),
-        recoveryPageCount: recoveryPageIds.length,
-        nextPage: summarizePageIds(recoveryPageIds.slice(0, 1))[0] || null
-      });
     });
   }
   function updatePendingExportQueue(prepared) {
     return __async(this, null, function* () {
-      if (prepared.options.scope !== "partial-pages") {
-        yield clearPendingExportQueue();
-        return;
-      }
-      const remainingPageIds = filterExistingPageIds(prepared.remainingPageIds);
-      if (remainingPageIds.length === 0) {
-        yield clearPendingExportQueue();
-        state.postUI({ type: "export-queue-cleared" });
-        if (prepared.options.scope === "partial-pages") {
-          state.logDiagnostic("log", "[MasterGo2Figma] Export queue complete", {
-            sessionId: prepared.options.sessionId || "",
-            autoContinue: prepared.options.autoContinue === true,
-            exportedPages: summarizePageIds(prepared.options.pageIds),
-            remainingPageCount: 0
-          });
-        }
-        return;
-      }
-      const now = (/* @__PURE__ */ new Date()).toISOString();
-      const existing = yield readPendingExportQueue();
-      const queue = {
-        pageIds: remainingPageIds,
-        createdAt: existing && existing.createdAt ? existing.createdAt : now,
-        updatedAt: now
-      };
-      yield mg.clientStorage.setAsync(EXPORT_QUEUE_CACHE_KEY, queue);
-      const queueStatus = createExportQueueStatus(queue);
-      state.logDiagnostic("log", "[MasterGo2Figma] Export queue saved", {
-        sessionId: prepared.options.sessionId || "",
-        autoContinue: prepared.options.autoContinue === true,
-        exportedPages: summarizePageIds(prepared.options.pageIds),
-        remainingPageCount: remainingPageIds.length,
-        nextPage: summarizePageIds(remainingPageIds.slice(0, 1))[0] || null
-      });
-      state.postUI({ type: "export-queue-updated", exportQueue: queueStatus });
-      if (!prepared.options.autoContinue) {
-        mg.notify(`\u5DF2\u5BFC\u51FA\u5F53\u524D\u9875\u9762\uFF0C\u8FD8\u5269 ${remainingPageIds.length} \u4E2A\u9875\u9762\uFF0C\u53EF\u70B9\u51FB\u5F00\u59CB\u7EE7\u7EED\u3002`, {
-          position: "bottom",
-          timeout: 5e3,
-          type: "highlight"
-        });
-      }
+      yield clearPendingExportQueue();
+      state.postUI({ type: "export-queue-cleared" });
     });
   }
   function clearPendingExportQueue() {

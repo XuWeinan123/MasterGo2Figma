@@ -10,13 +10,32 @@ export function recordRestoredNode(data: any, node: SceneNode) {
     }
 }
 
+// Light-gray placeholder shown when an image asset is missing from the package.
+// A visible SOLID fill (instead of a near-invisible 1x1 transparent image) makes
+// the loss obvious during manual review while preserving the node's dimensions.
+export const MISSING_IMAGE_PLACEHOLDER_COLOR = { r: 0.82, g: 0.83, b: 0.85 };
+
 export function normalizeImageFills(fills: any[]): any[] {
     if (!Array.isArray(fills)) return fills;
 
     return fills.map(fill => {
         if (!fill || fill.type !== "IMAGE") return fill;
 
-        const imageHash = getImageHashForFill(fill);
+        const assetName = typeof fill.imageRef === "string" ? fill.imageRef : "";
+        const imageHash = tryResolveImageHash(fill);
+
+        if (!imageHash) {
+            recordMissingImageAsset(assetName || "missing-image.png");
+            const placeholder: any = {
+                type: "SOLID",
+                color: { ...MISSING_IMAGE_PLACEHOLDER_COLOR }
+            };
+            if (fill.visible !== undefined) placeholder.visible = fill.visible;
+            if (fill.opacity !== undefined) placeholder.opacity = fill.opacity;
+            if (fill.blendMode) placeholder.blendMode = fill.blendMode;
+            return placeholder;
+        }
+
         const result: any = {
             type: "IMAGE",
             scaleMode: fill.scaleMode || "FILL",
@@ -48,24 +67,35 @@ export function normalizeImageFilters(filters: any): any {
     return Object.keys(result).length > 0 ? result : null;
 }
 
-export function getImageHashForFill(fill: any): string {
+// Resolve a Figma image hash for an image fill, or null when the asset is
+// missing/unreadable. No side effects beyond caching successfully created
+// images (callers decide how to render a missing asset).
+export function tryResolveImageHash(fill: any): string | null {
     const assetName = typeof fill.imageRef === "string" ? fill.imageRef : "";
-    if (assetName && !fill.missingAsset) {
-        const existingHash = state.imageHashByAssetName[assetName];
-        if (existingHash) return existingHash;
+    if (!assetName || fill.missingAsset) return null;
 
-        const bytes = state.activeImportAssets[assetName];
-        if (bytes) {
-            try {
-                const image = figma.createImage(bytes);
-                state.imageHashByAssetName[assetName] = image.hash;
-                return image.hash;
-            } catch (error) {
-                console.warn("Unable to create Figma image from asset:", assetName, error);
-            }
-        }
+    const existingHash = state.imageHashByAssetName[assetName];
+    if (existingHash) return existingHash;
+
+    const bytes = state.activeImportAssets[assetName];
+    if (!bytes) return null;
+
+    try {
+        const image = figma.createImage(bytes);
+        state.imageHashByAssetName[assetName] = image.hash;
+        return image.hash;
+    } catch (error) {
+        console.warn("Unable to create Figma image from asset:", assetName, error);
+        return null;
     }
+}
 
+// Backwards-compatible wrapper: resolves a hash, falling back to the legacy
+// transparent placeholder image when the asset is missing.
+export function getImageHashForFill(fill: any): string {
+    const hash = tryResolveImageHash(fill);
+    if (hash) return hash;
+    const assetName = typeof fill.imageRef === "string" ? fill.imageRef : "";
     recordMissingImageAsset(assetName || "missing-image.png");
     return getPlaceholderImageHash();
 }

@@ -57,8 +57,7 @@ export function createImageFillJson(fill: any) {
         "visible": fill.isVisible ?? true
     };
 
-    if (fill.filters) result.filters = state.cachedLayerRules ? state.cachedLayerRules.config.rules["RECTANGLE"] : undefined; // Wait, actually clone filters directly
-    if (fill.filters) result.filters = fill.filters; // Keep original filters cloning
+    if (fill.filters) result.filters = fill.filters;
     if (fill.rotation !== undefined) result.rotation = finiteNumber(fill.rotation, 0);
     if (fill.ratio !== undefined) result.ratio = finiteNumber(fill.ratio, 1);
 

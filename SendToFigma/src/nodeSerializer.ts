@@ -14,7 +14,18 @@ import { transConnectorNode } from "./serializers/connector";
 import { transFrameNode, transSectionNode, transGroupNode, transBONode, transBooleanTreeNode } from "./serializers/container";
 import { getLayerRule, getRuleRestoreType } from "./layerRules";
 import { getSafeExportableChildren } from "./nodeTraverser";
-import { appendLayerRecord } from "./transferStream";
+import { appendLayerRecord, UI_TRANSFER_ERROR_CODE } from "./transferStream";
+import {
+    SVG_FALLBACK_MAX_NODES,
+    SVG_FALLBACK_MAX_AREA,
+    SVG_FALLBACK_MAX_DIMENSION,
+    SVG_FALLBACK_MAX_BYTES,
+    SVG_FALLBACK_MAX_DOCUMENT_NODES,
+    STRINGIFY_PROBE_VERTEX_THRESHOLD,
+    STRINGIFY_PROBE_REGION_THRESHOLD,
+    STRINGIFY_PROBE_CHILD_THRESHOLD,
+    STRINGIFY_RECORD_WARN_BYTES,
+} from "./exportConfig";
 import { cloneTransform } from "../../shared/matrixUtils";
 
 export function hasUsableVectorNetwork(vectorNetwork: any): boolean {
@@ -150,6 +161,7 @@ export function sanitizeExportNodeJson(nodeJson: any) {
     if (nodeJson.fontName !== undefined) nodeJson.fontName = cloneJsonCompatible(nodeJson.fontName, nodeJson.fontName);
     if (nodeJson.letterSpacing !== undefined) nodeJson.letterSpacing = cloneJsonCompatible(nodeJson.letterSpacing, nodeJson.letterSpacing);
     if (nodeJson.lineHeight !== undefined) nodeJson.lineHeight = cloneJsonCompatible(nodeJson.lineHeight, nodeJson.lineHeight);
+    if (nodeJson.styledTextSegments !== undefined) nodeJson.styledTextSegments = cloneJsonCompatible(nodeJson.styledTextSegments, nodeJson.styledTextSegments);
     return nodeJson;
 }
 
@@ -158,29 +170,29 @@ export function countExportableSubtreeNodes(node: any): number {
     const children = getSafeExportableChildren(node);
     for (const child of children) {
         count += countExportableSubtreeNodes(child);
-        if (count > 48) return count; // SVG_FALLBACK_MAX_NODES = 48
+        if (count > SVG_FALLBACK_MAX_NODES) return count; // early exit: too many nodes for SVG fallback
     }
     return count;
 }
 
 export async function tryExportSvgMarkup(node: SceneNode, label: string): Promise<string> {
     if (state.totalNodes === 0 && label !== "Boolean") return "";
-    if (state.totalNodes > 5000) return ""; // SVG_FALLBACK_MAX_DOCUMENT_NODES = 5000
+    if (state.totalNodes > SVG_FALLBACK_MAX_DOCUMENT_NODES) return ""; // document too large to rasterize
 
     const subtreeNodeCount = countExportableSubtreeNodes(node);
     const width = Number(safeRead(() => node.width, 0)) || 0;
     const height = Number(safeRead(() => node.height, 0)) || 0;
     const area = Math.abs(width * height);
 
-    if (subtreeNodeCount <= 48 && // SVG_FALLBACK_MAX_NODES
-        area <= 64 * 1024 && // SVG_FALLBACK_MAX_AREA
-        Math.max(Math.abs(width), Math.abs(height)) <= 256) { // SVG_FALLBACK_MAX_DIMENSION
+    if (subtreeNodeCount <= SVG_FALLBACK_MAX_NODES &&
+        area <= SVG_FALLBACK_MAX_AREA &&
+        Math.max(Math.abs(width), Math.abs(height)) <= SVG_FALLBACK_MAX_DIMENSION) {
         try {
             state.logDebug(`    * [SVG-Export] calling exportAsync for ${node.id} (${node.type}) - name=${node.name}, dims=${width}x${height}`);
             const svg = await (node as any).exportAsync({ format: "SVG" });
             state.logDebug(`    * [SVG-Export] completed exportAsync for ${node.id}: bytes=${svg ? svg.length : 0}`);
             if (typeof svg === "string" && svg.trim()) {
-                if (svg.length > 64 * 1024) { // SVG_FALLBACK_MAX_BYTES
+                if (svg.length > SVG_FALLBACK_MAX_BYTES) { // generated SVG markup too large
                     console.warn(`[MasterGo2Figma] ${label} SVG fallback skipped because SVG is too large: ${getNodeDebugLabel(node)}, bytes=${svg.length}`);
                     return "";
                 }
@@ -302,10 +314,10 @@ export function shouldLogStringifyProbe(complexity: any): boolean {
     const segmentCount = complexity.vectorNetwork && complexity.vectorNetwork.segments || 0;
     const regionCount = complexity.vectorNetwork && complexity.vectorNetwork.regions || 0;
     const childCount = complexity.childCount || complexity.rawChildCount || 0;
-    return vertexCount >= 1000 || // STRINGIFY_PROBE_VERTEX_THRESHOLD
-        segmentCount >= 1000 ||
-        regionCount >= 50 ||
-        childCount >= 300; // STRINGIFY_PROBE_CHILD_THRESHOLD
+    return vertexCount >= STRINGIFY_PROBE_VERTEX_THRESHOLD ||
+        segmentCount >= STRINGIFY_PROBE_VERTEX_THRESHOLD ||
+        regionCount >= STRINGIFY_PROBE_REGION_THRESHOLD ||
+        childCount >= STRINGIFY_PROBE_CHILD_THRESHOLD;
 }
 
 export function getNodeDebugLabel(node: any): string {
@@ -338,6 +350,12 @@ export function stringifyLayerPayload(payload: any, node: SceneNode, nodeComplex
 
 export function isRecoverableNodeExportError(error: any): boolean {
     if (isOutOfMemoryError(error)) return false;
+
+    // UI transfer / zip-write failures are tagged with an explicit, stable code
+    // (see transferStream.uiTransferError). These are not recoverable per-node.
+    if (error && (error as any).code === UI_TRANSFER_ERROR_CODE) return false;
+
+    // Legacy fallback for errors that predate the explicit code tagging.
     let message = "";
     try {
         message = String(error && error.message !== undefined ? error.message : error).toLowerCase();
@@ -482,7 +500,7 @@ export async function collectSingleNodeExport(
         setNodeDebug("stringify", nodeComplexity);
         let recordJson: any = stringifyLayerPayload(layerRecord, node, nodeComplexity);
         const recordBytes = recordJson.length;
-        if (recordBytes >= 48 * 1024) { // STRINGIFY_RECORD_WARN_BYTES = 48 * 1024
+        if (recordBytes >= STRINGIFY_RECORD_WARN_BYTES) {
             state.logDiagnostic("warn", "[MasterGo2Figma] Large layer record", {
                 page: pageName,
                 node: nodeDebug,

@@ -15,7 +15,6 @@ import {
 } from "../../shared/utils";
 
 const EXPORT_QUEUE_CACHE_KEY = "mastergo2figma.export-queue.v1";
-const MAX_PAGES_PER_BATCH = 1;
 
 try {
     showPluginUI();
@@ -76,32 +75,18 @@ function showPluginUI() {
             scope: normalizeScope(message.scope),
             pageIds: Array.isArray(message.pageIds) ? message.pageIds : [],
             transferMode: normalizeTransferMode(message.transferMode),
-            relayUrl: typeof message.relayUrl === "string" ? message.relayUrl : undefined,
-            autoContinue: message.autoContinue === true,
-            sessionId: typeof message.sessionId === "string" ? message.sessionId : undefined,
-            batchIndex: typeof message.batchIndex === "number" ? message.batchIndex : undefined,
-            batchTotal: typeof message.batchTotal === "number" ? message.batchTotal : undefined
+            relayUrl: typeof message.relayUrl === "string" ? message.relayUrl : undefined
         };
 
         state.exportInProgress = true;
         try {
             const prepared = await prepareExportRun(options);
-            state.logDiagnostic("log", "[MasterGo2Figma] Export queue plan", createPreparedExportLog(options, prepared));
+            state.logDiagnostic("log", "[MasterGo2Figma] Export start", createPreparedExportLog(options, prepared));
             await savePendingExportQueueForRecovery(prepared);
-            state.logDiagnostic("log", "[MasterGo2Figma] Export batch start", createPreparedExportLog(options, prepared));
             const success = await runWithUI(prepared.options);
             if (success) {
-                state.logDiagnostic("log", "[MasterGo2Figma] Export batch complete", createPreparedExportLog(options, prepared));
+                state.logDiagnostic("log", "[MasterGo2Figma] Export complete", createPreparedExportLog(options, prepared));
                 await updatePendingExportQueue(prepared);
-            } else if (prepared.remainingPageIds.length > 0) {
-                state.logDiagnostic("warn", "[MasterGo2Figma] Export queue not advanced because current run failed", {
-                    sessionId: prepared.options.sessionId,
-                    batchIndex: prepared.options.batchIndex,
-                    batchTotal: prepared.options.batchTotal,
-                    remainingPageCount: prepared.remainingPageIds.length,
-                    remainingPages: summarizePageIds(prepared.remainingPageIds.slice(0, 5)),
-                    debugState: state.exportDebugState
-                });
             }
         } catch (error) {
             state.logDiagnostic("error", "[MasterGo2Figma] Export run failed before completion", {
@@ -224,20 +209,12 @@ async function runWithUI(options: ExportOptions): Promise<boolean> {
 
 function createPreparedExportLog(requested: ExportOptions, prepared: PreparedExportRun) {
     return {
-        sessionId: requested.sessionId || "",
-        autoContinue: requested.autoContinue === true,
-        batchIndex: requested.batchIndex || 0,
-        batchTotal: requested.batchTotal || 0,
         scope: requested.scope,
         transferMode: requested.transferMode,
         requestedPageCount: requested.pageIds.length,
         requestedPages: summarizePageIds(requested.pageIds.slice(0, 5)),
         runPageCount: prepared.options.pageIds.length,
-        runPages: summarizePageIds(prepared.options.pageIds),
-        remainingPageCount: prepared.remainingPageIds.length,
-        remainingPages: summarizePageIds(prepared.remainingPageIds.slice(0, 5)),
-        limitedToSinglePage: prepared.limitedToSinglePage,
-        maxPagesPerBatch: MAX_PAGES_PER_BATCH
+        runPages: summarizePageIds(prepared.options.pageIds)
     };
 }
 
@@ -258,103 +235,32 @@ async function prepareExportRun(options: ExportOptions): Promise<PreparedExportR
         return { options, remainingPageIds: [], limitedToSinglePage: false };
     }
 
+    // All selected pages are exported in one run. No per-page batching.
     const pageIds = filterExistingPageIds(options.pageIds);
-    if (pageIds.length === 0) return { options: { ...options, pageIds }, remainingPageIds: [], limitedToSinglePage: false };
-
-    if (pageIds.length > MAX_PAGES_PER_BATCH) {
-        return {
-            options: { ...options, pageIds: pageIds.slice(0, MAX_PAGES_PER_BATCH) },
-            remainingPageIds: pageIds.slice(MAX_PAGES_PER_BATCH),
-            limitedToSinglePage: true
-        };
-    }
-
-    const pendingQueue = await readPendingExportQueue();
-    const isQueuedNextPage = !!(pendingQueue && pendingQueue.pageIds[0] === pageIds[0]);
-    return {
-        options: { ...options, pageIds },
-        remainingPageIds: isQueuedNextPage && pendingQueue ? pendingQueue.pageIds.slice(1) : [],
-        limitedToSinglePage: false
-    };
+    return { options: { ...options, pageIds }, remainingPageIds: [], limitedToSinglePage: false };
 }
 
 async function savePendingExportQueueForRecovery(prepared: PreparedExportRun) {
-    if (prepared.options.scope !== "partial-pages") {
-        await clearPendingExportQueue();
-        return;
-    }
-
-    const recoveryPageIds = filterExistingPageIds([
-        ...prepared.options.pageIds,
-        ...prepared.remainingPageIds
-    ]);
-    if (recoveryPageIds.length === 0) {
+    // Record all pages being exported so that if the plugin crashes mid-run
+    // the user can see which pages were in-flight when they next open the plugin.
+    if (prepared.options.scope !== "partial-pages" || prepared.options.pageIds.length === 0) {
         await clearPendingExportQueue();
         return;
     }
 
     const now = new Date().toISOString();
-    const existing = await readPendingExportQueue();
     const queue: PendingExportQueue = {
-        pageIds: recoveryPageIds,
-        createdAt: existing && existing.createdAt ? existing.createdAt : now,
+        pageIds: prepared.options.pageIds,
+        createdAt: now,
         updatedAt: now
     };
     await mg.clientStorage.setAsync(EXPORT_QUEUE_CACHE_KEY, queue);
-    state.logDiagnostic("log", "[MasterGo2Figma] Export recovery queue saved", {
-        sessionId: prepared.options.sessionId || "",
-        batchIndex: prepared.options.batchIndex || 0,
-        runningPages: summarizePageIds(prepared.options.pageIds),
-        recoveryPageCount: recoveryPageIds.length,
-        nextPage: summarizePageIds(recoveryPageIds.slice(0, 1))[0] || null
-    });
 }
 
 async function updatePendingExportQueue(prepared: PreparedExportRun) {
-    if (prepared.options.scope !== "partial-pages") {
-        await clearPendingExportQueue();
-        return;
-    }
-
-    const remainingPageIds = filterExistingPageIds(prepared.remainingPageIds);
-    if (remainingPageIds.length === 0) {
-        await clearPendingExportQueue();
-        state.postUI({ type: "export-queue-cleared" });
-        if (prepared.options.scope === "partial-pages") {
-            state.logDiagnostic("log", "[MasterGo2Figma] Export queue complete", {
-                sessionId: prepared.options.sessionId || "",
-                autoContinue: prepared.options.autoContinue === true,
-                exportedPages: summarizePageIds(prepared.options.pageIds),
-                remainingPageCount: 0
-            });
-        }
-        return;
-    }
-
-    const now = new Date().toISOString();
-    const existing = await readPendingExportQueue();
-    const queue: PendingExportQueue = {
-        pageIds: remainingPageIds,
-        createdAt: existing && existing.createdAt ? existing.createdAt : now,
-        updatedAt: now
-    };
-    await mg.clientStorage.setAsync(EXPORT_QUEUE_CACHE_KEY, queue);
-    const queueStatus = createExportQueueStatus(queue);
-    state.logDiagnostic("log", "[MasterGo2Figma] Export queue saved", {
-        sessionId: prepared.options.sessionId || "",
-        autoContinue: prepared.options.autoContinue === true,
-        exportedPages: summarizePageIds(prepared.options.pageIds),
-        remainingPageCount: remainingPageIds.length,
-        nextPage: summarizePageIds(remainingPageIds.slice(0, 1))[0] || null
-    });
-    state.postUI({ type: "export-queue-updated", exportQueue: queueStatus });
-    if (!prepared.options.autoContinue) {
-        mg.notify(`已导出当前页面，还剩 ${remainingPageIds.length} 个页面，可点击开始继续。`, {
-            position: "bottom",
-            timeout: 5000,
-            type: "highlight"
-        });
-    }
+    // All pages export in one run, so the queue is always clear after success.
+    await clearPendingExportQueue();
+    state.postUI({ type: "export-queue-cleared" });
 }
 
 async function clearPendingExportQueue() {

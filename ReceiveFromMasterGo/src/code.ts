@@ -21,7 +21,9 @@ import {
   shouldRestoreBooleanOperationTree,
   shouldRestoreBooleanVectorAsFrame,
   restoreBooleanOperationTree,
-  createBooleanFrameFallbackProps
+  createBooleanFrameFallbackProps,
+  shouldRestoreGroupNode,
+  restoreGroupNode
 } from "./appliers/container";
 import { yieldToEventLoop } from "../../shared/utils";
 
@@ -269,6 +271,20 @@ async function restoreImportedNode(
   let nodeProps = applyManifestLayoutToProps(layerRecord.props, layerRecord);
   if (shouldRestoreBooleanOperationTree(nodeProps)) {
     return await restoreBooleanOperationTree(
+      nodeProps,
+      parent,
+      layerRecord,
+      layers,
+      restoredBefore,
+      totalNodes,
+      restoreImportedNode,
+      applyProperties,
+      maybeReportRestoreProgress
+    );
+  }
+
+  if (shouldRestoreGroupNode(nodeProps)) {
+    return await restoreGroupNode(
       nodeProps,
       parent,
       layerRecord,

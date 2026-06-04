@@ -110,6 +110,65 @@ export function getResultArrayByTwoPoint(points: readonly any[]) {
     return [m1234[0], m1234[1]];
 }
 
+// Derive a Figma gradientTransform for radial / angular / diamond gradients
+// from the (normally 3) gradient handle positions:
+//   p0 = center of the gradient (in node-local 0..1 space)
+//   p1 = end of the primary (major) axis
+//   p2 = end of the secondary (minor) axis
+//
+// Figma's gradientTransform T maps node space INTO gradient parameter space
+// (same convention getResultArrayByTwoPoint uses for linear, which renders
+// correctly). The gradient coordinate system places the center at (0.5, 0.5),
+// the primary-axis end at (1, 0.5), and the secondary-axis end at (0.5, 1).
+//
+// We need T (node → gradient) such that:
+//   T * [p0.x, p0.y, 1] = (0.5, 0.5)   (center)
+//   T * [p1.x, p1.y, 1] = (1,   0.5)   (primary-axis end)
+//   T * [p2.x, p2.y, 1] = (0.5, 1)     (secondary-axis end)
+//
+// The linear part A satisfies A·[u v] = [[0.5,0],[0,0.5]] (u=p1-p0, v=p2-p0),
+// so A = 0.5 · inverse([u v]); translation t = (0.5,0.5) − A·p0.
+//
+// IMPORTANT: MasterGo only provides TWO handles for radial/angular/diamond
+// (center + primary-axis end). We synthesize the secondary axis as the primary
+// axis rotated 90° (p2 = p0 + rot90(p1-p0)), which yields the correct centered
+// transform. Legacy hardcoded matrix is used for missing/degenerate handles.
+export function getResultArrayByThreePoints(points: readonly any[]): number[][] {
+    if (points === undefined || points.length < 2) {
+        return [[0, 1, 0], [-1, 0, 1]];
+    }
+
+    const p0 = cloneVector2(points[0]);
+    const p1 = cloneVector2(points[1]);
+    // Primary axis vector u = p1 - p0.
+    const ux = p1.x - p0.x, uy = p1.y - p0.y;
+    // Secondary axis: use a provided 3rd handle if present, else synthesize it as
+    // u rotated +90° → (-uy, ux), so p2 = p0 + rot90(u).
+    const p2 = points.length >= 3
+        ? cloneVector2(points[2])
+        : { x: p0.x - uy, y: p0.y + ux };
+    const vx = p2.x - p0.x, vy = p2.y - p0.y;
+
+    // Degenerate: axes are collinear, gradient has zero area.
+    const det = ux * vy - vx * uy;
+    if (!Number.isFinite(det) || Math.abs(det) < 1e-9) {
+        return [[0, 1, 0], [-1, 0, 1]];
+    }
+
+    // A = 0.5 * inverse([u v]); inverse = (1/det) * [[vy, -vx], [-uy, ux]].
+    const inv = 0.5 / det;
+    const a00 = vy * inv, a01 = -vx * inv;
+    const a10 = -uy * inv, a11 = ux * inv;
+
+    // Translation t = (0.5, 0.5) - A * p0.
+    const t0 = 0.5 - (a00 * p0.x + a01 * p0.y);
+    const t1 = 0.5 - (a10 * p0.x + a11 * p0.y);
+
+    // Normalize -0 to 0 for clean, deterministic output.
+    const nz = (n: number) => (n === 0 ? 0 : n);
+    return [[nz(a00), nz(a01), nz(t0)], [nz(a10), nz(a11), nz(t1)]];
+}
+
 export function processBlendMode(blendMode: any): string {
     if (!blendMode) return "NORMAL";
     const value = String(blendMode).toUpperCase();
@@ -155,6 +214,9 @@ export function fillsAndStrokes2Json(fills: readonly any[] | any, strokes: reado
                     "opacity": clamp01(fill.alpha, 1),
                     "blendMode": processBlendMode(fill.blendMode),
                     "gradientStops": cloneGradientStops(fill.gradientStops),
+                    // MasterGo exposes gradientHandlePositions in 0-1 node-normalized
+                    // space. getResultArrayByTwoPoint computes the Figma-compatible
+                    // transform (gradient→node, forward) from those positions.
                     "gradientTransform": getResultArrayByTwoPoint(fill.gradientHandlePositions || [])
                 };
             } else if (fill.type === "GRADIENT_RADIAL" || fill.type === "GRADIENT_ANGULAR" || fill.type === "GRADIENT_DIAMOND") {
@@ -164,7 +226,7 @@ export function fillsAndStrokes2Json(fills: readonly any[] | any, strokes: reado
                     "opacity": clamp01(fill.alpha, 1),
                     "blendMode": processBlendMode(fill.blendMode),
                     "gradientStops": cloneGradientStops(fill.gradientStops),
-                    "gradientTransform": [[0, 1, 0], [-1, 0, 1]]
+                    "gradientTransform": getResultArrayByThreePoints(fill.gradientHandlePositions || [])
                 };
             } else if (fill.type === "IMAGE") {
                 tempResultFill = createImageFillJson(fill);
@@ -201,7 +263,7 @@ export function fillsAndStrokes2Json(fills: readonly any[] | any, strokes: reado
                     "opacity": clamp01(stroke.alpha, 1),
                     "blendMode": processBlendMode(stroke.blendMode),
                     "gradientStops": cloneGradientStops(stroke.gradientStops),
-                    "gradientTransform": [[0, 1, 0], [-1, 0, 1]]
+                    "gradientTransform": getResultArrayByThreePoints(stroke.gradientHandlePositions || [])
                 };
             }
             if (tempResultStroke.type) resultStrokes.push(tempResultStroke);

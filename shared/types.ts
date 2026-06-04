@@ -8,10 +8,6 @@ export type ExportOptions = {
     pageIds: string[];
     transferMode: ExportTransferMode;
     relayUrl?: string;
-    autoContinue?: boolean;
-    sessionId?: string;
-    batchIndex?: number;
-    batchTotal?: number;
 };
 
 export type PendingExportQueue = {
@@ -179,10 +175,6 @@ export type ExportPerformanceStats = {
     startedAt: number;
     scope: ExportScope;
     transferMode: ExportTransferMode;
-    sessionId: string;
-    autoContinue: boolean;
-    batchIndex: number;
-    batchTotal: number;
     pageCount: number;
     rootCount: number;
     totalNodes: number;

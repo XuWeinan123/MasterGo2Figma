@@ -164,7 +164,7 @@
   };
   var state = new RestorerState();
 
-  // src/layerRules.ts
+  // ../shared/layerRulesConfig.ts
   var LAYER_RULES_SCHEMA = "mastergo2figma.layer-conversion-rules.v1";
   var VALID_RECEIVE_CREATE_TYPES = [
     "VECTOR",
@@ -204,6 +204,8 @@
       INSTANCE: { sourceType: "INSTANCE", restoreType: "FRAME", sendStrategy: "frameLike", receiveCreate: "FRAME", isContainer: true, visualFrameSource: true }
     }
   };
+
+  // src/layerRules.ts
   function startLayerRulesLoad() {
     if (!state.layerRulesLoadPromise) {
       state.layerRulesLoadPromise = loadCachedLayerRules();
@@ -439,7 +441,55 @@ ${style}`;
       if (data.textDecoration) node.textDecoration = data.textDecoration;
       if (data.letterSpacing !== void 0) node.letterSpacing = data.letterSpacing;
       if (data.lineHeight !== void 0) node.lineHeight = data.lineHeight;
+      if (Array.isArray(data.styledTextSegments) && data.styledTextSegments.length > 0) {
+        yield applyStyledTextSegments(node, data.styledTextSegments);
+      }
     });
+  }
+  function applyStyledTextSegments(node, segments) {
+    return __async(this, null, function* () {
+      var _a, _b;
+      const charLength = node.characters.length;
+      const resolvedByKey = {};
+      for (const segment of segments) {
+        if (!segment || !segment.fontName) continue;
+        const key = getFontKey(segment.fontName.family, segment.fontName.style);
+        if (key in resolvedByKey) continue;
+        const resolved = resolveAvailableFontName(segment.fontName);
+        resolvedByKey[key] = resolved;
+        if (resolved) {
+          try {
+            yield loadFontCached(resolved);
+          } catch (error) {
+            resolvedByKey[key] = null;
+            console.warn("Unable to load run font for styled text:", segment.fontName, error);
+          }
+        }
+      }
+      for (const segment of segments) {
+        if (!segment) continue;
+        const start = Math.max(0, Math.floor((_a = segment.start) != null ? _a : 0));
+        const end = Math.min(charLength, Math.floor((_b = segment.end) != null ? _b : 0));
+        if (!(end > start)) continue;
+        const fontKey = segment.fontName ? getFontKey(segment.fontName.family, segment.fontName.style) : "";
+        const resolvedFont = fontKey ? resolvedByKey[fontKey] : null;
+        if (resolvedFont) trySetRange(() => node.setRangeFontName(start, end, resolvedFont));
+        if (typeof segment.fontSize === "number") trySetRange(() => node.setRangeFontSize(start, end, segment.fontSize));
+        if (Array.isArray(segment.fills) && segment.fills.length > 0) {
+          trySetRange(() => node.setRangeFills(start, end, segment.fills));
+        }
+        if (segment.textCase) trySetRange(() => node.setRangeTextCase(start, end, segment.textCase));
+        if (segment.textDecoration) trySetRange(() => node.setRangeTextDecoration(start, end, segment.textDecoration));
+        if (segment.letterSpacing !== void 0) trySetRange(() => node.setRangeLetterSpacing(start, end, segment.letterSpacing));
+        if (segment.lineHeight !== void 0) trySetRange(() => node.setRangeLineHeight(start, end, segment.lineHeight));
+      }
+    });
+  }
+  function trySetRange(fn) {
+    try {
+      fn();
+    } catch (error) {
+    }
   }
   function parseMissingFontTextLayerName(name) {
     const match = MISSING_FONT_NAME_PREFIX_PATTERN.exec(name);
@@ -1214,11 +1264,24 @@ ${style}`;
       state.restoredNodeIdBySourceId[sourceId] = node.id;
     }
   }
+  var MISSING_IMAGE_PLACEHOLDER_COLOR = { r: 0.82, g: 0.83, b: 0.85 };
   function normalizeImageFills(fills) {
     if (!Array.isArray(fills)) return fills;
     return fills.map((fill) => {
       if (!fill || fill.type !== "IMAGE") return fill;
-      const imageHash = getImageHashForFill(fill);
+      const assetName = typeof fill.imageRef === "string" ? fill.imageRef : "";
+      const imageHash = tryResolveImageHash(fill);
+      if (!imageHash) {
+        recordMissingImageAsset(assetName || "missing-image.png");
+        const placeholder = {
+          type: "SOLID",
+          color: __spreadValues({}, MISSING_IMAGE_PLACEHOLDER_COLOR)
+        };
+        if (fill.visible !== void 0) placeholder.visible = fill.visible;
+        if (fill.opacity !== void 0) placeholder.opacity = fill.opacity;
+        if (fill.blendMode) placeholder.blendMode = fill.blendMode;
+        return placeholder;
+      }
       const result = {
         type: "IMAGE",
         scaleMode: fill.scaleMode || "FILL",
@@ -1244,103 +1307,26 @@ ${style}`;
     }
     return Object.keys(result).length > 0 ? result : null;
   }
-  function getImageHashForFill(fill) {
+  function tryResolveImageHash(fill) {
     const assetName = typeof fill.imageRef === "string" ? fill.imageRef : "";
-    if (assetName && !fill.missingAsset) {
-      const existingHash = state.imageHashByAssetName[assetName];
-      if (existingHash) return existingHash;
-      const bytes = state.activeImportAssets[assetName];
-      if (bytes) {
-        try {
-          const image = figma.createImage(bytes);
-          state.imageHashByAssetName[assetName] = image.hash;
-          return image.hash;
-        } catch (error) {
-          console.warn("Unable to create Figma image from asset:", assetName, error);
-        }
-      }
+    if (!assetName || fill.missingAsset) return null;
+    const existingHash = state.imageHashByAssetName[assetName];
+    if (existingHash) return existingHash;
+    const bytes = state.activeImportAssets[assetName];
+    if (!bytes) return null;
+    try {
+      const image = figma.createImage(bytes);
+      state.imageHashByAssetName[assetName] = image.hash;
+      return image.hash;
+    } catch (error) {
+      console.warn("Unable to create Figma image from asset:", assetName, error);
+      return null;
     }
-    recordMissingImageAsset(assetName || "missing-image.png");
-    return getPlaceholderImageHash();
   }
   function recordMissingImageAsset(assetName) {
     if (state.missingImageAssetNames[assetName]) return;
     state.missingImageAssetNames[assetName] = true;
     state.missingImageAssetCount++;
-  }
-  function getPlaceholderImageHash() {
-    if (state.placeholderImageHash) return state.placeholderImageHash;
-    const image = figma.createImage(new Uint8Array([
-      137,
-      80,
-      78,
-      71,
-      13,
-      10,
-      26,
-      10,
-      0,
-      0,
-      0,
-      13,
-      73,
-      72,
-      68,
-      82,
-      0,
-      0,
-      0,
-      1,
-      0,
-      0,
-      0,
-      1,
-      8,
-      6,
-      0,
-      0,
-      0,
-      31,
-      21,
-      196,
-      137,
-      0,
-      0,
-      0,
-      10,
-      73,
-      68,
-      65,
-      84,
-      120,
-      156,
-      99,
-      0,
-      1,
-      0,
-      0,
-      5,
-      0,
-      1,
-      13,
-      10,
-      42,
-      180,
-      0,
-      0,
-      0,
-      0,
-      73,
-      69,
-      78,
-      68,
-      174,
-      66,
-      96,
-      130
-    ]));
-    state.placeholderImageHash = image.hash;
-    return image.hash;
   }
   function normalizeEffectsForNode(node, effects) {
     if (!Array.isArray(effects)) return effects;
@@ -1620,6 +1606,67 @@ ${style}`;
       booleanFallback: "frameContainer",
       clipsContent: false,
       geometry: clearGeometryPaint(data.geometry)
+    });
+  }
+  function shouldRestoreGroupNode(data) {
+    if (!data) return false;
+    if (data.receiveCreateOverride === "SVG" || data.svgFallback) return false;
+    return data.sourceType === "GROUP" && (data.type === "GROUP" || data.restoreType === "GROUP" || data.receiveCreateOverride === "GROUP");
+  }
+  function createGroupShellFrameProps(data) {
+    return __spreadProps(__spreadValues({}, data), {
+      type: "FRAME",
+      restoreType: "FRAME",
+      receiveCreateOverride: "FRAME",
+      clipsContent: false,
+      geometry: clearGeometryPaint(data.geometry)
+    });
+  }
+  function restoreGroupNode(nodeProps, parent, layerRecord, layers, restoredBefore, totalNodes, restoreNodeCallback, applyPropertiesCallback, maybeReportProgressCallback) {
+    return __async(this, null, function* () {
+      const shell = figma.createFrame();
+      const shellProps = createGroupShellFrameProps(nodeProps);
+      let appended = false;
+      try {
+        if (!appendRestoredNode(parent, shell)) return 0;
+        appended = true;
+        yield applyPropertiesCallback(shell, shellProps);
+      } catch (error) {
+        console.warn("Unable to create group restore shell:", (nodeProps == null ? void 0 : nodeProps.name) || layerRecord.name, error);
+        if (appended) safeRemove(shell);
+        return 0;
+      }
+      let restoredCount = 1;
+      yield maybeReportProgressCallback(restoredBefore + restoredCount, totalNodes, "\u6B63\u5728\u8FD8\u539F\uFF1A" + (nodeProps.name || layerRecord.name));
+      const childIds = nodeProps.omitChildrenOnRestore ? [] : layerRecord.childIds || [];
+      for (const childId of childIds) {
+        restoredCount += yield restoreNodeCallback(childId, shell, layers, restoredBefore + restoredCount, totalNodes);
+      }
+      yield finalizeGroupShell(shell, nodeProps, applyPropertiesCallback);
+      return restoredCount;
+    });
+  }
+  function finalizeGroupShell(shell, data, applyPropertiesCallback) {
+    return __async(this, null, function* () {
+      const parent = shell.parent;
+      const children = [...shell.children];
+      if (!parent || !("insertChild" in parent) || children.length < 1) {
+        safeSet(shell, "name", data.name);
+        return;
+      }
+      try {
+        const parentIndex = parent.children.indexOf(shell);
+        const group = figma.group(
+          children,
+          parent,
+          parentIndex >= 0 ? parentIndex : parent.children.length
+        );
+        safeRemove(shell);
+        yield applyPropertiesCallback(group, data);
+      } catch (error) {
+        console.warn("Unable to create native group, keeping frame fallback:", (data == null ? void 0 : data.name) || (data == null ? void 0 : data.id) || "Untitled", error);
+        safeSet(shell, "name", data.name);
+      }
     });
   }
   function restoreBooleanOperationTree(nodeProps, parent, layerRecord, layers, restoredBefore, totalNodes, restoreNodeCallback, applyPropertiesCallback, maybeReportProgressCallback) {
@@ -1926,6 +1973,19 @@ ${style}`;
       let nodeProps = applyManifestLayoutToProps(layerRecord.props, layerRecord);
       if (shouldRestoreBooleanOperationTree(nodeProps)) {
         return yield restoreBooleanOperationTree(
+          nodeProps,
+          parent,
+          layerRecord,
+          layers,
+          restoredBefore,
+          totalNodes,
+          restoreImportedNode,
+          applyProperties,
+          maybeReportRestoreProgress
+        );
+      }
+      if (shouldRestoreGroupNode(nodeProps)) {
+        return yield restoreGroupNode(
           nodeProps,
           parent,
           layerRecord,

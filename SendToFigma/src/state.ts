@@ -60,29 +60,19 @@ class SendToFigmaState {
 
     public resetExportStats(options: ExportOptions, pageCount: number, rootCount: number) {
         this.logDiagnostic("log", "[MasterGo2Figma] Export session stats reset", {
-            sessionId: options.sessionId || "",
-            autoContinue: options.autoContinue === true,
-            batchIndex: options.batchIndex || 0,
-            batchTotal: options.batchTotal || 0,
             pageCount,
             rootCount,
             transferMode: options.transferMode,
-            relayUrl: options.relayUrl || "",
-            chunkMaxRecords: 16, // LAYER_CHUNK_MAX_RECORDS
-            chunkMaxBytes: 64 * 1024 // LAYER_CHUNK_MAX_BYTES
+            relayUrl: options.relayUrl || ""
         });
-        
+
         this.totalNodes = 0;
         this.processedNodes = 0;
-        
+
         this.activeExportStats = {
             startedAt: Date.now(),
             scope: options.scope,
             transferMode: options.transferMode,
-            sessionId: options.sessionId || "",
-            autoContinue: options.autoContinue === true,
-            batchIndex: options.batchIndex || 0,
-            batchTotal: options.batchTotal || 0,
             pageCount,
             rootCount,
             totalNodes: 0,
@@ -158,10 +148,6 @@ class SendToFigmaState {
             durationMs,
             duration: formatDurationMs(durationMs),
             nodesPerSecond,
-            sessionId: this.activeExportStats.sessionId,
-            autoContinue: this.activeExportStats.autoContinue,
-            batchIndex: this.activeExportStats.batchIndex,
-            batchTotal: this.activeExportStats.batchTotal,
             scope: this.activeExportStats.scope,
             transferMode: this.activeExportStats.transferMode,
             pageCount: this.activeExportStats.pageCount,
