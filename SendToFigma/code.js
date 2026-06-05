@@ -970,11 +970,22 @@
   }
 
   // src/serializers/text.ts
+  var FONT_STYLE_NAME_MAP = {
+    "SemiBold": "Semi Bold",
+    "ExtraBold": "Extra Bold",
+    "ExtraLight": "Extra Light",
+    "ExtraBlack": "Extra Black",
+    "DemiBold": "Demi Bold",
+    "UltraLight": "Ultra Light",
+    "UltraBold": "Ultra Bold",
+    "UltraBlack": "Ultra Black"
+  };
   function normalizeExportFontName(fontName) {
-    if (fontName && fontName.family === "AlibabaPuHuiTi") {
-      return { family: "Alibaba PuHuiTi", style: fontName.style };
-    }
-    return fontName;
+    if (!fontName) return fontName;
+    let { family, style } = fontName;
+    if (family === "AlibabaPuHuiTi") family = "Alibaba PuHuiTi";
+    if (style && FONT_STYLE_NAME_MAP[style]) style = FONT_STYLE_NAME_MAP[style];
+    return family === fontName.family && style === fontName.style ? fontName : { family, style };
   }
   function parseTextStyleRange(entry, charLength) {
     if (!entry || typeof entry !== "object") return null;
@@ -1012,7 +1023,10 @@
     };
     const runFills = Array.isArray(entry.fills) ? entry.fills : null;
     if (runFills && runFills.length > 0) {
-      const fills = fillsAndStrokes2Json(runFills, []).fills;
+      const normalized = runFills.map(
+        (f) => f && f.blendMode === "PASS_THROUGH" ? __spreadProps(__spreadValues({}, f), { blendMode: "NORMAL" }) : f
+      );
+      const fills = fillsAndStrokes2Json(normalized, []).fills;
       if (fills.length > 0) segment.fills = fills;
     }
     return segment;

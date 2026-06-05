@@ -136,12 +136,20 @@ export function normalizeEffectsForNode(node: any, effects: any[]): any[] {
     });
 }
 
+// Figma supports effect spread on these node types. All others have the spread
+// property stripped before assignment to avoid a plugin API error.
 export function supportsEffectSpread(node: any): boolean {
     return node.type === "FRAME" ||
         node.type === "COMPONENT" ||
         node.type === "COMPONENT_SET" ||
         node.type === "INSTANCE" ||
-        node.type === "RECTANGLE";
+        node.type === "RECTANGLE" ||
+        node.type === "ELLIPSE" ||
+        node.type === "POLYGON" ||
+        node.type === "STAR" ||
+        node.type === "VECTOR" ||
+        node.type === "SECTION" ||
+        node.type === "TEXT";
 }
 
 export function normalizeConstraints(value: any): any {

@@ -1343,7 +1343,7 @@ ${style}`;
     });
   }
   function supportsEffectSpread(node) {
-    return node.type === "FRAME" || node.type === "COMPONENT" || node.type === "COMPONENT_SET" || node.type === "INSTANCE" || node.type === "RECTANGLE";
+    return node.type === "FRAME" || node.type === "COMPONENT" || node.type === "COMPONENT_SET" || node.type === "INSTANCE" || node.type === "RECTANGLE" || node.type === "ELLIPSE" || node.type === "POLYGON" || node.type === "STAR" || node.type === "VECTOR" || node.type === "SECTION" || node.type === "TEXT";
   }
   function normalizeConstraints(value) {
     if (!value || typeof value !== "object") return value;

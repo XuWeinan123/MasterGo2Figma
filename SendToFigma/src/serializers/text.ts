@@ -1,11 +1,27 @@
 import { getUniversalProperty, readNodeProperty, cloneJsonCompatible, fillsAndStrokes2Json } from "./universal";
 
-// MasterGo "AlibabaPuHuiTi" is registered in Figma as "Alibaba PuHuiTi".
+// MasterGo uses concatenated style names that Figma registers with spaces.
+// Mapping covers the most common variants; extend as needed.
+const FONT_STYLE_NAME_MAP: { [raw: string]: string } = {
+    "SemiBold":   "Semi Bold",
+    "ExtraBold":  "Extra Bold",
+    "ExtraLight": "Extra Light",
+    "ExtraBlack": "Extra Black",
+    "DemiBold":   "Demi Bold",
+    "UltraLight": "Ultra Light",
+    "UltraBold":  "Ultra Bold",
+    "UltraBlack": "Ultra Black",
+};
+
 export function normalizeExportFontName(fontName: any): any {
-    if (fontName && fontName.family === "AlibabaPuHuiTi") {
-        return { family: "Alibaba PuHuiTi", style: fontName.style };
-    }
-    return fontName;
+    if (!fontName) return fontName;
+    let { family, style } = fontName;
+    // MasterGo "AlibabaPuHuiTi" is registered in Figma as "Alibaba PuHuiTi".
+    if (family === "AlibabaPuHuiTi") family = "Alibaba PuHuiTi";
+    if (style && FONT_STYLE_NAME_MAP[style]) style = FONT_STYLE_NAME_MAP[style];
+    return family === fontName.family && style === fontName.style
+        ? fontName
+        : { family, style };
 }
 
 // Parse a [start, end) character range from a textStyles[] entry. MasterGo's
@@ -55,9 +71,14 @@ export function buildStyledTextSegment(entry: any, range: { start: number; end: 
 
     // Per-run color lives at the textStyles ENTRY level (entry.fills), NOT inside
     // entry.textStyle. Convert MasterGo SOLID fills to Figma Paint[] for setRangeFills.
+    // MasterGo defaults run fills to blendMode "PASS_THROUGH" which is only valid
+    // on layer fills, not on text-range paints — normalize to "NORMAL".
     const runFills = Array.isArray(entry.fills) ? entry.fills : null;
     if (runFills && runFills.length > 0) {
-        const fills = fillsAndStrokes2Json(runFills, []).fills;
+        const normalized = runFills.map((f: any) =>
+            f && f.blendMode === "PASS_THROUGH" ? { ...f, blendMode: "NORMAL" } : f
+        );
+        const fills = fillsAndStrokes2Json(normalized, []).fills;
         if (fills.length > 0) segment.fills = fills;
     }
 
