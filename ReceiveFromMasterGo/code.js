@@ -1265,37 +1265,48 @@ ${style}`;
     }
   }
   var MISSING_IMAGE_PLACEHOLDER_COLOR = { r: 0.82, g: 0.83, b: 0.85 };
+  function normalizeImagePaint(paint) {
+    if (!paint || paint.type !== "IMAGE") return paint;
+    const assetName = typeof paint.imageRef === "string" ? paint.imageRef : "";
+    const imageHash = tryResolveImageHash(paint);
+    if (!imageHash) {
+      recordMissingImageAsset(assetName || "missing-image.png");
+      const placeholder = {
+        type: "SOLID",
+        color: __spreadValues({}, MISSING_IMAGE_PLACEHOLDER_COLOR)
+      };
+      if (paint.visible !== void 0) placeholder.visible = paint.visible;
+      if (paint.opacity !== void 0) placeholder.opacity = paint.opacity;
+      if (paint.blendMode) placeholder.blendMode = paint.blendMode;
+      return placeholder;
+    }
+    const result = {
+      type: "IMAGE",
+      scaleMode: paint.scaleMode || "FILL",
+      imageHash
+    };
+    if (paint.visible !== void 0) result.visible = paint.visible;
+    if (paint.opacity !== void 0) result.opacity = paint.opacity;
+    if (paint.blendMode) result.blendMode = paint.blendMode;
+    const filters = normalizeImageFilters(paint.filters);
+    if (filters) result.filters = filters;
+    if (paint.rotation !== void 0) result.rotation = paint.rotation;
+    if (paint.imageTransform) result.imageTransform = paint.imageTransform;
+    if (paint.scalingFactor !== void 0) result.scalingFactor = paint.scalingFactor;
+    return result;
+  }
   function normalizeImageFills(fills) {
     if (!Array.isArray(fills)) return fills;
-    return fills.map((fill) => {
-      if (!fill || fill.type !== "IMAGE") return fill;
-      const assetName = typeof fill.imageRef === "string" ? fill.imageRef : "";
-      const imageHash = tryResolveImageHash(fill);
-      if (!imageHash) {
-        recordMissingImageAsset(assetName || "missing-image.png");
-        const placeholder = {
-          type: "SOLID",
-          color: __spreadValues({}, MISSING_IMAGE_PLACEHOLDER_COLOR)
-        };
-        if (fill.visible !== void 0) placeholder.visible = fill.visible;
-        if (fill.opacity !== void 0) placeholder.opacity = fill.opacity;
-        if (fill.blendMode) placeholder.blendMode = fill.blendMode;
-        return placeholder;
+    return fills.map(normalizeImagePaint);
+  }
+  function normalizeImageStrokes(strokes) {
+    if (!Array.isArray(strokes)) return strokes;
+    return strokes.map((stroke) => {
+      const paint = normalizeImagePaint(stroke);
+      if (paint && paint.blendMode === "PASS_THROUGH") {
+        return __spreadProps(__spreadValues({}, paint), { blendMode: "NORMAL" });
       }
-      const result = {
-        type: "IMAGE",
-        scaleMode: fill.scaleMode || "FILL",
-        imageHash
-      };
-      if (fill.visible !== void 0) result.visible = fill.visible;
-      if (fill.opacity !== void 0) result.opacity = fill.opacity;
-      if (fill.blendMode) result.blendMode = fill.blendMode;
-      const filters = normalizeImageFilters(fill.filters);
-      if (filters) result.filters = filters;
-      if (fill.rotation !== void 0) result.rotation = fill.rotation;
-      if (fill.imageTransform) result.imageTransform = fill.imageTransform;
-      if (fill.scalingFactor !== void 0) result.scalingFactor = fill.scalingFactor;
-      return result;
+      return paint;
     });
   }
   function normalizeImageFilters(filters) {
@@ -1370,6 +1381,20 @@ ${style}`;
         node.fills = fallbackFills;
       } catch (fallbackError) {
         console.warn("Unable to set fallback fills:", node.name, fallbackError, fallbackFills);
+      }
+    }
+  }
+  function safeSetStrokes(node, strokes) {
+    if (!("strokes" in node)) return;
+    try {
+      node.strokes = strokes;
+    } catch (error) {
+      console.warn("Unable to set strokes:", node.name, error, strokes);
+      const fallbackStrokes = stripImageFillExtras(strokes);
+      try {
+        node.strokes = fallbackStrokes;
+      } catch (fallbackError) {
+        console.warn("Unable to set fallback strokes:", node.name, fallbackError, fallbackStrokes);
       }
     }
   }
@@ -1482,13 +1507,7 @@ ${style}`;
       if (!isGroup && data.geometry && !data.svgFallback) {
         if (data.geometry.fills) safeSetFills(node, normalizeImageFills(data.geometry.fills));
         if (data.geometry.strokes) {
-          const normalizedStrokes = data.geometry.strokes.map((stroke) => {
-            if (stroke && stroke.blendMode === "PASS_THROUGH") {
-              return __spreadProps(__spreadValues({}, stroke), { blendMode: "NORMAL" });
-            }
-            return stroke;
-          });
-          safeSet(node, "strokes", normalizedStrokes);
+          safeSetStrokes(node, normalizeImageStrokes(data.geometry.strokes));
         }
         if (data.geometry.strokeWeight !== void 0) {
           safeSet(node, "strokeWeight", data.geometry.strokeWeight);

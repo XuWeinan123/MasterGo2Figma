@@ -15,43 +15,60 @@ export function recordRestoredNode(data: any, node: SceneNode) {
 // the loss obvious during manual review while preserving the node's dimensions.
 export const MISSING_IMAGE_PLACEHOLDER_COLOR = { r: 0.82, g: 0.83, b: 0.85 };
 
+// Resolve a single IMAGE paint into a Figma image paint, or a visible gray
+// placeholder SOLID when the asset is missing. Non-IMAGE paints pass through
+// unchanged. Used for both fills and strokes (Figma supports image strokes too).
+export function normalizeImagePaint(paint: any): any {
+    if (!paint || paint.type !== "IMAGE") return paint;
+
+    const assetName = typeof paint.imageRef === "string" ? paint.imageRef : "";
+    const imageHash = tryResolveImageHash(paint);
+
+    if (!imageHash) {
+        recordMissingImageAsset(assetName || "missing-image.png");
+        const placeholder: any = {
+            type: "SOLID",
+            color: { ...MISSING_IMAGE_PLACEHOLDER_COLOR }
+        };
+        if (paint.visible !== undefined) placeholder.visible = paint.visible;
+        if (paint.opacity !== undefined) placeholder.opacity = paint.opacity;
+        if (paint.blendMode) placeholder.blendMode = paint.blendMode;
+        return placeholder;
+    }
+
+    const result: any = {
+        type: "IMAGE",
+        scaleMode: paint.scaleMode || "FILL",
+        imageHash
+    };
+
+    if (paint.visible !== undefined) result.visible = paint.visible;
+    if (paint.opacity !== undefined) result.opacity = paint.opacity;
+    if (paint.blendMode) result.blendMode = paint.blendMode;
+    const filters = normalizeImageFilters(paint.filters);
+    if (filters) result.filters = filters;
+    if (paint.rotation !== undefined) result.rotation = paint.rotation;
+    if (paint.imageTransform) result.imageTransform = paint.imageTransform;
+    if (paint.scalingFactor !== undefined) result.scalingFactor = paint.scalingFactor;
+
+    return result;
+}
+
 export function normalizeImageFills(fills: any[]): any[] {
     if (!Array.isArray(fills)) return fills;
+    return fills.map(normalizeImagePaint);
+}
 
-    return fills.map(fill => {
-        if (!fill || fill.type !== "IMAGE") return fill;
-
-        const assetName = typeof fill.imageRef === "string" ? fill.imageRef : "";
-        const imageHash = tryResolveImageHash(fill);
-
-        if (!imageHash) {
-            recordMissingImageAsset(assetName || "missing-image.png");
-            const placeholder: any = {
-                type: "SOLID",
-                color: { ...MISSING_IMAGE_PLACEHOLDER_COLOR }
-            };
-            if (fill.visible !== undefined) placeholder.visible = fill.visible;
-            if (fill.opacity !== undefined) placeholder.opacity = fill.opacity;
-            if (fill.blendMode) placeholder.blendMode = fill.blendMode;
-            return placeholder;
+// Strokes mirror fills (image strokes are resolved the same way) but also need
+// the paint-level PASS_THROUGH → NORMAL normalization that Figma requires.
+export function normalizeImageStrokes(strokes: any[]): any[] {
+    if (!Array.isArray(strokes)) return strokes;
+    return strokes.map(stroke => {
+        const paint = normalizeImagePaint(stroke);
+        if (paint && paint.blendMode === "PASS_THROUGH") {
+            return { ...paint, blendMode: "NORMAL" };
         }
-
-        const result: any = {
-            type: "IMAGE",
-            scaleMode: fill.scaleMode || "FILL",
-            imageHash
-        };
-
-        if (fill.visible !== undefined) result.visible = fill.visible;
-        if (fill.opacity !== undefined) result.opacity = fill.opacity;
-        if (fill.blendMode) result.blendMode = fill.blendMode;
-        const filters = normalizeImageFilters(fill.filters);
-        if (filters) result.filters = filters;
-        if (fill.rotation !== undefined) result.rotation = fill.rotation;
-        if (fill.imageTransform) result.imageTransform = fill.imageTransform;
-        if (fill.scalingFactor !== undefined) result.scalingFactor = fill.scalingFactor;
-
-        return result;
+        return paint;
     });
 }
 
@@ -182,6 +199,22 @@ export function safeSetFills(node: any, fills: any[]) {
             node.fills = fallbackFills;
         } catch (fallbackError) {
             console.warn("Unable to set fallback fills:", node.name, fallbackError, fallbackFills);
+        }
+    }
+}
+
+export function safeSetStrokes(node: any, strokes: any[]) {
+    if (!("strokes" in node)) return;
+
+    try {
+        node.strokes = strokes;
+    } catch (error) {
+        console.warn("Unable to set strokes:", node.name, error, strokes);
+        const fallbackStrokes = stripImageFillExtras(strokes);
+        try {
+            node.strokes = fallbackStrokes;
+        } catch (fallbackError) {
+            console.warn("Unable to set fallback strokes:", node.name, fallbackError, fallbackStrokes);
         }
     }
 }
@@ -323,13 +356,7 @@ export async function applyUniversalProperties(node: any, data: any) {
     if (!isGroup && data.geometry && !data.svgFallback) {
         if (data.geometry.fills) safeSetFills(node, normalizeImageFills(data.geometry.fills));
         if (data.geometry.strokes) {
-            const normalizedStrokes = data.geometry.strokes.map((stroke: any) => {
-                if (stroke && stroke.blendMode === "PASS_THROUGH") {
-                    return { ...stroke, blendMode: "NORMAL" };
-                }
-                return stroke;
-            });
-            safeSet(node, "strokes", normalizedStrokes);
+            safeSetStrokes(node, normalizeImageStrokes(data.geometry.strokes));
         }
 
         if (data.geometry.strokeWeight !== undefined) {

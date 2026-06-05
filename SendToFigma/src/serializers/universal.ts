@@ -169,6 +169,87 @@ export function getResultArrayByThreePoints(points: readonly any[]): number[][] 
     return [[nz(a00), nz(a01), nz(t0)], [nz(a10), nz(a11), nz(t1)]];
 }
 
+// A well-formed 2x3 affine matrix with all-finite entries.
+export function isFiniteTransform(t: any): boolean {
+    return Array.isArray(t) && t.length >= 2 &&
+        Array.isArray(t[0]) && t[0].length >= 3 &&
+        Array.isArray(t[1]) && t[1].length >= 3 &&
+        Number.isFinite(t[0][0]) && Number.isFinite(t[0][1]) && Number.isFinite(t[0][2]) &&
+        Number.isFinite(t[1][0]) && Number.isFinite(t[1][1]) && Number.isFinite(t[1][2]);
+}
+
+// Apply a 2x3 affine matrix to a point. Returns {x, y}.
+function applyAffine(m: number[][], p: { x: number; y: number }) {
+    return {
+        x: m[0][0] * p.x + m[0][1] * p.y + m[0][2],
+        y: m[1][0] * p.x + m[1][1] * p.y + m[1][2]
+    };
+}
+
+// Invert a 2x3 affine matrix, or null when its linear part is singular.
+function invertAffine(m: number[][]): number[][] | null {
+    const a = m[0][0], b = m[0][1], e = m[0][2];
+    const c = m[1][0], d = m[1][1], f = m[1][2];
+    const det = a * d - b * c;
+    if (!Number.isFinite(det) || Math.abs(det) < 1e-12) return null;
+    const ia = d / det, ib = -b / det;
+    const ic = -c / det, id = a / det;
+    return [[ia, ib, -(ia * e + ib * f)], [ic, id, -(ic * e + id * f)]];
+}
+
+// Recover the secondary (minor) axis endpoint of a radial/angular/diamond
+// gradient in node-normalized space.
+//
+// MasterGo exposes only TWO handles (center p0 + primary-axis end p1), so the
+// minor-axis LENGTH — which controls the gradient's height — is missing from the
+// handles and lives only in paint.transform (MasterGo's node→gradient affine M).
+// Synthesizing a perpendicular axis of equal length (the previous behaviour)
+// forces a circular gradient and loses the height.
+//
+// In MasterGo's gradient space the primary handle sits at distance D from the
+// centre. The minor axis is the perpendicular direction in gradient space at the
+// same distance D; mapping that point back through M⁻¹ gives the true minor-axis
+// endpoint in node space, from which getResultArrayByThreePoints builds the
+// correct (possibly non-circular) Figma transform.
+function recoverMinorAxisEnd(p0: { x: number; y: number }, p1: { x: number; y: number }, m: number[][]): { x: number; y: number } | null {
+    const mi = invertAffine(m);
+    if (!mi) return null;
+    const qc = applyAffine(m, p0);          // centre in gradient space
+    const q1 = applyAffine(m, p1);          // primary-axis end in gradient space
+    const dx = q1.x - qc.x, dy = q1.y - qc.y;
+    if (!Number.isFinite(dx) || !Number.isFinite(dy) || (dx === 0 && dy === 0)) return null;
+    // Perpendicular of the primary vector in gradient space, same length D.
+    const perp = { x: qc.x - dy, y: qc.y + dx };
+    const end = applyAffine(mi, perp);
+    if (!Number.isFinite(end.x) || !Number.isFinite(end.y)) return null;
+    return end;
+}
+
+// Resolve the Figma gradientTransform for a MasterGo gradient paint.
+//
+// Linear gradients are fully described by their two handles, so the proven
+// getResultArrayByTwoPoint reconstruction is exact. Radial/angular/diamond need
+// the minor-axis length recovered from paint.transform (see recoverMinorAxisEnd)
+// to preserve the gradient's height; the recovered [center, major, minor] triple
+// is fed to getResultArrayByThreePoints, which emits a Figma-conforming matrix.
+// Falls back to the 2-handle reconstruction (circular) when transform is absent,
+// malformed, or degenerate.
+export function resolveGradientTransform(paint: any): number[][] {
+    const points = (paint && paint.gradientHandlePositions) || [];
+    if (paint && paint.type === "GRADIENT_LINEAR") {
+        return getResultArrayByTwoPoint(points);
+    }
+    if (points.length >= 2 && isFiniteTransform(paint && paint.transform)) {
+        const p0 = cloneVector2(points[0]);
+        const p1 = cloneVector2(points[1]);
+        const minorEnd = recoverMinorAxisEnd(p0, p1, paint.transform);
+        if (minorEnd) {
+            return getResultArrayByThreePoints([p0, p1, minorEnd]);
+        }
+    }
+    return getResultArrayByThreePoints(points);
+}
+
 export function processBlendMode(blendMode: any): string {
     if (!blendMode) return "NORMAL";
     const value = String(blendMode).toUpperCase();
@@ -214,10 +295,7 @@ export function fillsAndStrokes2Json(fills: readonly any[] | any, strokes: reado
                     "opacity": clamp01(fill.alpha, 1),
                     "blendMode": processBlendMode(fill.blendMode),
                     "gradientStops": cloneGradientStops(fill.gradientStops),
-                    // MasterGo exposes gradientHandlePositions in 0-1 node-normalized
-                    // space. getResultArrayByTwoPoint computes the Figma-compatible
-                    // transform (gradient→node, forward) from those positions.
-                    "gradientTransform": getResultArrayByTwoPoint(fill.gradientHandlePositions || [])
+                    "gradientTransform": resolveGradientTransform(fill)
                 };
             } else if (fill.type === "GRADIENT_RADIAL" || fill.type === "GRADIENT_ANGULAR" || fill.type === "GRADIENT_DIAMOND") {
                 tempResultFill = {
@@ -226,7 +304,7 @@ export function fillsAndStrokes2Json(fills: readonly any[] | any, strokes: reado
                     "opacity": clamp01(fill.alpha, 1),
                     "blendMode": processBlendMode(fill.blendMode),
                     "gradientStops": cloneGradientStops(fill.gradientStops),
-                    "gradientTransform": getResultArrayByThreePoints(fill.gradientHandlePositions || [])
+                    "gradientTransform": resolveGradientTransform(fill)
                 };
             } else if (fill.type === "IMAGE") {
                 tempResultFill = createImageFillJson(fill);
@@ -254,7 +332,7 @@ export function fillsAndStrokes2Json(fills: readonly any[] | any, strokes: reado
                     "opacity": clamp01(stroke.alpha, 1),
                     "blendMode": processBlendMode(stroke.blendMode),
                     "gradientStops": cloneGradientStops(stroke.gradientStops),
-                    "gradientTransform": getResultArrayByTwoPoint(stroke.gradientHandlePositions || [])
+                    "gradientTransform": resolveGradientTransform(stroke)
                 };
             } else if (stroke.type === "GRADIENT_RADIAL" || stroke.type === "GRADIENT_ANGULAR" || stroke.type === "GRADIENT_DIAMOND") {
                 tempResultStroke = {
@@ -263,8 +341,10 @@ export function fillsAndStrokes2Json(fills: readonly any[] | any, strokes: reado
                     "opacity": clamp01(stroke.alpha, 1),
                     "blendMode": processBlendMode(stroke.blendMode),
                     "gradientStops": cloneGradientStops(stroke.gradientStops),
-                    "gradientTransform": getResultArrayByThreePoints(stroke.gradientHandlePositions || [])
+                    "gradientTransform": resolveGradientTransform(stroke)
                 };
+            } else if (stroke.type === "IMAGE") {
+                tempResultStroke = createImageFillJson(stroke);
             }
             if (tempResultStroke.type) resultStrokes.push(tempResultStroke);
         }
