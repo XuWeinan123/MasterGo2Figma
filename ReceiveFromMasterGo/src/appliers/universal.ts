@@ -138,19 +138,47 @@ export function getPlaceholderImageHash(): string {
 
 export function normalizeEffectsForNode(node: any, effects: any[]): any[] {
     if (!Array.isArray(effects)) return effects;
-    if (supportsEffectSpread(node)) return effects;
 
     return effects.map(effect => {
-        if (!effect || (effect.type !== "DROP_SHADOW" && effect.type !== "INNER_SHADOW") || effect.spread === undefined) {
-            return effect;
-        }
+        if (!effect || typeof effect !== "object") return effect;
 
+        const copy: any = {};
+        for (const key in effect) {
+            if (key !== "spread" || supportsEffectSpread(node)) copy[key] = effect[key];
+        }
+        if (copy.visible === undefined && effect.isVisible !== undefined) copy.visible = effect.isVisible;
+        if (copy.visible === undefined) copy.visible = true;
+        if (copy.blendMode === "PASS_THROUGH") copy.blendMode = "NORMAL";
+        if (copy.type === "DROP_SHADOW" || copy.type === "INNER_SHADOW") {
+            if (copy.showShadowBehindNode === undefined) copy.showShadowBehindNode = true;
+        }
+        return copy;
+    });
+}
+
+export function safeSetEffects(node: any, effects: any[]) {
+    if (!("effects" in node)) return;
+
+    const normalized = normalizeEffectsForNode(node, effects);
+    try {
+        node.effects = normalized;
+        return;
+    } catch (_) {}
+
+    // Older plugin runtimes can reject effect spread on more node types than the
+    // typings suggest. Retry without spread so one unsupported field does not
+    // drop the entire shadow.
+    const withoutSpread = Array.isArray(normalized) ? normalized.map(effect => {
+        if (!effect || typeof effect !== "object") return effect;
         const copy: any = {};
         for (const key in effect) {
             if (key !== "spread") copy[key] = effect[key];
         }
         return copy;
-    });
+    }) : normalized;
+    try {
+        node.effects = withoutSpread;
+    } catch (_) {}
 }
 
 // Figma supports effect spread on these node types. All others have the spread
@@ -333,7 +361,7 @@ export async function applyUniversalProperties(node: any, data: any) {
         safeSet(node, "isMask", data.blend.isMask ?? false);
         safeSet(node, "blendMode", data.blend.blendMode || "NORMAL");
         if (data.blend.effects) {
-            safeSet(node, "effects", normalizeEffectsForNode(node, data.blend.effects));
+            safeSetEffects(node, data.blend.effects);
         }
     }
 

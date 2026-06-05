@@ -15,7 +15,7 @@ function newestMatchingFile(pattern) {
 
 const mgPath = path.resolve(root, process.argv[2] || newestMatchingFile(/\.mg$/i) || "插件测试.mg");
 const baselineZipPath = path.resolve(root, process.argv[3] || newestMatchingFile(/^mastergo2figma-.*\.zip$/i) || "mastergo2figma-partial-pages-2026-06-05T08-52-29-134Z.zip");
-const uiPath = path.join(root, "ReceiveFromMasterGo", "ui.html");
+const mgPackagePath = path.join(root, "ReceiveFromMasterGo", "src", "ui", "mgPackage.js");
 const textDecoder = new TextDecoder("utf-8");
 
 function decodeUtf8(bytes) {
@@ -66,28 +66,8 @@ function readZipEntries(filePath) {
   return entries;
 }
 
-function stubElement() {
-  return {
-    textContent: "",
-    innerHTML: "",
-    disabled: false,
-    checked: false,
-    value: "",
-    files: [],
-    style: {},
-    classList: { add() {}, remove() {}, toggle() {} },
-    addEventListener() {},
-    appendChild() {},
-    querySelector: stubElement,
-    querySelectorAll: () => []
-  };
-}
-
 async function convertMgWithUiDecoder() {
-  const html = fs.readFileSync(uiPath, "utf8");
-  const match = html.match(/<script>([\s\S]*?)<\/script>/);
-  if (!match) throw new Error("No script block found in ReceiveFromMasterGo/ui.html");
-
+  const mgPackageSource = fs.readFileSync(mgPackagePath, "utf8");
   const sandbox = {
     console,
     TextDecoder,
@@ -108,24 +88,13 @@ async function convertMgWithUiDecoder() {
     Promise,
     setTimeout,
     clearTimeout,
-    Blob,
-    Response,
-    DecompressionStream,
-    document: {
-      getElementById: stubElement,
-      querySelectorAll: () => [],
-      createElement: stubElement
-    },
-    window: { addEventListener() {}, onmessage: null },
-    parent: { postMessage() {} }
+    window: {}
   };
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
-  vm.runInContext(match[1], sandbox);
+  vm.runInContext(mgPackageSource, sandbox, { filename: mgPackagePath });
 
-  const buf = fs.readFileSync(mgPath);
-  let entries = await sandbox.readZipEntries(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
-  entries = sandbox.convertMgPackageToV2Entries(entries, path.basename(mgPath));
+  const entries = sandbox.window.MasterGoMg.convertMgPackageToV2Entries(readZipEntries(mgPath), path.basename(mgPath));
   return loadPackageRecords(entries);
 }
 
@@ -156,6 +125,60 @@ function summarizePaints(records, key) {
   return counts;
 }
 
+function normalizeComparableEffects(effects) {
+  if (!Array.isArray(effects)) return [];
+  return effects.map(effect => {
+    if (!effect || typeof effect !== "object") return effect;
+    const copy = { ...effect };
+    if (copy.visible === undefined && copy.isVisible !== undefined) copy.visible = copy.isVisible;
+    if (copy.visible === undefined) copy.visible = true;
+    if (copy.blendMode === "PASS_THROUGH") copy.blendMode = "NORMAL";
+    if ((copy.type === "DROP_SHADOW" || copy.type === "INNER_SHADOW") && copy.showShadowBehindNode === undefined) {
+      copy.showShadowBehindNode = true;
+    }
+    delete copy.isVisible;
+    return copy;
+  });
+}
+
+function normalizeComparablePaints(paints) {
+  if (!Array.isArray(paints)) return [];
+  return paints.map(paint => {
+    if (!paint || typeof paint !== "object") return paint;
+    const copy = JSON.parse(JSON.stringify(paint));
+    if (copy.blendMode === "NORMAL") copy.blendMode = "PASS_THROUGH";
+    normalizeTinyNumbers(copy);
+    return copy;
+  });
+}
+
+function normalizeTinyNumbers(value) {
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) {
+      if (typeof value[i] === "number") {
+        if (Math.abs(value[i]) < 1e-8) value[i] = 0;
+      } else {
+        normalizeTinyNumbers(value[i]);
+      }
+    }
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  for (const key of Object.keys(value)) {
+    if (typeof value[key] === "number") {
+      if (Math.abs(value[key]) < 1e-8) value[key] = 0;
+    } else {
+      normalizeTinyNumbers(value[key]);
+    }
+  }
+}
+
+function stableJson(value) {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (!value || typeof value !== "object") return JSON.stringify(value);
+  return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
+}
+
 function compareRecords(actual, expected) {
   const actualById = new Map(actual.records.map(record => [record.id, record]));
   const expectedById = new Map(expected.records.map(record => [record.id, record]));
@@ -167,9 +190,11 @@ function compareRecords(actual, expected) {
   const childOrderMismatches = [];
   const geometryMismatches = [];
   const transformMismatches = [];
+  const effectMismatches = [];
   const textMismatches = [];
   const fontMismatches = [];
   const vectorNetworkMismatches = [];
+  const paintMismatches = [];
 
   for (const expectedRecord of expected.records) {
     const actualRecord = actualById.get(expectedRecord.id);
@@ -215,6 +240,21 @@ function compareRecords(actual, expected) {
         }
       }
     }
+    const actualEffects = normalizeComparableEffects(actualProps.blend && actualProps.blend.effects);
+    const expectedEffects = normalizeComparableEffects(expectedProps.blend && expectedProps.blend.effects);
+    if (JSON.stringify(actualEffects) !== JSON.stringify(expectedEffects)) {
+      effectMismatches.push([expectedRecord.id, actualEffects, expectedEffects, expectedRecord.name]);
+    }
+    const actualGeometry = actualProps.geometry || {};
+    const expectedGeometry = expectedProps.geometry || {};
+    for (const paintKey of ["fills", "strokes"]) {
+      const actualPaints = normalizeComparablePaints(actualGeometry[paintKey]);
+      const expectedPaints = normalizeComparablePaints(expectedGeometry[paintKey]);
+      if (stableJson(actualPaints) !== stableJson(expectedPaints)) {
+        paintMismatches.push([expectedRecord.id, paintKey, actualPaints, expectedPaints, expectedRecord.name]);
+        break;
+      }
+    }
     if (expectedProps.type === "TEXT" || actualProps.type === "TEXT") {
       if ((actualProps.characters || "") !== (expectedProps.characters || "")) {
         textMismatches.push([expectedRecord.id, actualProps.characters, expectedProps.characters, expectedRecord.name]);
@@ -241,9 +281,11 @@ function compareRecords(actual, expected) {
     childOrderMismatches,
     geometryMismatches,
     transformMismatches,
+    effectMismatches,
     textMismatches,
     fontMismatches,
-    vectorNetworkMismatches
+    vectorNetworkMismatches,
+    paintMismatches
   };
 }
 
@@ -264,20 +306,24 @@ function compareRecords(actual, expected) {
   console.log("Child order mismatches:", diff.childOrderMismatches.length);
   console.log("Geometry mismatches:", diff.geometryMismatches.length);
   console.log("Transform mismatches:", diff.transformMismatches.length);
+  console.log("Effect mismatches:", diff.effectMismatches.length);
   console.log("Text mismatches:", diff.textMismatches.length);
   console.log("Font mismatches:", diff.fontMismatches.length);
+  console.log("Paint mismatches:", diff.paintMismatches.length);
   console.log("Vector network presence mismatches:", diff.vectorNetworkMismatches.length);
   console.log("Actual fill types:", summarizePaints(actual.records, "fills"));
   console.log("Actual stroke types:", summarizePaints(actual.records, "strokes"));
   console.log("Geometry mismatch sample:", diff.geometryMismatches.slice(0, 10));
   console.log("Transform mismatch sample:", diff.transformMismatches.slice(0, 10));
+  console.log("Effect mismatch sample:", diff.effectMismatches.slice(0, 10));
   console.log("Index mismatch sample:", diff.indexMismatches.slice(0, 10));
   console.log("Child order mismatch sample:", diff.childOrderMismatches.slice(0, 10));
   console.log("Text mismatch sample:", diff.textMismatches.slice(0, 10));
   console.log("Font mismatch sample:", diff.fontMismatches.slice(0, 10));
+  console.log("Paint mismatch sample:", diff.paintMismatches.slice(0, 10));
   console.log("Vector network mismatch sample:", diff.vectorNetworkMismatches.slice(0, 10));
 
-  if (diff.missing.length || diff.extra.length || diff.typeMismatches.length || diff.parentMismatches.length || diff.indexMismatches.length || diff.childOrderMismatches.length || diff.transformMismatches.length) {
+  if (diff.missing.length || diff.extra.length || diff.typeMismatches.length || diff.parentMismatches.length || diff.indexMismatches.length || diff.childOrderMismatches.length || diff.transformMismatches.length || diff.effectMismatches.length || diff.paintMismatches.length) {
     console.log("Missing sample:", diff.missing.slice(0, 10).map(record => [record.id, record.name]));
     console.log("Extra sample:", diff.extra.slice(0, 10).map(record => [record.id, record.name]));
     console.log("Type mismatch sample:", diff.typeMismatches.slice(0, 10));

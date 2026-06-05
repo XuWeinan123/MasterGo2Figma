@@ -1341,17 +1341,41 @@ ${style}`;
   }
   function normalizeEffectsForNode(node, effects) {
     if (!Array.isArray(effects)) return effects;
-    if (supportsEffectSpread(node)) return effects;
     return effects.map((effect) => {
-      if (!effect || effect.type !== "DROP_SHADOW" && effect.type !== "INNER_SHADOW" || effect.spread === void 0) {
-        return effect;
+      if (!effect || typeof effect !== "object") return effect;
+      const copy = {};
+      for (const key in effect) {
+        if (key !== "spread" || supportsEffectSpread(node)) copy[key] = effect[key];
       }
+      if (copy.visible === void 0 && effect.isVisible !== void 0) copy.visible = effect.isVisible;
+      if (copy.visible === void 0) copy.visible = true;
+      if (copy.blendMode === "PASS_THROUGH") copy.blendMode = "NORMAL";
+      if (copy.type === "DROP_SHADOW" || copy.type === "INNER_SHADOW") {
+        if (copy.showShadowBehindNode === void 0) copy.showShadowBehindNode = true;
+      }
+      return copy;
+    });
+  }
+  function safeSetEffects(node, effects) {
+    if (!("effects" in node)) return;
+    const normalized = normalizeEffectsForNode(node, effects);
+    try {
+      node.effects = normalized;
+      return;
+    } catch (_) {
+    }
+    const withoutSpread = Array.isArray(normalized) ? normalized.map((effect) => {
+      if (!effect || typeof effect !== "object") return effect;
       const copy = {};
       for (const key in effect) {
         if (key !== "spread") copy[key] = effect[key];
       }
       return copy;
-    });
+    }) : normalized;
+    try {
+      node.effects = withoutSpread;
+    } catch (_) {
+    }
   }
   function supportsEffectSpread(node) {
     return node.type === "FRAME" || node.type === "COMPONENT" || node.type === "COMPONENT_SET" || node.type === "INSTANCE" || node.type === "RECTANGLE" || node.type === "ELLIPSE" || node.type === "POLYGON" || node.type === "STAR" || node.type === "VECTOR" || node.type === "SECTION" || node.type === "TEXT";
@@ -1487,7 +1511,7 @@ ${style}`;
         safeSet(node, "isMask", (_d = data.blend.isMask) != null ? _d : false);
         safeSet(node, "blendMode", data.blend.blendMode || "NORMAL");
         if (data.blend.effects) {
-          safeSet(node, "effects", normalizeEffectsForNode(node, data.blend.effects));
+          safeSetEffects(node, data.blend.effects);
         }
       }
       const isGroup = node.type === "GROUP";

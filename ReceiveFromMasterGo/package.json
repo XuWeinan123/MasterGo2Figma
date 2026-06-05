@@ -4,8 +4,8 @@
   "description": "Your Figma Plugin",
   "main": "code.js",
   "scripts": {
-    "build": "tsc -p tsconfig.json --noEmit && esbuild src/code.ts --bundle --outfile=code.js --target=es6 --log-level=warning",
-    "watch": "esbuild src/code.ts --bundle --outfile=code.js --target=es6 --watch"
+    "build": "node tools/build-ui.js && tsc -p tsconfig.json --noEmit && esbuild src/code.ts --bundle --outfile=code.js --target=es6 --log-level=warning",
+    "watch": "node tools/build-ui.js && esbuild src/code.ts --bundle --outfile=code.js --target=es6 --watch"
   },
   "author": "",
   "license": "",
