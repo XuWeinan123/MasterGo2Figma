@@ -19,7 +19,7 @@ export const MISSING_IMAGE_PLACEHOLDER_COLOR = { r: 0.82, g: 0.83, b: 0.85 };
 // placeholder SOLID when the asset is missing. Non-IMAGE paints pass through
 // unchanged. Used for both fills and strokes (Figma supports image strokes too).
 export function normalizeImagePaint(paint: any): any {
-    if (!paint || paint.type !== "IMAGE") return paint;
+    if (!paint || paint.type !== "IMAGE") return normalizePaintForFigma(paint);
 
     const assetName = typeof paint.imageRef === "string" ? paint.imageRef : "";
     const imageHash = tryResolveImageHash(paint);
@@ -33,7 +33,7 @@ export function normalizeImagePaint(paint: any): any {
         if (paint.visible !== undefined) placeholder.visible = paint.visible;
         if (paint.opacity !== undefined) placeholder.opacity = paint.opacity;
         if (paint.blendMode) placeholder.blendMode = paint.blendMode;
-        return placeholder;
+        return normalizePaintForFigma(placeholder);
     }
 
     const result: any = {
@@ -51,25 +51,19 @@ export function normalizeImagePaint(paint: any): any {
     if (paint.imageTransform) result.imageTransform = paint.imageTransform;
     if (paint.scalingFactor !== undefined) result.scalingFactor = paint.scalingFactor;
 
-    return result;
+    return normalizePaintForFigma(result);
 }
 
 export function normalizeImageFills(fills: any[]): any[] {
     if (!Array.isArray(fills)) return fills;
-    return fills.map(normalizeImagePaint);
+    return fills.map(normalizeImagePaint).filter(Boolean);
 }
 
 // Strokes mirror fills (image strokes are resolved the same way) but also need
 // the paint-level PASS_THROUGH → NORMAL normalization that Figma requires.
 export function normalizeImageStrokes(strokes: any[]): any[] {
     if (!Array.isArray(strokes)) return strokes;
-    return strokes.map(stroke => {
-        const paint = normalizeImagePaint(stroke);
-        if (paint && paint.blendMode === "PASS_THROUGH") {
-            return { ...paint, blendMode: "NORMAL" };
-        }
-        return paint;
-    });
+    return strokes.map(normalizeImagePaint).filter(Boolean);
 }
 
 export function normalizeImageFilters(filters: any): any {
@@ -218,15 +212,15 @@ export function normalizeConstraintType(value: any): string | undefined {
 export function safeSetFills(node: any, fills: any[]) {
     if (!("fills" in node)) return;
 
+    const normalized = normalizePaintsForFigma(fills);
     try {
-        node.fills = fills;
+        node.fills = normalized;
     } catch (error) {
-        console.warn("Unable to set fills:", node.name, error, fills);
-        const fallbackFills = stripImageFillExtras(fills);
+        const fallbackFills = stripUnsupportedPaintExtras(normalized);
         try {
             node.fills = fallbackFills;
         } catch (fallbackError) {
-            console.warn("Unable to set fallback fills:", node.name, fallbackError, fallbackFills);
+            console.warn("Unable to set fills:", node.name, describePaintSetError(fallbackError, fallbackFills));
         }
     }
 }
@@ -234,33 +228,109 @@ export function safeSetFills(node: any, fills: any[]) {
 export function safeSetStrokes(node: any, strokes: any[]) {
     if (!("strokes" in node)) return;
 
+    const normalized = normalizePaintsForFigma(strokes);
     try {
-        node.strokes = strokes;
+        node.strokes = normalized;
     } catch (error) {
-        console.warn("Unable to set strokes:", node.name, error, strokes);
-        const fallbackStrokes = stripImageFillExtras(strokes);
+        const fallbackStrokes = stripUnsupportedPaintExtras(normalized);
         try {
             node.strokes = fallbackStrokes;
         } catch (fallbackError) {
-            console.warn("Unable to set fallback strokes:", node.name, fallbackError, fallbackStrokes);
+            console.warn("Unable to set strokes:", node.name, describePaintSetError(fallbackError, fallbackStrokes));
         }
     }
 }
 
-export function stripImageFillExtras(fills: any[]): any[] {
-    if (!Array.isArray(fills)) return fills;
+export function normalizePaintsForFigma(paints: any[]): any[] {
+    if (!Array.isArray(paints)) return paints;
+    return paints.map(normalizePaintForFigma).filter(Boolean);
+}
 
-    return fills.map(fill => {
-        if (!fill || fill.type !== "IMAGE") return fill;
-        return {
-            type: "IMAGE",
-            scaleMode: fill.scaleMode || "FILL",
-            imageHash: fill.imageHash,
-            visible: fill.visible,
-            opacity: fill.opacity,
-            blendMode: fill.blendMode
-        };
-    });
+export function normalizePaintForFigma(paint: any): any {
+    if (!paint || typeof paint !== "object") return paint;
+
+    const copy: any = {};
+    for (const key in paint) {
+        if (key === "imageRef" || key === "missingAsset" || key === "isVisible") continue;
+        if (paint[key] !== undefined) copy[key] = paint[key];
+    }
+
+    if (copy.visible === undefined && paint.isVisible !== undefined) copy.visible = paint.isVisible;
+    if (copy.visible === undefined) copy.visible = true;
+    if (copy.blendMode === "PASS_THROUGH") copy.blendMode = "NORMAL";
+    if (typeof copy.opacity === "number") copy.opacity = clamp01(copy.opacity);
+
+    if (copy.type === "SOLID") {
+        if (copy.color) copy.color = normalizePaintColor(copy.color);
+        return pickDefined(copy, ["type", "visible", "opacity", "blendMode", "color", "boundVariables"]);
+    }
+    if (copy.type === "GRADIENT_LINEAR" || copy.type === "GRADIENT_RADIAL" || copy.type === "GRADIENT_ANGULAR" || copy.type === "GRADIENT_DIAMOND") {
+        if (Array.isArray(copy.gradientStops)) copy.gradientStops = copy.gradientStops.map(normalizeGradientStop).filter(Boolean);
+        return pickDefined(copy, ["type", "visible", "opacity", "blendMode", "gradientHandlePositions", "gradientStops", "gradientTransform", "boundVariables"]);
+    }
+    if (copy.type === "IMAGE") {
+        if (!copy.imageHash) return null;
+        return pickDefined(copy, ["type", "visible", "opacity", "blendMode", "scaleMode", "imageHash", "imageTransform", "scalingFactor", "rotation", "filters", "gifRef", "boundVariables"]);
+    }
+    if (copy.type === "VIDEO") {
+        return pickDefined(copy, ["type", "visible", "opacity", "blendMode", "scaleMode", "videoHash", "videoTransform", "scalingFactor", "rotation", "filters", "boundVariables"]);
+    }
+    return copy;
+}
+
+export function stripUnsupportedPaintExtras(paints: any[]): any[] {
+    if (!Array.isArray(paints)) return paints;
+    return paints.map(paint => {
+        if (!paint || typeof paint !== "object") return paint;
+        if (paint.type === "IMAGE") {
+            return pickDefined(paint, ["type", "visible", "opacity", "blendMode", "scaleMode", "imageHash"]);
+        }
+        if (paint.type === "GRADIENT_LINEAR" || paint.type === "GRADIENT_RADIAL" || paint.type === "GRADIENT_ANGULAR" || paint.type === "GRADIENT_DIAMOND") {
+            return pickDefined(paint, ["type", "visible", "opacity", "blendMode", "gradientHandlePositions", "gradientStops"]);
+        }
+        return normalizePaintForFigma(paint);
+    }).filter(Boolean);
+}
+
+function pickDefined(value: any, keys: string[]): any {
+    const result: any = {};
+    for (const key of keys) {
+        if (value[key] !== undefined) result[key] = value[key];
+    }
+    return result;
+}
+
+function normalizeGradientStop(stop: any): any {
+    if (!stop || typeof stop !== "object") return null;
+    const result: any = {};
+    result.position = clamp01(typeof stop.position === "number" ? stop.position : 0);
+    result.color = normalizePaintColor(stop.color || {});
+    if (stop.boundVariables !== undefined) result.boundVariables = stop.boundVariables;
+    return result;
+}
+
+function normalizePaintColor(color: any): any {
+    return {
+        r: clamp01(typeof color.r === "number" ? color.r : 0),
+        g: clamp01(typeof color.g === "number" ? color.g : 0),
+        b: clamp01(typeof color.b === "number" ? color.b : 0),
+        a: clamp01(typeof color.a === "number" ? color.a : 1)
+    };
+}
+
+function clamp01(value: number): number {
+    if (!Number.isFinite(value)) return 0;
+    if (value < 0) return 0;
+    if (value > 1) return 1;
+    return value;
+}
+
+function describePaintSetError(error: any, paints: any[]): any {
+    return {
+        message: error instanceof Error ? error.message : String(error || "Unknown error"),
+        paintTypes: Array.isArray(paints) ? paints.map(paint => paint && paint.type) : [],
+        blendModes: Array.isArray(paints) ? paints.map(paint => paint && paint.blendMode).filter(Boolean) : []
+    };
 }
 
 export function isNearlyZero(value: number): boolean {

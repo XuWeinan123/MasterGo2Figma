@@ -1266,7 +1266,7 @@ ${style}`;
   }
   var MISSING_IMAGE_PLACEHOLDER_COLOR = { r: 0.82, g: 0.83, b: 0.85 };
   function normalizeImagePaint(paint) {
-    if (!paint || paint.type !== "IMAGE") return paint;
+    if (!paint || paint.type !== "IMAGE") return normalizePaintForFigma(paint);
     const assetName = typeof paint.imageRef === "string" ? paint.imageRef : "";
     const imageHash = tryResolveImageHash(paint);
     if (!imageHash) {
@@ -1278,7 +1278,7 @@ ${style}`;
       if (paint.visible !== void 0) placeholder.visible = paint.visible;
       if (paint.opacity !== void 0) placeholder.opacity = paint.opacity;
       if (paint.blendMode) placeholder.blendMode = paint.blendMode;
-      return placeholder;
+      return normalizePaintForFigma(placeholder);
     }
     const result = {
       type: "IMAGE",
@@ -1293,21 +1293,15 @@ ${style}`;
     if (paint.rotation !== void 0) result.rotation = paint.rotation;
     if (paint.imageTransform) result.imageTransform = paint.imageTransform;
     if (paint.scalingFactor !== void 0) result.scalingFactor = paint.scalingFactor;
-    return result;
+    return normalizePaintForFigma(result);
   }
   function normalizeImageFills(fills) {
     if (!Array.isArray(fills)) return fills;
-    return fills.map(normalizeImagePaint);
+    return fills.map(normalizeImagePaint).filter(Boolean);
   }
   function normalizeImageStrokes(strokes) {
     if (!Array.isArray(strokes)) return strokes;
-    return strokes.map((stroke) => {
-      const paint = normalizeImagePaint(stroke);
-      if (paint && paint.blendMode === "PASS_THROUGH") {
-        return __spreadProps(__spreadValues({}, paint), { blendMode: "NORMAL" });
-      }
-      return paint;
-    });
+    return strokes.map(normalizeImagePaint).filter(Boolean);
   }
   function normalizeImageFilters(filters) {
     if (!filters || typeof filters !== "object") return null;
@@ -1396,45 +1390,112 @@ ${style}`;
   }
   function safeSetFills(node, fills) {
     if (!("fills" in node)) return;
+    const normalized = normalizePaintsForFigma(fills);
     try {
-      node.fills = fills;
+      node.fills = normalized;
     } catch (error) {
-      console.warn("Unable to set fills:", node.name, error, fills);
-      const fallbackFills = stripImageFillExtras(fills);
+      const fallbackFills = stripUnsupportedPaintExtras(normalized);
       try {
         node.fills = fallbackFills;
       } catch (fallbackError) {
-        console.warn("Unable to set fallback fills:", node.name, fallbackError, fallbackFills);
+        console.warn("Unable to set fills:", node.name, describePaintSetError(fallbackError, fallbackFills));
       }
     }
   }
   function safeSetStrokes(node, strokes) {
     if (!("strokes" in node)) return;
+    const normalized = normalizePaintsForFigma(strokes);
     try {
-      node.strokes = strokes;
+      node.strokes = normalized;
     } catch (error) {
-      console.warn("Unable to set strokes:", node.name, error, strokes);
-      const fallbackStrokes = stripImageFillExtras(strokes);
+      const fallbackStrokes = stripUnsupportedPaintExtras(normalized);
       try {
         node.strokes = fallbackStrokes;
       } catch (fallbackError) {
-        console.warn("Unable to set fallback strokes:", node.name, fallbackError, fallbackStrokes);
+        console.warn("Unable to set strokes:", node.name, describePaintSetError(fallbackError, fallbackStrokes));
       }
     }
   }
-  function stripImageFillExtras(fills) {
-    if (!Array.isArray(fills)) return fills;
-    return fills.map((fill) => {
-      if (!fill || fill.type !== "IMAGE") return fill;
-      return {
-        type: "IMAGE",
-        scaleMode: fill.scaleMode || "FILL",
-        imageHash: fill.imageHash,
-        visible: fill.visible,
-        opacity: fill.opacity,
-        blendMode: fill.blendMode
-      };
-    });
+  function normalizePaintsForFigma(paints) {
+    if (!Array.isArray(paints)) return paints;
+    return paints.map(normalizePaintForFigma).filter(Boolean);
+  }
+  function normalizePaintForFigma(paint) {
+    if (!paint || typeof paint !== "object") return paint;
+    const copy = {};
+    for (const key in paint) {
+      if (key === "imageRef" || key === "missingAsset" || key === "isVisible") continue;
+      if (paint[key] !== void 0) copy[key] = paint[key];
+    }
+    if (copy.visible === void 0 && paint.isVisible !== void 0) copy.visible = paint.isVisible;
+    if (copy.visible === void 0) copy.visible = true;
+    if (copy.blendMode === "PASS_THROUGH") copy.blendMode = "NORMAL";
+    if (typeof copy.opacity === "number") copy.opacity = clamp01(copy.opacity);
+    if (copy.type === "SOLID") {
+      if (copy.color) copy.color = normalizePaintColor(copy.color);
+      return pickDefined(copy, ["type", "visible", "opacity", "blendMode", "color", "boundVariables"]);
+    }
+    if (copy.type === "GRADIENT_LINEAR" || copy.type === "GRADIENT_RADIAL" || copy.type === "GRADIENT_ANGULAR" || copy.type === "GRADIENT_DIAMOND") {
+      if (Array.isArray(copy.gradientStops)) copy.gradientStops = copy.gradientStops.map(normalizeGradientStop).filter(Boolean);
+      return pickDefined(copy, ["type", "visible", "opacity", "blendMode", "gradientHandlePositions", "gradientStops", "gradientTransform", "boundVariables"]);
+    }
+    if (copy.type === "IMAGE") {
+      if (!copy.imageHash) return null;
+      return pickDefined(copy, ["type", "visible", "opacity", "blendMode", "scaleMode", "imageHash", "imageTransform", "scalingFactor", "rotation", "filters", "gifRef", "boundVariables"]);
+    }
+    if (copy.type === "VIDEO") {
+      return pickDefined(copy, ["type", "visible", "opacity", "blendMode", "scaleMode", "videoHash", "videoTransform", "scalingFactor", "rotation", "filters", "boundVariables"]);
+    }
+    return copy;
+  }
+  function stripUnsupportedPaintExtras(paints) {
+    if (!Array.isArray(paints)) return paints;
+    return paints.map((paint) => {
+      if (!paint || typeof paint !== "object") return paint;
+      if (paint.type === "IMAGE") {
+        return pickDefined(paint, ["type", "visible", "opacity", "blendMode", "scaleMode", "imageHash"]);
+      }
+      if (paint.type === "GRADIENT_LINEAR" || paint.type === "GRADIENT_RADIAL" || paint.type === "GRADIENT_ANGULAR" || paint.type === "GRADIENT_DIAMOND") {
+        return pickDefined(paint, ["type", "visible", "opacity", "blendMode", "gradientHandlePositions", "gradientStops"]);
+      }
+      return normalizePaintForFigma(paint);
+    }).filter(Boolean);
+  }
+  function pickDefined(value, keys) {
+    const result = {};
+    for (const key of keys) {
+      if (value[key] !== void 0) result[key] = value[key];
+    }
+    return result;
+  }
+  function normalizeGradientStop(stop) {
+    if (!stop || typeof stop !== "object") return null;
+    const result = {};
+    result.position = clamp01(typeof stop.position === "number" ? stop.position : 0);
+    result.color = normalizePaintColor(stop.color || {});
+    if (stop.boundVariables !== void 0) result.boundVariables = stop.boundVariables;
+    return result;
+  }
+  function normalizePaintColor(color) {
+    return {
+      r: clamp01(typeof color.r === "number" ? color.r : 0),
+      g: clamp01(typeof color.g === "number" ? color.g : 0),
+      b: clamp01(typeof color.b === "number" ? color.b : 0),
+      a: clamp01(typeof color.a === "number" ? color.a : 1)
+    };
+  }
+  function clamp01(value) {
+    if (!Number.isFinite(value)) return 0;
+    if (value < 0) return 0;
+    if (value > 1) return 1;
+    return value;
+  }
+  function describePaintSetError(error, paints) {
+    return {
+      message: error instanceof Error ? error.message : String(error || "Unknown error"),
+      paintTypes: Array.isArray(paints) ? paints.map((paint) => paint && paint.type) : [],
+      blendModes: Array.isArray(paints) ? paints.map((paint) => paint && paint.blendMode).filter(Boolean) : []
+    };
   }
   function isNearlyZero(value) {
     return Math.abs(value) < 0.01;
@@ -1811,6 +1872,9 @@ ${style}`;
   // src/code.ts
   var RESTORE_PROGRESS_NODE_INTERVAL = 100;
   var RESTORE_PROGRESS_TIME_INTERVAL_MS = 500;
+  var activeImportSession = null;
+  var pendingImportAssets = {};
+  var pendingImportPages = {};
   showImportUI();
   function showImportUI() {
     ensureLayerRulesLoaded();
@@ -1829,6 +1893,42 @@ ${style}`;
         const width = typeof message.width === "number" ? message.width : 400;
         const height = typeof message.height === "number" ? message.height : 504;
         figma.ui.resize(width, height);
+        return;
+      }
+      if (message.type === "import-session-start") {
+        yield handleImportRequest(message, () => startImportSession(message));
+        return;
+      }
+      if (message.type === "import-asset-start") {
+        yield handleImportRequest(message, () => startImportAsset(message));
+        return;
+      }
+      if (message.type === "import-asset-chunk") {
+        appendImportAssetChunk(message);
+        return;
+      }
+      if (message.type === "import-asset-end") {
+        yield handleImportRequest(message, () => finishImportAsset(message));
+        return;
+      }
+      if (message.type === "import-page-start") {
+        yield handleImportRequest(message, () => startImportPage(message));
+        return;
+      }
+      if (message.type === "import-page-chunk") {
+        appendImportPageChunk(message);
+        return;
+      }
+      if (message.type === "import-page-end") {
+        yield handleImportRequest(message, () => finishImportPage(message));
+        return;
+      }
+      if (message.type === "import-page") {
+        yield handleImportRequest(message, () => restoreImportSessionPage(message));
+        return;
+      }
+      if (message.type === "import-session-complete") {
+        yield completeImportSession(message);
         return;
       }
       if (message.type !== "start-import") return;
@@ -1850,6 +1950,245 @@ ${style}`;
       }
       state.importInProgress = false;
     });
+  }
+  function handleImportRequest(message, action) {
+    return __async(this, null, function* () {
+      try {
+        yield action();
+        figma.ui.postMessage({
+          type: "import-ack",
+          requestId: message.requestId,
+          transferId: message.transferId,
+          success: true
+        });
+      } catch (error) {
+        console.error("Import request failed:", error);
+        if (typeof message.type === "string" && message.type.indexOf("import-") === 0) {
+          state.importInProgress = false;
+          activeImportSession = null;
+          clearPendingImportAssets();
+          clearPendingImportPages();
+        }
+        figma.ui.postMessage({
+          type: "import-ack",
+          requestId: message.requestId,
+          transferId: message.transferId,
+          success: false,
+          error: error instanceof Error ? error.message : "\u5BFC\u5165\u5931\u8D25\uFF0C\u8BF7\u67E5\u770B\u63A7\u5236\u53F0"
+        });
+      }
+    });
+  }
+  function startImportSession(message) {
+    return __async(this, null, function* () {
+      var _a, _b;
+      if (state.importInProgress) throw new Error("\u5DF2\u6709\u5BFC\u5165\u4EFB\u52A1\u6B63\u5728\u8FD0\u884C");
+      yield ensureLayerRulesLoaded();
+      if (!hasValidLayerRules()) throw new Error("\u8BF7\u5148\u5BFC\u5165\u6709\u6548\u7684\u56FE\u5C42\u8F6C\u6362\u89C4\u5219 JSON");
+      const manifest = message.manifest;
+      if (!manifest || manifest.schema !== "mastergo2figma.package.v2" || manifest.version !== 2) {
+        throw new Error("\u5F53\u524D\u53EA\u652F\u6301 v2 \u5BFC\u51FA\u5305\uFF0C\u8BF7\u7528\u65B0\u7248 SendToFigma \u91CD\u65B0\u5BFC\u51FA\u3002");
+      }
+      const totalNodes = Number(message.totalNodes || ((_a = manifest.stats) == null ? void 0 : _a.layerCount) || 0);
+      const totalPages = Number(message.totalPages || ((_b = manifest.pages) == null ? void 0 : _b.length) || 0);
+      if (totalNodes <= 0 || totalPages <= 0) throw new Error("\u6240\u9009\u9875\u9762\u6CA1\u6709\u53EF\u8FD8\u539F\u7684\u56FE\u5C42");
+      state.importInProgress = true;
+      state.reset();
+      state.resetRestoreRuntimeStats(totalNodes, totalPages);
+      clearPendingImportAssets();
+      clearPendingImportPages();
+      activeImportSession = {
+        transferId: String(message.transferId || ""),
+        manifest,
+        totalPages,
+        totalNodes,
+        restoredNodes: 0,
+        restoredPages: [],
+        previousCurrentPage: figma.currentPage
+      };
+      figma.ui.postMessage({
+        type: "progress",
+        current: 0,
+        total: totalNodes,
+        label: "\u6B63\u5728\u63A5\u6536\u5BFC\u5165\u6570\u636E..."
+      });
+    });
+  }
+  function startImportAsset(message) {
+    const session = requireImportSession(message.transferId);
+    const path = String(message.path || "");
+    if (!path) throw new Error("\u56FE\u7247\u8D44\u6E90\u7F3A\u5C11\u8DEF\u5F84");
+    pendingImportAssets[path] = {
+      path,
+      keys: Array.isArray(message.keys) ? message.keys.filter((key) => typeof key === "string") : [],
+      size: Number(message.size || 0),
+      chunks: []
+    };
+    void session;
+  }
+  function appendImportAssetChunk(message) {
+    if (!activeImportSession || activeImportSession.transferId !== message.transferId) return;
+    const path = String(message.path || "");
+    const pending = pendingImportAssets[path];
+    if (!pending) return;
+    const bytes = normalizeBytes(message.bytes);
+    if (bytes) pending.chunks.push(bytes);
+  }
+  function finishImportAsset(message) {
+    requireImportSession(message.transferId);
+    const path = String(message.path || "");
+    const pending = pendingImportAssets[path];
+    if (!pending) throw new Error(`\u56FE\u7247\u8D44\u6E90\u4F20\u8F93\u4E0D\u5B58\u5728\uFF1A${path}`);
+    const bytes = concatBytes(pending.chunks, pending.size);
+    try {
+      const image = figma.createImage(bytes);
+      for (const key of pending.keys) state.imageHashByAssetName[key] = image.hash;
+      if (pending.keys.length === 0) state.imageHashByAssetName[path] = image.hash;
+    } catch (error) {
+      console.warn("Unable to create Figma image from streamed asset:", path, error);
+      for (const key of pending.keys.length > 0 ? pending.keys : [path]) recordStreamedMissingImage(key);
+    }
+    delete pendingImportAssets[path];
+  }
+  function startImportPage(message) {
+    requireImportSession(message.transferId);
+    const pageIndex = Number(message.pageIndex || 0);
+    const importPage = message.page;
+    if (!importPage || !Array.isArray(importPage.rootNodeIds)) throw new Error("\u9875\u9762\u5BFC\u5165\u6570\u636E\u4E0D\u5B8C\u6574");
+    pendingImportPages[String(pageIndex)] = {
+      pageIndex,
+      page: importPage,
+      layers: {},
+      recordCount: 0
+    };
+  }
+  function appendImportPageChunk(message) {
+    if (!activeImportSession || activeImportSession.transferId !== message.transferId) return;
+    const pageIndex = String(Number(message.pageIndex || 0));
+    const pending = pendingImportPages[pageIndex];
+    if (!pending || !Array.isArray(message.records)) return;
+    for (const record of message.records) {
+      if (record && record.id) {
+        pending.layers[record.id] = record;
+        pending.recordCount++;
+      }
+    }
+  }
+  function finishImportPage(message) {
+    return __async(this, null, function* () {
+      requireImportSession(message.transferId);
+      const pageIndex = String(Number(message.pageIndex || 0));
+      const pending = pendingImportPages[pageIndex];
+      if (!pending) throw new Error(`\u9875\u9762\u4F20\u8F93\u4E0D\u5B58\u5728\uFF1A${pageIndex}`);
+      try {
+        yield restoreImportPageData(pending.page, pending.layers);
+      } finally {
+        delete pendingImportPages[pageIndex];
+      }
+    });
+  }
+  function restoreImportSessionPage(message) {
+    return __async(this, null, function* () {
+      requireImportSession(message.transferId);
+      const importPage = message.page;
+      const layers = message.layers;
+      if (!importPage || !Array.isArray(importPage.rootNodeIds) || !layers || typeof layers !== "object") {
+        throw new Error("\u9875\u9762\u5BFC\u5165\u6570\u636E\u4E0D\u5B8C\u6574");
+      }
+      yield restoreImportPageData(importPage, layers);
+    });
+  }
+  function restoreImportPageData(importPage, layers) {
+    return __async(this, null, function* () {
+      if (!activeImportSession) throw new Error("\u5BFC\u5165\u4F1A\u8BDD\u4E0D\u5B58\u5728\u6216\u5DF2\u91CD\u7F6E");
+      const session = activeImportSession;
+      figma.ui.postMessage({
+        type: "progress",
+        current: session.restoredNodes,
+        total: session.totalNodes,
+        label: "\u6B63\u5728\u521B\u5EFA\u9875\u9762\uFF1A" + createRestoredPageName(importPage.name)
+      });
+      const restoredPage = figma.createPage();
+      restoredPage.name = createRestoredPageName(importPage.name);
+      session.restoredPages.push(restoredPage);
+      figma.currentPage = restoredPage;
+      for (let rootIndex = 0; rootIndex < importPage.rootNodeIds.length; rootIndex++) {
+        const rootId = importPage.rootNodeIds[rootIndex];
+        session.restoredNodes += yield restoreImportedNode(rootId, restoredPage, layers, session.restoredNodes, session.totalNodes);
+      }
+      applyDeferredLayoutRestores();
+      cleanupImportedContainerShells(restoredPage);
+      applyDeferredSingleChildAutoSpaceAlignmentFixes(restoredPage);
+      yield yieldToEventLoop();
+    });
+  }
+  function completeImportSession(message) {
+    return __async(this, null, function* () {
+      const session = requireImportSession(message.transferId);
+      try {
+        applyDeferredConnectorRestores();
+        yield maybeReportRestoreProgress(session.restoredNodes, session.totalNodes, "\u6B63\u5728\u8FD8\u539F\u7F3A\u5931\u5B57\u4F53...", true);
+        const missingFontRestoreResult = yield restoreMissingFontTextLayers(session.restoredPages);
+        yield maybeReportRestoreProgress(session.restoredNodes, session.totalNodes, "\u6B63\u5728\u5B8C\u6210\u8FD8\u539F...", true);
+        if (session.restoredPages.length > 0) {
+          figma.currentPage = session.restoredPages[0];
+          figma.viewport.scrollAndZoomIntoView(session.restoredPages[0].children);
+        }
+        figma.ui.postMessage({
+          type: "complete",
+          pageCount: session.restoredPages.length,
+          layerCount: session.restoredNodes,
+          missingImageAssetCount: state.missingImageAssetCount,
+          fallbackConnectorCount: state.fallbackConnectorCount,
+          restoredMissingFontTextNodeCount: missingFontRestoreResult.restoredTextNodeCount,
+          failedMissingFontTextNodeCount: missingFontRestoreResult.failedTextNodeCount
+        });
+        state.logRestorePerformanceSummary(session.restoredNodes, session.restoredPages.length);
+        figma.notify("Restore complete!");
+      } catch (error) {
+        figma.currentPage = session.previousCurrentPage;
+        console.error("Import failed:", error);
+        figma.ui.postMessage({
+          type: "error",
+          message: error instanceof Error ? error.message : "\u5BFC\u5165\u5931\u8D25\uFF0C\u8BF7\u67E5\u770B\u63A7\u5236\u53F0"
+        });
+      } finally {
+        state.importInProgress = false;
+        activeImportSession = null;
+        clearPendingImportAssets();
+        clearPendingImportPages();
+      }
+    });
+  }
+  function requireImportSession(transferId) {
+    if (!activeImportSession || activeImportSession.transferId !== transferId) {
+      throw new Error("\u5BFC\u5165\u4F1A\u8BDD\u4E0D\u5B58\u5728\u6216\u5DF2\u91CD\u7F6E");
+    }
+    return activeImportSession;
+  }
+  function concatBytes(chunks, expectedSize) {
+    const size = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+    if (expectedSize > 0 && size !== expectedSize) {
+      throw new Error(`\u56FE\u7247\u8D44\u6E90\u4F20\u8F93\u4E0D\u5B8C\u6574\uFF1Aexpected=${expectedSize}, actual=${size}`);
+    }
+    const result = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) {
+      result.set(chunk, offset);
+      offset += chunk.length;
+    }
+    return result;
+  }
+  function clearPendingImportAssets() {
+    for (const path in pendingImportAssets) delete pendingImportAssets[path];
+  }
+  function clearPendingImportPages() {
+    for (const pageIndex in pendingImportPages) delete pendingImportPages[pageIndex];
+  }
+  function recordStreamedMissingImage(assetName) {
+    if (state.missingImageAssetNames[assetName]) return;
+    state.missingImageAssetNames[assetName] = true;
+    state.missingImageAssetCount++;
   }
   function postInitUI() {
     return __async(this, null, function* () {
@@ -2058,10 +2397,15 @@ ${style}`;
       const currentCount = restoredBefore + restoredCount;
       yield maybeReportRestoreProgress(currentCount, totalNodes, "\u6B63\u5728\u8FD8\u539F\uFF1A" + (nodeProps.name || layerRecord.name));
       const childIds = nodeProps.omitChildrenOnRestore ? [] : layerRecord.childIds || [];
-      for (const childId of childIds) {
-        restoredCount += yield restoreImportedNode(childId, newNode, layers, restoredBefore + restoredCount, totalNodes);
+      if (canContainRestoredChildren(newNode)) {
+        for (const childId of childIds) {
+          restoredCount += yield restoreImportedNode(childId, newNode, layers, restoredBefore + restoredCount, totalNodes);
+        }
       }
       return restoredCount;
     });
+  }
+  function canContainRestoredChildren(node) {
+    return !!node && "appendChild" in node;
   }
 })();

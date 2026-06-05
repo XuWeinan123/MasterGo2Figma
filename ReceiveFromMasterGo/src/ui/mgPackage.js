@@ -1105,10 +1105,49 @@
 
       const encoder = new TextEncoder();
       const out = {};
-      out["pages/_shared/layers-0.json"] = encoder.encode(JSON.stringify({
-        schema: "mastergo2figma.layers.v2",
-        records: records
-      }));
+      const recordsById = {};
+      for (const record of records) recordsById[record.id] = record;
+
+      function writeLayerChunks(folder, pageId, pageRecords) {
+        const chunkPaths = [];
+        let chunkRecords = [];
+        let chunkBytes = 0;
+        function flushChunk() {
+          if (chunkRecords.length === 0) return;
+          const chunkPath = `${folder}/layers/layers-${String(chunkPaths.length).padStart(4, "0")}.json`;
+          out[chunkPath] = encoder.encode(JSON.stringify({
+            schema: "mastergo2figma.layers.v2",
+            version: 2,
+            pageId: pageId,
+            records: chunkRecords
+          }));
+          chunkPaths.push(chunkPath);
+          chunkRecords = [];
+          chunkBytes = 0;
+        }
+        for (const record of pageRecords) {
+          const recordBytes = JSON.stringify(record).length;
+          if (chunkRecords.length > 0 && (chunkRecords.length >= 16 || chunkBytes + recordBytes > 64 * 1024)) flushChunk();
+          chunkRecords.push(record);
+          chunkBytes += recordBytes + (chunkRecords.length > 1 ? 1 : 0);
+          if (chunkRecords.length >= 16 || chunkBytes >= 64 * 1024) flushChunk();
+        }
+        flushChunk();
+        return chunkPaths;
+      }
+
+      function collectPageRecords(pg) {
+        const seen = {};
+        const result = [];
+        for (const root of pg.roots) {
+          for (const id of subtreeOf(root)) {
+            if (seen[id] || !recordsById[id]) continue;
+            seen[id] = true;
+            result.push(recordsById[id]);
+          }
+        }
+        return result;
+      }
 
       // Carry over image bytes and register them under both the file name and the
       // bare hash, so an image fill's imageRef resolves regardless of which form
@@ -1136,17 +1175,19 @@
         const pg = pageList[pi];
         const folder = `pages/page-${pi}`;
         const pageFile = `${folder}/index.json`;
+        const pageId = `mgpage-${pi}`;
+        const layerChunks = writeLayerChunks(folder, pageId, collectPageRecords(pg));
         out[pageFile] = encoder.encode(JSON.stringify({
           schema: "mastergo2figma.page.v2",
           version: 2,
-          id: `mgpage-${pi}`,
+          id: pageId,
           name: pg.name,
           folder: folder,
           rootNodeIds: pg.roots,
-          layerChunks: ["pages/_shared/layers-0.json"],
+          layerChunks: layerChunks,
           layerCount: pg.count
         }));
-        manifestPages.push({ id: `mgpage-${pi}`, name: pg.name, folder: folder, pageFile: pageFile, layerCount: pg.count });
+        manifestPages.push({ id: pageId, name: pg.name, folder: folder, pageFile: pageFile, layerCount: pg.count });
         totalLayerCount += pg.count;
       }
 

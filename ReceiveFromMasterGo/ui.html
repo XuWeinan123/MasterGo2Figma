@@ -751,6 +751,15 @@
     let isBusy = false;
     let hasRules = true;
     let restoreStartMs = 0;
+    let importProgressMode = "idle";
+    let importPrepareUnitsTotal = 0;
+    let importPrepareUnitsDone = 0;
+    let importRestoreTotal = 0;
+    let importTransferSeq = 0;
+    let importRequestSeq = 0;
+    const importAckResolvers = {};
+    const IMPORT_CHUNK_SIZE = 64 * 1024;
+    const IMPORT_YIELD_EVERY_CHUNKS = 32;
 
     function send(pluginMessage) {
       parent.postMessage({ pluginMessage }, "*");
@@ -776,13 +785,61 @@
     }
 
     function setProgress(current, total, label) {
-      const percent = total > 0 ? Math.round((current / total) * 100) : 0;
+      let percent = total > 0 ? Math.round((current / total) * 100) : 0;
+      let detail = total > 0 ? `${current}/${total} 个图层，${percent}% · 预计剩余 ${formatEta(current, total)}` : "正在准备任务...";
+      if (importProgressMode === "prepare" && total > 0) {
+        percent = Math.round((current / total) * 50);
+        detail = `${current}/${total} 项准备任务，${percent}% · 正式导入前`;
+      } else if (importProgressMode === "restore" && total > 0) {
+        const restorePercent = current / total;
+        percent = Math.round(50 + restorePercent * 50);
+        detail = `${current}/${total} 个图层，${percent}% · 预计剩余 ${formatEta(current, total)}`;
+      }
       bar.style.width = `${Math.max(0, Math.min(100, percent))}%`;
       setStatus(
         label || "处理中...",
-        total > 0 ? `${current}/${total} 个图层，${percent}% · 预计剩余 ${formatEta(current, total)}` : "正在准备任务...",
+        detail,
         false
       );
+    }
+
+    function beginImportPrepareProgress(selectedPages) {
+      importProgressMode = "prepare";
+      importPrepareUnitsDone = 0;
+      importRestoreTotal = selectedPages.reduce((sum, page) => sum + (page.layerCount || 0), 0);
+      importPrepareUnitsTotal = Math.max(1, selectedPages.reduce((sum, page) => {
+        return sum + (page.layerCount || 0) * 3 + 20;
+      }, 0));
+      setPrepareProgress("正在整理 zip 数据...");
+    }
+
+    function setPrepareProgress(label) {
+      if (importProgressMode !== "prepare") {
+        if (label) setStatus(label, summary.textContent, false);
+        return;
+      }
+      setProgress(Math.min(importPrepareUnitsDone, importPrepareUnitsTotal), importPrepareUnitsTotal, label);
+    }
+
+    function advancePrepareProgress(units, label) {
+      if (importProgressMode !== "prepare") {
+        if (label) setStatus(label, summary.textContent, false);
+        return;
+      }
+      importPrepareUnitsDone = Math.min(importPrepareUnitsTotal, importPrepareUnitsDone + Math.max(0, units || 0));
+      setPrepareProgress(label);
+    }
+
+    function beginImportRestoreProgress(label) {
+      importProgressMode = "restore";
+      setProgress(0, importRestoreTotal, label || "正在开始正式导入...");
+    }
+
+    function resetImportProgressMode() {
+      importProgressMode = "idle";
+      importPrepareUnitsTotal = 0;
+      importPrepareUnitsDone = 0;
+      importRestoreTotal = 0;
     }
 
     function formatEta(current, total) {
@@ -1043,7 +1100,7 @@
       updatePageSelection();
     };
 
-    restore.onclick = () => {
+    restore.onclick = async () => {
       if (isBusy) return;
       if (!hasRules) {
         setStatus("请先导入转换规则 JSON", "", true);
@@ -1060,17 +1117,16 @@
         setBusy(true);
         restoreStartMs = Date.now();
         if (manifest) {
-          setProgress(0, 0, "正在整理 zip 数据...");
           const selectedSet = new Set(selectedIds);
           const selectedPages = pages.filter(page => selectedSet.has(page.id));
-          const payload = buildImportPayload(manifest, selectedPages);
-          setProgress(0, 0, "正在开始还原 zip...");
-          send({ type: "start-import", payload });
+          beginImportPrepareProgress(selectedPages);
+          await streamImportPayload(manifest, selectedPages);
         } else {
           throw new Error("请先选择有效的 MasterGo2Figma zip");
         }
       } catch (error) {
         setStatus(error.message || "导入数据整理失败", "", true);
+        resetImportProgressMode();
         setBusy(false);
       }
     };
@@ -1115,110 +1171,310 @@
       }
     }
 
-    function buildImportPayload(sourceManifest, selectedPages) {
-      const layers = {};
-      const pageIndexes = [];
-      for (const page of selectedPages) {
-        if (!page.pageFile) throw new Error(`页面缺少索引文件：${page.name || page.id}`);
-        const pageBytes = getPackageEntry(page.pageFile);
-        if (!pageBytes) throw new Error(`缺少页面索引文件：${page.pageFile}`);
-        const pageIndex = JSON.parse(decodeUtf8(pageBytes));
-        if (pageIndex.schema !== "mastergo2figma.page.v2" || pageIndex.version !== 2) {
-          throw new Error(`页面索引格式不正确：${page.pageFile}`);
+    async function streamImportPayload(sourceManifest, selectedPages) {
+      const transferId = `import_${Date.now()}_${++importTransferSeq}`;
+      const totalNodes = selectedPages.reduce((sum, page) => sum + (page.layerCount || 0), 0);
+      const selectedManifest = {
+        ...sourceManifest,
+        pages: selectedPages.map(page => ({
+          id: page.id,
+          name: page.name,
+          folder: page.folder,
+          pageFile: page.pageFile,
+          layerCount: page.layerCount || 0
+        })),
+        stats: {
+          ...(sourceManifest.stats || {}),
+          pageCount: selectedPages.length,
+          layerCount: totalNodes
         }
-        if (!Array.isArray(pageIndex.layerChunks)) throw new Error(`页面缺少图层分块索引：${page.pageFile}`);
+      };
+      const sentAssetPaths = {};
 
-        const zipIndex = page.zipIndex;
-        const zipPackageRoot = page.zipPackageRoot;
-        const prefix = `zip_${zipIndex}_`;
+      await sendImportRequest({
+        type: "import-session-start",
+        transferId,
+        manifest: selectedManifest,
+        totalPages: selectedPages.length,
+        totalNodes
+      });
+      advancePrepareProgress(5, "已建立导入会话");
 
-        pageIndex.id = `${prefix}${pageIndex.id}`;
-        if (Array.isArray(pageIndex.rootNodeIds)) {
-          pageIndex.rootNodeIds = pageIndex.rootNodeIds.map(rid => `${prefix}${rid}`);
-        }
-
-        for (const chunkPath of pageIndex.layerChunks) {
-          const fullChunkPath = `zip_${zipIndex}/${zipPackageRoot}${chunkPath}`;
-          const bytes = getPackageEntry(fullChunkPath);
-          if (!bytes) throw new Error(`缺少图层分块文件：${fullChunkPath}`);
-          const chunk = JSON.parse(decodeUtf8(bytes));
-
-          if (chunk.schema === "mastergo2figma.layers.v2" && Array.isArray(chunk.records)) {
-            for (const record of chunk.records) {
-              if (record && record.id) {
-                record.id = `${prefix}${record.id}`;
-                if (record.parentId) record.parentId = `${prefix}${record.parentId}`;
-                if (Array.isArray(record.childIds)) {
-                  record.childIds = record.childIds.map(cid => `${prefix}${cid}`);
-                }
-
-                // Prefix imageRefs and connector endpoints inside props
-                if (record.props) {
-                  prefixImageRefs(record.props, prefix);
-                  prefixConnectorEndpointNodeIds(record.props, prefix);
-                }
-
-                layers[record.id] = record;
-              }
-            }
-            continue;
-          }
-
-          if (chunk && chunk.id && chunk.props) {
-            chunk.id = `${prefix}${chunk.id}`;
-            if (chunk.parentId) chunk.parentId = `${prefix}${chunk.parentId}`;
-            if (Array.isArray(chunk.childIds)) {
-              chunk.childIds = chunk.childIds.map(cid => `${prefix}${cid}`);
-            }
-            if (chunk.props) {
-              prefixImageRefs(chunk.props, prefix);
-              prefixConnectorEndpointNodeIds(chunk.props, prefix);
-            }
-            layers[chunk.id] = chunk;
-            continue;
-          }
-
-          if (chunk && chunk.record && chunk.record.id) {
-            const record = chunk.record;
-            record.id = `${prefix}${record.id}`;
-            if (record.parentId) record.parentId = `${prefix}${record.parentId}`;
-            if (Array.isArray(record.childIds)) {
-              record.childIds = record.childIds.map(cid => `${prefix}${cid}`);
-            }
-            if (record.props) {
-              prefixImageRefs(record.props, prefix);
-              prefixConnectorEndpointNodeIds(record.props, prefix);
-            }
-            layers[record.id] = record;
-            continue;
-          }
-
-          throw new Error(`图层分块格式不正确：${chunkPath}`);
+      for (let pageIndex = 0; pageIndex < selectedPages.length; pageIndex++) {
+        const page = selectedPages[pageIndex];
+        setPrepareProgress(`正在准备页面：${page.name || page.id}`);
+        const pageData = buildPageImportData(page);
+        const assetTransfers = getRequiredAssetTransfers(sourceManifest, pageData.assetKeys, sentAssetPaths);
+        for (const asset of assetTransfers) {
+          await streamImportAsset(transferId, asset);
         }
 
-        // Rewrite chunk paths in pageIndex so Figma side can trace them if needed
-        if (Array.isArray(pageIndex.layerChunks)) {
-          pageIndex.layerChunks = pageIndex.layerChunks.map(chunkPath => `zip_${zipIndex}/${zipPackageRoot}${chunkPath}`);
+        setPrepareProgress(`正在发送页面：${pageData.page.name || pageData.page.id}`);
+        await sendImportRequest({
+          type: "import-page-start",
+          transferId,
+          pageIndex,
+          page: pageData.page
+        }, 30000);
+        advancePrepareProgress(1, `正在发送页面：${pageData.page.name || pageData.page.id}`);
+        for (let chunkIndex = 0; chunkIndex < pageData.layerChunks.length; chunkIndex++) {
+          const records = pageData.layerChunks[chunkIndex];
+          send({
+            type: "import-page-chunk",
+            transferId,
+            pageIndex,
+            chunkIndex,
+            records
+          });
+          advancePrepareProgress(records.length, `正在发送页面数据：${pageData.page.name || pageData.page.id}`);
+          if ((chunkIndex + 1) % IMPORT_YIELD_EVERY_CHUNKS === 0) await waitForUIRelease();
         }
-
-        pageIndexes.push(pageIndex);
+        await sendImportRequest({
+          type: "import-page-end",
+          transferId,
+          pageIndex
+        }, 120000);
+        advancePrepareProgress(5, `页面数据已发送：${pageData.page.name || pageData.page.id}`);
       }
 
-      const assets = {};
-      const assetMap = sourceManifest.assets || {};
-      for (const key in assetMap) {
-        const asset = assetMap[key];
-        if (!asset || asset.missing || !asset.path) continue;
-        const bytes = getPackageEntry(asset.path);
-        if (bytes) assets[key] = Array.from(bytes);
+      importPrepareUnitsDone = importPrepareUnitsTotal;
+      setPrepareProgress("准备完成，正在进入正式导入...");
+      if (importProgressMode === "prepare") beginImportRestoreProgress("正在完成还原...");
+      send({ type: "import-session-complete", transferId });
+    }
+
+    function buildPageImportData(page) {
+      const layers = {};
+      const assetKeys = {};
+      if (!page.pageFile) throw new Error(`页面缺少索引文件：${page.name || page.id}`);
+      const pageBytes = getPackageEntry(page.pageFile);
+      if (!pageBytes) throw new Error(`缺少页面索引文件：${page.pageFile}`);
+      const pageIndex = JSON.parse(decodeUtf8(pageBytes));
+      if (pageIndex.schema !== "mastergo2figma.page.v2" || pageIndex.version !== 2) {
+        throw new Error(`页面索引格式不正确：${page.pageFile}`);
+      }
+      if (!Array.isArray(pageIndex.layerChunks)) throw new Error(`页面缺少图层分块索引：${page.pageFile}`);
+
+      const zipIndex = page.zipIndex;
+      const zipPackageRoot = page.zipPackageRoot;
+      const prefix = `zip_${zipIndex}_`;
+
+      pageIndex.id = `${prefix}${pageIndex.id}`;
+      if (Array.isArray(pageIndex.rootNodeIds)) {
+        pageIndex.rootNodeIds = pageIndex.rootNodeIds.map(rid => `${prefix}${rid}`);
+      }
+
+      const rawRecordsById = {};
+      for (let chunkIndex = 0; chunkIndex < pageIndex.layerChunks.length; chunkIndex++) {
+        const chunkPath = pageIndex.layerChunks[chunkIndex];
+        const fullChunkPath = `zip_${zipIndex}/${zipPackageRoot}${chunkPath}`;
+        const bytes = getPackageEntry(fullChunkPath);
+        if (!bytes) throw new Error(`缺少图层分块文件：${fullChunkPath}`);
+        const chunk = JSON.parse(decodeUtf8(bytes));
+
+        if (chunk.schema === "mastergo2figma.layers.v2" && Array.isArray(chunk.records)) {
+          for (const record of chunk.records) {
+            if (record && record.id) rawRecordsById[record.id] = record;
+          }
+          advancePrepareProgress(chunk.records.length, `正在解析图层分块 ${chunkIndex + 1}/${pageIndex.layerChunks.length}：${page.name || page.id}`);
+          continue;
+        }
+
+        if (chunk && chunk.id && chunk.props) {
+          rawRecordsById[chunk.id] = chunk;
+          advancePrepareProgress(1, `正在解析图层分块 ${chunkIndex + 1}/${pageIndex.layerChunks.length}：${page.name || page.id}`);
+          continue;
+        }
+
+        if (chunk && chunk.record && chunk.record.id) {
+          rawRecordsById[chunk.record.id] = chunk.record;
+          advancePrepareProgress(1, `正在解析图层分块 ${chunkIndex + 1}/${pageIndex.layerChunks.length}：${page.name || page.id}`);
+          continue;
+        }
+
+        throw new Error(`图层分块格式不正确：${chunkPath}`);
+      }
+
+      const reachableIds = collectReachableLayerIds(pageIndex.rootNodeIds, rawRecordsById, prefix);
+      let lastOrganizedCount = 0;
+      for (let index = 0; index < reachableIds.length; index++) {
+        const rawId = reachableIds[index];
+        const record = rawRecordsById[rawId];
+        const nextRecord = cloneJson(record);
+        nextRecord.id = `${prefix}${nextRecord.id}`;
+        if (nextRecord.parentId) nextRecord.parentId = `${prefix}${nextRecord.parentId}`;
+        if (Array.isArray(nextRecord.childIds)) {
+          nextRecord.childIds = nextRecord.childIds.map(cid => `${prefix}${cid}`);
+        }
+        if (nextRecord.props) {
+          prefixImageRefs(nextRecord.props, prefix);
+          prefixConnectorEndpointNodeIds(nextRecord.props, prefix);
+          collectImageRefs(nextRecord.props, assetKeys);
+        }
+        layers[nextRecord.id] = nextRecord;
+        if ((index + 1) % 100 === 0 || index + 1 === reachableIds.length) {
+          const organizedCount = index + 1;
+          advancePrepareProgress(organizedCount - lastOrganizedCount, `正在整理图层 ${organizedCount}/${reachableIds.length}：${page.name || page.id}`);
+          lastOrganizedCount = organizedCount;
+        }
+      }
+
+      if (Array.isArray(pageIndex.layerChunks)) {
+        pageIndex.layerChunks = pageIndex.layerChunks.map(chunkPath => `zip_${zipIndex}/${zipPackageRoot}${chunkPath}`);
       }
 
       return {
-        manifest: sourceManifest,
-        pages: pageIndexes,
-        layers,
-        assets
+        page: pageIndex,
+        layerChunks: chunkLayerRecords(layers),
+        assetKeys
       };
+    }
+
+    function chunkLayerRecords(layers) {
+      const chunks = [];
+      let records = [];
+      let bytes = 0;
+      function flush() {
+        if (records.length === 0) return;
+        chunks.push(records);
+        records = [];
+        bytes = 0;
+      }
+      for (const id in layers) {
+        const record = layers[id];
+        const recordBytes = JSON.stringify(record).length;
+        if (records.length > 0 && (records.length >= 16 || bytes + recordBytes > 64 * 1024)) flush();
+        records.push(record);
+        bytes += recordBytes + (records.length > 1 ? 1 : 0);
+        if (records.length >= 16 || bytes >= 64 * 1024) flush();
+      }
+      flush();
+      return chunks;
+    }
+
+    function collectReachableLayerIds(rootNodeIds, recordsById, prefix) {
+      const result = [];
+      const seen = {};
+      const stack = [];
+      for (const prefixedRootId of rootNodeIds || []) {
+        const rawRootId = stripPrefix(prefixedRootId, prefix);
+        if (rawRootId) stack.push(rawRootId);
+      }
+      while (stack.length > 0) {
+        const id = stack.pop();
+        if (!id || seen[id] || !recordsById[id]) continue;
+        seen[id] = true;
+        result.push(id);
+        const children = Array.isArray(recordsById[id].childIds) ? recordsById[id].childIds : [];
+        for (let index = children.length - 1; index >= 0; index--) {
+          stack.push(children[index]);
+        }
+      }
+      return result;
+    }
+
+    function stripPrefix(value, prefix) {
+      return typeof value === "string" && value.indexOf(prefix) === 0 ? value.slice(prefix.length) : value;
+    }
+
+    function cloneJson(value) {
+      return JSON.parse(JSON.stringify(value));
+    }
+
+    function collectImageRefs(obj, assetKeys) {
+      if (!obj || typeof obj !== "object") return;
+      if (Array.isArray(obj)) {
+        for (let i = 0; i < obj.length; i++) collectImageRefs(obj[i], assetKeys);
+        return;
+      }
+      if (obj.type === "IMAGE" && typeof obj.imageRef === "string") {
+        assetKeys[obj.imageRef] = true;
+      }
+      for (const key in obj) {
+        if (Object.prototype.hasOwnProperty.call(obj, key)) collectImageRefs(obj[key], assetKeys);
+      }
+    }
+
+    function getRequiredAssetTransfers(sourceManifest, assetKeys, sentAssetPaths) {
+      const assetMap = sourceManifest.assets || {};
+      const byPath = {};
+      for (const key in assetKeys) {
+        const asset = assetMap[key];
+        if (!asset || asset.missing || !asset.path || sentAssetPaths[asset.path]) continue;
+        const bytes = getPackageEntry(asset.path);
+        if (!bytes) continue;
+        byPath[asset.path] = {
+          path: asset.path,
+          bytes,
+          keys: []
+        };
+      }
+      for (const key in assetMap) {
+        const asset = assetMap[key];
+        if (asset && asset.path && byPath[asset.path]) byPath[asset.path].keys.push(key);
+      }
+      const transfers = [];
+      for (const path in byPath) {
+        sentAssetPaths[path] = true;
+        transfers.push(byPath[path]);
+      }
+      return transfers;
+    }
+
+    async function streamImportAsset(transferId, asset) {
+      await sendImportRequest({
+        type: "import-asset-start",
+        transferId,
+        path: asset.path,
+        keys: asset.keys,
+        size: asset.bytes.length
+      });
+      advancePrepareProgress(1, `正在发送图片资源：${asset.keys[0] || asset.path}`);
+
+      for (let offset = 0, chunkIndex = 0; offset < asset.bytes.length; offset += IMPORT_CHUNK_SIZE, chunkIndex++) {
+        send({
+          type: "import-asset-chunk",
+          transferId,
+          path: asset.path,
+          chunkIndex,
+          bytes: asset.bytes.subarray(offset, offset + IMPORT_CHUNK_SIZE)
+        });
+        if ((chunkIndex + 1) % IMPORT_YIELD_EVERY_CHUNKS === 0) await waitForUIRelease();
+      }
+
+      await sendImportRequest({
+        type: "import-asset-end",
+        transferId,
+        path: asset.path
+      }, 60000);
+      advancePrepareProgress(2, `图片资源已发送：${asset.keys[0] || asset.path}`);
+    }
+
+    function sendImportRequest(message, timeoutMs) {
+      return new Promise((resolve, reject) => {
+        const requestId = `req_${++importRequestSeq}`;
+        const timeout = setTimeout(() => {
+          delete importAckResolvers[requestId];
+          reject(new Error(`导入消息超时：${message.type}`));
+        }, timeoutMs || 30000);
+        importAckResolvers[requestId] = { resolve, reject, timeout };
+        send({ ...message, requestId });
+      });
+    }
+
+    function resolveImportAck(message) {
+      const requestId = message.requestId;
+      const resolver = requestId ? importAckResolvers[requestId] : null;
+      if (!resolver) return false;
+      clearTimeout(resolver.timeout);
+      delete importAckResolvers[requestId];
+      if (message.success) resolver.resolve(message);
+      else resolver.reject(new Error(message.error || "导入消息失败"));
+      return true;
+    }
+
+    function waitForUIRelease() {
+      return new Promise(resolve => setTimeout(resolve, 0));
     }
 
     function findManifestPath(zipEntries) {
@@ -1234,12 +1490,18 @@
       const message = event.data && event.data.pluginMessage ? event.data.pluginMessage : event.data;
       if (!message) return;
 
+      if (message.type === "import-ack") {
+        resolveImportAck(message);
+        return;
+      }
+
       if (message.type === "init") {
         setBusy(false);
         return;
       }
 
       if (message.type === "progress") {
+        if (importProgressMode === "prepare") beginImportRestoreProgress(message.label);
         setProgress(message.current || 0, message.total || 0, message.label);
         return;
       }
@@ -1256,12 +1518,14 @@
         if (restoredMissingFontTextNodeCount) details.push(`${restoredMissingFontTextNodeCount} 个文本字体已恢复`);
         if (failedMissingFontTextNodeCount) details.push(`${failedMissingFontTextNodeCount} 个文本字体仍缺失`);
         setStatus("还原完成", `${message.pageCount} 个页面，${message.layerCount} 个图层${details.length ? `，${details.join("，")}` : ""}`, false);
+        resetImportProgressMode();
         setBusy(false);
         return;
       }
 
       if (message.type === "error") {
         setStatus(message.message || "还原失败", "请查看插件控制台获取更多信息。", true);
+        resetImportProgressMode();
         setBusy(false);
       }
     };
@@ -1319,7 +1583,7 @@
       const nameLength = view.getUint16(localOffset + 26, true);
       const extraLength = view.getUint16(localOffset + 28, true);
       const dataStart = localOffset + 30 + nameLength + extraLength;
-      const compressed = bytes.slice(dataStart, dataStart + compressedSize);
+      const compressed = bytes.subarray(dataStart, dataStart + compressedSize);
 
       if (method === 0) return compressed;
       if (method === 8 && typeof DecompressionStream === "function") {
@@ -2439,10 +2703,49 @@
 
       const encoder = new TextEncoder();
       const out = {};
-      out["pages/_shared/layers-0.json"] = encoder.encode(JSON.stringify({
-        schema: "mastergo2figma.layers.v2",
-        records: records
-      }));
+      const recordsById = {};
+      for (const record of records) recordsById[record.id] = record;
+
+      function writeLayerChunks(folder, pageId, pageRecords) {
+        const chunkPaths = [];
+        let chunkRecords = [];
+        let chunkBytes = 0;
+        function flushChunk() {
+          if (chunkRecords.length === 0) return;
+          const chunkPath = `${folder}/layers/layers-${String(chunkPaths.length).padStart(4, "0")}.json`;
+          out[chunkPath] = encoder.encode(JSON.stringify({
+            schema: "mastergo2figma.layers.v2",
+            version: 2,
+            pageId: pageId,
+            records: chunkRecords
+          }));
+          chunkPaths.push(chunkPath);
+          chunkRecords = [];
+          chunkBytes = 0;
+        }
+        for (const record of pageRecords) {
+          const recordBytes = JSON.stringify(record).length;
+          if (chunkRecords.length > 0 && (chunkRecords.length >= 16 || chunkBytes + recordBytes > 64 * 1024)) flushChunk();
+          chunkRecords.push(record);
+          chunkBytes += recordBytes + (chunkRecords.length > 1 ? 1 : 0);
+          if (chunkRecords.length >= 16 || chunkBytes >= 64 * 1024) flushChunk();
+        }
+        flushChunk();
+        return chunkPaths;
+      }
+
+      function collectPageRecords(pg) {
+        const seen = {};
+        const result = [];
+        for (const root of pg.roots) {
+          for (const id of subtreeOf(root)) {
+            if (seen[id] || !recordsById[id]) continue;
+            seen[id] = true;
+            result.push(recordsById[id]);
+          }
+        }
+        return result;
+      }
 
       // Carry over image bytes and register them under both the file name and the
       // bare hash, so an image fill's imageRef resolves regardless of which form
@@ -2470,17 +2773,19 @@
         const pg = pageList[pi];
         const folder = `pages/page-${pi}`;
         const pageFile = `${folder}/index.json`;
+        const pageId = `mgpage-${pi}`;
+        const layerChunks = writeLayerChunks(folder, pageId, collectPageRecords(pg));
         out[pageFile] = encoder.encode(JSON.stringify({
           schema: "mastergo2figma.page.v2",
           version: 2,
-          id: `mgpage-${pi}`,
+          id: pageId,
           name: pg.name,
           folder: folder,
           rootNodeIds: pg.roots,
-          layerChunks: ["pages/_shared/layers-0.json"],
+          layerChunks: layerChunks,
           layerCount: pg.count
         }));
-        manifestPages.push({ id: `mgpage-${pi}`, name: pg.name, folder: folder, pageFile: pageFile, layerCount: pg.count });
+        manifestPages.push({ id: pageId, name: pg.name, folder: folder, pageFile: pageFile, layerCount: pg.count });
         totalLayerCount += pg.count;
       }
 
