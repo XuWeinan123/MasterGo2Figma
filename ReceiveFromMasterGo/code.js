@@ -1735,7 +1735,6 @@ ${style}`;
   }
 
   // src/appliers/container.ts
-  var BOOLEAN_RESTORE_DEBUG_BUILD = "boolean-debug-2026-06-11-01";
   function shouldRestoreBooleanVectorAsFrame(data, layerRecord) {
     if (!data || data.sourceType !== "BOOLEAN_OPERATION") return false;
     if (data.receiveCreateOverride || data.svgFallback) return false;
@@ -1958,17 +1957,6 @@ ${style}`;
   }
   function restoreBooleanOperationTree(nodeProps, parent, layerRecord, layers, restoredBefore, totalNodes, restoreNodeCallback, applyPropertiesCallback, maybeReportProgressCallback) {
     return __async(this, null, function* () {
-      logBooleanRestoreDebug("restore-start", {
-        build: BOOLEAN_RESTORE_DEBUG_BUILD,
-        sourceId: nodeProps == null ? void 0 : nodeProps.id,
-        name: (nodeProps == null ? void 0 : nodeProps.name) || layerRecord.name,
-        sourceType: nodeProps == null ? void 0 : nodeProps.sourceType,
-        type: nodeProps == null ? void 0 : nodeProps.type,
-        restoreType: nodeProps == null ? void 0 : nodeProps.restoreType,
-        operation: nodeProps == null ? void 0 : nodeProps.booleanOperation,
-        childIds: layerRecord.childIds || [],
-        omitChildrenOnRestore: !!(nodeProps == null ? void 0 : nodeProps.omitChildrenOnRestore)
-      });
       const shell = figma.createFrame();
       const shellProps = createBooleanFrameFallbackProps(nodeProps);
       let appended = false;
@@ -1988,13 +1976,6 @@ ${style}`;
       for (const childId of childIds) {
         restoredCount += yield restoreNodeCallback(childId, shell, layers, restoredBefore + restoredCount, totalNodes);
       }
-      logBooleanRestoreDebug("children-restored", {
-        build: BOOLEAN_RESTORE_DEBUG_BUILD,
-        sourceId: nodeProps == null ? void 0 : nodeProps.id,
-        name: (nodeProps == null ? void 0 : nodeProps.name) || layerRecord.name,
-        shell: summarizeSceneNode(shell),
-        children: [...shell.children].map(summarizeSceneNode)
-      });
       const combined = yield combineBooleanShell(shell, nodeProps, applyPropertiesCallback);
       if (!combined) {
         yield restoreBooleanFallbackFromShell(shell, nodeProps, applyPropertiesCallback);
@@ -2007,14 +1988,6 @@ ${style}`;
       const parent = shell.parent;
       if (!parent || !("insertChild" in parent)) return null;
       const children = [...shell.children];
-      logBooleanRestoreDebug("combine-start", {
-        build: BOOLEAN_RESTORE_DEBUG_BUILD,
-        sourceId: data == null ? void 0 : data.id,
-        name: data == null ? void 0 : data.name,
-        operation: data == null ? void 0 : data.booleanOperation,
-        childCount: children.length,
-        children: children.map(summarizeSceneNode)
-      });
       if (children.length === 1) {
         return yield promoteSingleBooleanChild(shell, children[0], data);
       }
@@ -2029,23 +2002,8 @@ ${style}`;
       }
       try {
         const booleanChildren = flattenStrokeOnlyBooleanChildren(children, shell);
-        logBooleanRestoreDebug("after-flatten", {
-          build: BOOLEAN_RESTORE_DEBUG_BUILD,
-          sourceId: data == null ? void 0 : data.id,
-          name: data == null ? void 0 : data.name,
-          operation,
-          sourceOperation: data == null ? void 0 : data.booleanOperation,
-          children: booleanChildren.map(summarizeSceneNode)
-        });
         const combined = createBooleanContainerNode(operation, booleanChildren, shell, parent);
         yield applyPropertiesCallback(combined, data);
-        logBooleanRestoreDebug("combine-complete", {
-          build: BOOLEAN_RESTORE_DEBUG_BUILD,
-          sourceId: data == null ? void 0 : data.id,
-          name: data == null ? void 0 : data.name,
-          combined: summarizeSceneNode(combined),
-          children: [...combined.children].map(summarizeSceneNode)
-        });
         safeRemove(shell);
         return combined;
       } catch (error) {
@@ -2058,28 +2016,12 @@ ${style}`;
     const result = [];
     for (const child of children) {
       if (!shouldFlattenBooleanChild(child)) {
-        logBooleanRestoreDebug("flatten-skip", {
-          build: BOOLEAN_RESTORE_DEBUG_BUILD,
-          child: summarizeSceneNode(child),
-          reason: describeFlattenSkipReason(child)
-        });
         result.push(child);
         continue;
       }
       try {
         const index = parent.children.indexOf(child);
-        const beforeSummary = summarizeSceneNode(child);
-        logBooleanRestoreDebug("flatten-before", {
-          build: BOOLEAN_RESTORE_DEBUG_BUILD,
-          child: beforeSummary,
-          parentChildIndex: index
-        });
         const flattened = figma.flatten([child], parent, index >= 0 ? index : parent.children.length);
-        logBooleanRestoreDebug("flatten-after", {
-          build: BOOLEAN_RESTORE_DEBUG_BUILD,
-          before: beforeSummary,
-          flattened: summarizeSceneNode(flattened)
-        });
         result.push(flattened);
       } catch (error) {
         console.warn("Unable to flatten stroked boolean child, keeping original:", child.name, error);
@@ -2103,55 +2045,6 @@ ${style}`;
     if (!("fills" in node)) return true;
     const fills = node.fills;
     return !Array.isArray(fills) || fills.length === 0 || fills.every((fill) => !fill || fill.visible === false);
-  }
-  function describeFlattenSkipReason(node) {
-    if (!("strokes" in node)) return "node-has-no-strokes-property";
-    const strokes = node.strokes;
-    if (!Array.isArray(strokes) || strokes.length === 0) return "node-has-no-strokes";
-    if (!hasClosedVectorRegion(node)) return "node-has-no-closed-region";
-    if (!("fills" in node)) return "node-has-strokes-and-no-fills-property";
-    const fills = node.fills;
-    if (!Array.isArray(fills) || fills.length === 0) return "node-has-strokes-and-no-fills";
-    if (fills.every((fill) => !fill || fill.visible === false)) return "node-has-only-hidden-fills";
-    return "node-has-visible-fill";
-  }
-  function summarizeSceneNode(node) {
-    const nodeAny = node;
-    const fills = "fills" in nodeAny && Array.isArray(nodeAny.fills) ? nodeAny.fills : [];
-    const strokes = "strokes" in nodeAny && Array.isArray(nodeAny.strokes) ? nodeAny.strokes : [];
-    const vectorNetwork = nodeAny.vectorNetwork;
-    return {
-      id: node.id,
-      name: node.name,
-      type: node.type,
-      x: "x" in nodeAny ? nodeAny.x : void 0,
-      y: "y" in nodeAny ? nodeAny.y : void 0,
-      width: "width" in nodeAny ? nodeAny.width : void 0,
-      height: "height" in nodeAny ? nodeAny.height : void 0,
-      relativeTransform: nodeAny.relativeTransform,
-      booleanOperation: nodeAny.booleanOperation,
-      fills: fills.map(summarizePaint),
-      strokes: strokes.map(summarizePaint),
-      strokeWeight: nodeAny.strokeWeight,
-      vectorNetwork: vectorNetwork ? {
-        vertices: Array.isArray(vectorNetwork.vertices) ? vectorNetwork.vertices.length : void 0,
-        segments: Array.isArray(vectorNetwork.segments) ? vectorNetwork.segments.length : void 0,
-        regions: Array.isArray(vectorNetwork.regions) ? vectorNetwork.regions.length : void 0
-      } : void 0,
-      children: "children" in nodeAny ? nodeAny.children.length : void 0
-    };
-  }
-  function summarizePaint(paint) {
-    if (!paint || typeof paint !== "object") return paint;
-    return {
-      type: paint.type,
-      visible: paint.visible,
-      opacity: paint.opacity,
-      blendMode: paint.blendMode
-    };
-  }
-  function logBooleanRestoreDebug(stage, payload) {
-    console.log(`[MasterGo2Figma][BooleanRestore][${stage}]`, payload);
   }
   function createBooleanContainerNode(operation, children, shell, parent) {
     const parentIndex = parent.children.indexOf(shell);

@@ -1,0 +1,13 @@
+{
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"code\":\"10003\",\"message\":\"🔒 禁止访问，请确认token是否正确或确保您有MasterGo团队版及以上权限的编辑席位或研发席位\"}"
+      }
+    ],
+    "isError": true
+  },
+  "jsonrpc": "2.0",
+  "id": 2
+}
