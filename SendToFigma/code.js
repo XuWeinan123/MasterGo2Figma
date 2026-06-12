@@ -312,8 +312,8 @@
       SECTION: { sourceType: "SECTION", restoreType: "SECTION", sendStrategy: "frameLike", receiveCreate: "SECTION", isContainer: true, visualFrameSource: false },
       SLICE: { sourceType: "SLICE", restoreType: "SLICE", sendStrategy: "universalOnly", receiveCreate: "SLICE", isContainer: false, visualFrameSource: false },
       CONNECTOR: { sourceType: "CONNECTOR", restoreType: "CONNECTOR", sendStrategy: "connector", receiveCreate: "CONNECTOR", isContainer: false, visualFrameSource: false },
-      COMPONENT: { sourceType: "COMPONENT", restoreType: "FRAME", sendStrategy: "frameLike", receiveCreate: "FRAME", isContainer: true, visualFrameSource: true },
-      COMPONENT_SET: { sourceType: "COMPONENT_SET", restoreType: "FRAME", sendStrategy: "frameLike", receiveCreate: "FRAME", isContainer: true, visualFrameSource: true },
+      COMPONENT: { sourceType: "COMPONENT", restoreType: "COMPONENT", sendStrategy: "frameLike", receiveCreate: "COMPONENT", isContainer: true, visualFrameSource: false },
+      COMPONENT_SET: { sourceType: "COMPONENT_SET", restoreType: "COMPONENT_SET", sendStrategy: "frameLike", receiveCreate: "COMPONENT_SET", isContainer: true, visualFrameSource: false },
       INSTANCE: { sourceType: "INSTANCE", restoreType: "FRAME", sendStrategy: "frameLike", receiveCreate: "FRAME", isContainer: true, visualFrameSource: true }
     }
   };
@@ -381,6 +381,100 @@
       [typeof r0[0] === "number" ? r0[0] : 1, typeof r0[1] === "number" ? r0[1] : 0, typeof r0[2] === "number" ? r0[2] : 0],
       [typeof r1[0] === "number" ? r1[0] : 0, typeof r1[1] === "number" ? r1[1] : 1, typeof r1[2] === "number" ? r1[2] : 0]
     ];
+  }
+
+  // ../shared/connectorUtils.ts
+  function normalizeConnectorPoint(point) {
+    return {
+      x: Number(point && point.x) || 0,
+      y: Number(point && point.y) || 0
+    };
+  }
+  function isSameConnectorAxis(start, end) {
+    return Math.abs(start.x - end.x) < 0.01 || Math.abs(start.y - end.y) < 0.01;
+  }
+  function shouldConnectorRouteStartHorizontal(start, end, startEndpoint, endEndpoint) {
+    const startMagnet = startEndpoint && startEndpoint.magnet;
+    if (startMagnet === "LEFT" || startMagnet === "RIGHT") return true;
+    if (startMagnet === "TOP" || startMagnet === "BOTTOM") return false;
+    const endMagnet = endEndpoint && endEndpoint.magnet;
+    if (endMagnet === "TOP" || endMagnet === "BOTTOM") return true;
+    if (endMagnet === "LEFT" || endMagnet === "RIGHT") return false;
+    return Math.abs(end.x - start.x) >= Math.abs(end.y - start.y);
+  }
+  function dedupeConnectorPoints(points) {
+    const result = [];
+    for (const point of points) {
+      const previous = result[result.length - 1];
+      if (!previous || Math.abs(previous.x - point.x) >= 0.01 || Math.abs(previous.y - point.y) >= 0.01) {
+        result.push(point);
+      }
+    }
+    return result.length > 1 ? result : [points[0], points[points.length - 1]];
+  }
+  function getConnectorCornerRadius(points, index, requestedRadius) {
+    const radius = Number(requestedRadius) || 0;
+    if (radius <= 0) return 0;
+    const previous = points[index - 1];
+    const current = points[index];
+    const next = points[index + 1];
+    const previousLength = Math.abs(current.x - previous.x) + Math.abs(current.y - previous.y);
+    const nextLength = Math.abs(next.x - current.x) + Math.abs(next.y - current.y);
+    return Math.min(radius, previousLength / 2, nextLength / 2);
+  }
+  function normalizeConnectorVectorStrokeCap(value) {
+    if (value === "ARROW_EQUILATERAL" || value === "ARROW_LINES" || value === "TRIANGLE_FILLED" || value === "DIAMOND_FILLED" || value === "CIRCLE_FILLED" || value === "ROUND" || value === "SQUARE" || value === "NONE") {
+      return value;
+    }
+    if (value === "LINE_ARROW" || value === "LINE") return "ARROW_LINES";
+    if (value === "TRIANGLE_ARROW") return "ARROW_EQUILATERAL";
+    if (value === "DIAMOND") return "DIAMOND_FILLED";
+    if (value === "ROUND_ARROW" || value === "RING") return "CIRCLE_FILLED";
+    return "NONE";
+  }
+  function normalizeMasterGoStrokeCapForFigma(value) {
+    if (value === "NONE" || value === "ROUND" || value === "SQUARE" || value === "ARROW_LINES" || value === "ARROW_EQUILATERAL") {
+      return value;
+    }
+    if (value === "LINE_ARROW" || value === "LINE") return "ARROW_LINES";
+    if (value === "TRIANGLE_ARROW" || value === "TRIANGLE_FILLED") return "ARROW_EQUILATERAL";
+    if (value === "ROUND_ARROW" || value === "RING") return "ROUND";
+    if (value === "DIAMOND" || value === "DIAMOND_FILLED") return "ARROW_EQUILATERAL";
+    if (value === "CIRCLE_FILLED") return "ROUND";
+    return "NONE";
+  }
+  function createConnectorRoutePoints(start, end, startEndpoint, endEndpoint, lineType) {
+    const startPoint = normalizeConnectorPoint(start);
+    const endPoint = normalizeConnectorPoint(end);
+    if (lineType !== "ELBOWED" || isSameConnectorAxis(startPoint, endPoint)) {
+      return dedupeConnectorPoints([startPoint, endPoint]);
+    }
+    const horizontalFirst = shouldConnectorRouteStartHorizontal(startPoint, endPoint, startEndpoint, endEndpoint);
+    const middlePoint = horizontalFirst ? { x: endPoint.x, y: startPoint.y } : { x: startPoint.x, y: endPoint.y };
+    return dedupeConnectorPoints([startPoint, middlePoint, endPoint]);
+  }
+  function createConnectorVectorNetwork(start, end, startEndpoint, endEndpoint, lineType, cornerRadius, startStrokeCap, endStrokeCap) {
+    const points = createConnectorRoutePoints(start, end, startEndpoint, endEndpoint, lineType);
+    const vertices = points.map((point, index) => {
+      const vertex = { x: point.x, y: point.y };
+      if (index === 0) vertex.strokeCap = normalizeConnectorVectorStrokeCap(startStrokeCap);
+      if (index === points.length - 1) vertex.strokeCap = normalizeConnectorVectorStrokeCap(endStrokeCap);
+      if (index > 0 && index < points.length - 1) {
+        const radius = getConnectorCornerRadius(points, index, cornerRadius);
+        if (radius > 0) vertex.cornerRadius = radius;
+      }
+      return vertex;
+    });
+    const segments = [];
+    for (let index = 0; index < points.length - 1; index++) {
+      segments.push({
+        start: index,
+        end: index + 1,
+        tangentStart: { x: 0, y: 0 },
+        tangentEnd: { x: 0, y: 0 }
+      });
+    }
+    return { vertices, segments, regions: [] };
   }
 
   // src/imageExporter.ts
@@ -776,21 +870,73 @@
   }
   function getLayoutMode(node) {
     const mode = readNodeProperty(node, "layoutMode", "NONE");
-    if (mode === "HORIZONTAL" || mode === "VERTICAL" || mode === "NONE") return mode;
+    if (mode === "HORIZONTAL" || mode === "VERTICAL") return mode;
+    const flexMode = readAutoLayoutProperty(node, "flexMode", "NONE");
+    if (flexMode === "HORIZONTAL" || flexMode === "VERTICAL") return flexMode;
+    const direction = readAutoLayoutProperty(node, "direction", "NONE");
+    if (direction === "ROW") return "HORIZONTAL";
+    if (direction === "COLUMN") return "VERTICAL";
     return "NONE";
   }
   function getAxisAlign(value) {
     if (value === "MIN" || value === "CENTER" || value === "MAX" || value === "SPACE_BETWEEN") return value;
+    if (value === "START" || value === "FLEX_START") return "MIN";
+    if (value === "END" || value === "FLEX_END") return "MAX";
+    if (value === "SPACING_BETWEEN") return "SPACE_BETWEEN";
     return "MIN";
   }
   function getCounterAxisAlignContent(node) {
-    const value = readNodeProperty(node, "counterAxisAlignContent", "AUTO");
+    const value = readNodeProperty(node, "counterAxisAlignContent", readAutoLayoutProperty(node, "crossAxisAlignContent", "AUTO"));
     if (value === "AUTO" || value === "SPACE_BETWEEN") return value;
     return "AUTO";
   }
   function getLayoutAlign(value) {
     if (value === "INHERIT" || value === "MIN" || value === "CENTER" || value === "MAX" || value === "STRETCH") return value;
+    if (value === "AUTO") return "INHERIT";
+    if (value === "START" || value === "FLEX_START") return "MIN";
+    if (value === "END" || value === "FLEX_END") return "MAX";
     return "INHERIT";
+  }
+  function readAutoLayoutProperty(node, property, fallback) {
+    const direct = readNodeProperty(node, property, void 0);
+    if (direct !== void 0 && direct !== null) return direct;
+    const autoLayout = readNodeProperty(node, "autoLayout", null);
+    if (autoLayout && autoLayout[property] !== void 0 && autoLayout[property] !== null) return autoLayout[property];
+    const layout = readNodeProperty(node, "layout", null);
+    const layoutAuto = layout && layout.autoLayout;
+    if (layoutAuto && layoutAuto[property] !== void 0 && layoutAuto[property] !== null) return layoutAuto[property];
+    return fallback;
+  }
+  function readAutoLayoutNumber(node, property, fallback = 0) {
+    const value = readAutoLayoutProperty(node, property, fallback);
+    if (typeof value === "number") return value;
+    if (value && typeof value === "object") {
+      if (typeof value.value === "number") return value.value;
+      if (typeof value.rawValue === "number") return value.rawValue;
+    }
+    return finiteNumber(value, fallback);
+  }
+  function getPrimaryAxisSizingMode(node) {
+    return readNodeProperty(
+      node,
+      "primaryAxisSizingMode",
+      readNodeProperty(
+        node,
+        "mainAxisSizingMode",
+        readAutoLayoutProperty(node, "mainAxisSizingMode", "FIXED")
+      )
+    );
+  }
+  function getCounterAxisSizingMode(node) {
+    return readNodeProperty(
+      node,
+      "counterAxisSizingMode",
+      readNodeProperty(
+        node,
+        "crossAxisSizingMode",
+        readAutoLayoutProperty(node, "crossAxisSizingMode", "FIXED")
+      )
+    );
   }
   function getRelativeLayoutTransform(selection) {
     return cloneTransform(readNodeProperty(selection, "relativeTransform", [[1, 0, 0], [0, 1, 0]]));
@@ -870,7 +1016,7 @@
         "strokeAlign": readNodeProperty(selection, "strokeAlign", "CENTER"),
         "strokeJoin": readNodeProperty(selection, "strokeJoin", "MITER"),
         "dashPattern": cloneJsonCompatible(readNodeProperty(selection, "strokeDashes", []), []),
-        "strokeCap": readNodeProperty(selection, "strokeCap", "NONE"),
+        "strokeCap": normalizeMasterGoStrokeCapForFigma(readNodeProperty(selection, "strokeCap", "NONE")),
         "strokeTopWeight": selection.strokeTopWeight !== void 0 ? readNodeProperty(selection, "strokeTopWeight", 0) : void 0,
         "strokeBottomWeight": selection.strokeBottomWeight !== void 0 ? readNodeProperty(selection, "strokeBottomWeight", 0) : void 0,
         "strokeLeftWeight": selection.strokeLeftWeight !== void 0 ? readNodeProperty(selection, "strokeLeftWeight", 0) : void 0,
@@ -885,18 +1031,18 @@
         "height": readNodeProperty(selection, "height", 0),
         "constrainProportions": readNodeProperty(selection, "constrainProportions", false) || false,
         "layoutMode": getLayoutMode(selection),
-        "itemSpacing": readNodeProperty(selection, "itemSpacing", 0) || 0,
-        "paddingLeft": readNodeProperty(selection, "paddingLeft", 0) || 0,
-        "paddingRight": readNodeProperty(selection, "paddingRight", 0) || 0,
-        "paddingTop": readNodeProperty(selection, "paddingTop", 0) || 0,
-        "paddingBottom": readNodeProperty(selection, "paddingBottom", 0) || 0,
-        "primaryAxisAlignItems": getAxisAlign(readNodeProperty(selection, "primaryAxisAlignItems", readNodeProperty(selection, "mainAxisAlignItems", "MIN"))),
-        "counterAxisAlignItems": getAxisAlign(readNodeProperty(selection, "counterAxisAlignItems", readNodeProperty(selection, "crossAxisAlignItems", "MIN"))),
+        "itemSpacing": readAutoLayoutNumber(selection, "itemSpacing", 0),
+        "paddingLeft": readAutoLayoutNumber(selection, "paddingLeft", 0),
+        "paddingRight": readAutoLayoutNumber(selection, "paddingRight", 0),
+        "paddingTop": readAutoLayoutNumber(selection, "paddingTop", 0),
+        "paddingBottom": readAutoLayoutNumber(selection, "paddingBottom", 0),
+        "primaryAxisAlignItems": getAxisAlign(readNodeProperty(selection, "primaryAxisAlignItems", readAutoLayoutProperty(selection, "mainAxisAlignItems", "MIN"))),
+        "counterAxisAlignItems": getAxisAlign(readNodeProperty(selection, "counterAxisAlignItems", readAutoLayoutProperty(selection, "crossAxisAlignItems", "MIN"))),
         "counterAxisAlignContent": getCounterAxisAlignContent(selection),
-        "primaryAxisSizingMode": readNodeProperty(selection, "primaryAxisSizingMode", readNodeProperty(selection, "mainAxisSizingMode", "FIXED")),
-        "counterAxisSizingMode": readNodeProperty(selection, "counterAxisSizingMode", readNodeProperty(selection, "crossAxisSizingMode", "FIXED")),
-        "itemReverseZIndex": readNodeProperty(selection, "itemReverseZIndex", false) || false,
-        "strokesIncludedInLayout": readNodeProperty(selection, "strokesIncludedInLayout", false) || false,
+        "primaryAxisSizingMode": getPrimaryAxisSizingMode(selection),
+        "counterAxisSizingMode": getCounterAxisSizingMode(selection),
+        "itemReverseZIndex": readNodeProperty(selection, "itemReverseZIndex", readAutoLayoutProperty(selection, "itemReverseZIndex", false)) || false,
+        "strokesIncludedInLayout": readNodeProperty(selection, "strokesIncludedInLayout", readAutoLayoutProperty(selection, "strokesIncludedInLayout", false)) || false,
         "layoutAlign": getLayoutAlign(readNodeProperty(selection, "layoutAlign", readNodeProperty(selection, "alignSelf", "INHERIT"))),
         "layoutGrow": readNodeProperty(selection, "layoutGrow", readNodeProperty(selection, "flexGrow", 0)),
         "layoutPositioning": readNodeProperty(selection, "layoutPositioning", "AUTO")
@@ -947,6 +1093,25 @@
       regions: normalizeVectorRegions(vectorNetwork.regions)
     };
   }
+  function getUniformOpenVectorStrokeCap(vectorNetwork) {
+    if (!vectorNetwork || !Array.isArray(vectorNetwork.vertices) || !Array.isArray(vectorNetwork.segments)) return null;
+    if (Array.isArray(vectorNetwork.regions) && vectorNetwork.regions.length > 0) return null;
+    if (vectorNetwork.segments.length < 1) return null;
+    const firstSegment = vectorNetwork.segments[0];
+    const lastSegment = vectorNetwork.segments[vectorNetwork.segments.length - 1];
+    const startVertex = vectorNetwork.vertices[firstSegment && firstSegment.start];
+    const endVertex = vectorNetwork.vertices[lastSegment && lastSegment.end];
+    const startCap = startVertex && startVertex.strokeCap;
+    const endCap = endVertex && endVertex.strokeCap;
+    if (!startCap || startCap === "NONE") return null;
+    if (endCap && endCap !== "NONE" && endCap !== startCap) return null;
+    return normalizeMasterGoStrokeCapForFigma(startCap);
+  }
+  function applyUniformVectorStrokeCap(resultStruct, vectorNetwork) {
+    const strokeCap = getUniformOpenVectorStrokeCap(vectorNetwork);
+    if (!strokeCap || !resultStruct.geometry || resultStruct.geometry.strokeCap !== "NONE") return;
+    resultStruct.geometry.strokeCap = strokeCap;
+  }
   function transPenNode(selection, sourceType, restoreType) {
     const universalStruct = getUniversalProperty(selection, sourceType, restoreType);
     const originJson = selection.penNetwork;
@@ -954,6 +1119,7 @@
       const vectorNetwork = cloneVectorNetworkForExport(selection.vectorNetwork);
       const resultStruct2 = Object.assign(vectorNetwork ? { vectorNetwork } : {}, universalStruct);
       resultStruct2.type = restoreType || getRuleRestoreType(sourceType || selection.type);
+      applyUniformVectorStrokeCap(resultStruct2, vectorNetwork);
       return resultStruct2;
     }
     const originCtrlNodes = originJson.ctrlNodes;
@@ -990,6 +1156,7 @@
     };
     const resultStruct = Object.assign(otherStruct, universalStruct);
     resultStruct.type = restoreType || getRuleRestoreType(sourceType || selection.type);
+    applyUniformVectorStrokeCap(resultStruct, finalPathJson);
     return resultStruct;
   }
 
@@ -1111,89 +1278,6 @@
     const styledTextSegments = buildStyledTextSegments(textStyles, typeof characters === "string" ? characters.length : 0);
     if (styledTextSegments) otherStruct.styledTextSegments = styledTextSegments;
     return Object.assign(otherStruct, universalStruct);
-  }
-
-  // ../shared/connectorUtils.ts
-  function normalizeConnectorPoint(point) {
-    return {
-      x: Number(point && point.x) || 0,
-      y: Number(point && point.y) || 0
-    };
-  }
-  function isSameConnectorAxis(start, end) {
-    return Math.abs(start.x - end.x) < 0.01 || Math.abs(start.y - end.y) < 0.01;
-  }
-  function shouldConnectorRouteStartHorizontal(start, end, startEndpoint, endEndpoint) {
-    const startMagnet = startEndpoint && startEndpoint.magnet;
-    if (startMagnet === "LEFT" || startMagnet === "RIGHT") return true;
-    if (startMagnet === "TOP" || startMagnet === "BOTTOM") return false;
-    const endMagnet = endEndpoint && endEndpoint.magnet;
-    if (endMagnet === "TOP" || endMagnet === "BOTTOM") return true;
-    if (endMagnet === "LEFT" || endMagnet === "RIGHT") return false;
-    return Math.abs(end.x - start.x) >= Math.abs(end.y - start.y);
-  }
-  function dedupeConnectorPoints(points) {
-    const result = [];
-    for (const point of points) {
-      const previous = result[result.length - 1];
-      if (!previous || Math.abs(previous.x - point.x) >= 0.01 || Math.abs(previous.y - point.y) >= 0.01) {
-        result.push(point);
-      }
-    }
-    return result.length > 1 ? result : [points[0], points[points.length - 1]];
-  }
-  function getConnectorCornerRadius(points, index, requestedRadius) {
-    const radius = Number(requestedRadius) || 0;
-    if (radius <= 0) return 0;
-    const previous = points[index - 1];
-    const current = points[index];
-    const next = points[index + 1];
-    const previousLength = Math.abs(current.x - previous.x) + Math.abs(current.y - previous.y);
-    const nextLength = Math.abs(next.x - current.x) + Math.abs(next.y - current.y);
-    return Math.min(radius, previousLength / 2, nextLength / 2);
-  }
-  function normalizeConnectorVectorStrokeCap(value) {
-    if (value === "ARROW_EQUILATERAL" || value === "ARROW_LINES" || value === "TRIANGLE_FILLED" || value === "DIAMOND_FILLED" || value === "CIRCLE_FILLED" || value === "ROUND" || value === "SQUARE" || value === "NONE") {
-      return value;
-    }
-    if (value === "LINE_ARROW" || value === "LINE") return "ARROW_LINES";
-    if (value === "TRIANGLE_ARROW") return "ARROW_EQUILATERAL";
-    if (value === "DIAMOND") return "DIAMOND_FILLED";
-    if (value === "ROUND_ARROW" || value === "RING") return "CIRCLE_FILLED";
-    return "NONE";
-  }
-  function createConnectorRoutePoints(start, end, startEndpoint, endEndpoint, lineType) {
-    const startPoint = normalizeConnectorPoint(start);
-    const endPoint = normalizeConnectorPoint(end);
-    if (lineType !== "ELBOWED" || isSameConnectorAxis(startPoint, endPoint)) {
-      return dedupeConnectorPoints([startPoint, endPoint]);
-    }
-    const horizontalFirst = shouldConnectorRouteStartHorizontal(startPoint, endPoint, startEndpoint, endEndpoint);
-    const middlePoint = horizontalFirst ? { x: endPoint.x, y: startPoint.y } : { x: startPoint.x, y: endPoint.y };
-    return dedupeConnectorPoints([startPoint, middlePoint, endPoint]);
-  }
-  function createConnectorVectorNetwork(start, end, startEndpoint, endEndpoint, lineType, cornerRadius, startStrokeCap, endStrokeCap) {
-    const points = createConnectorRoutePoints(start, end, startEndpoint, endEndpoint, lineType);
-    const vertices = points.map((point, index) => {
-      const vertex = { x: point.x, y: point.y };
-      if (index === 0) vertex.strokeCap = normalizeConnectorVectorStrokeCap(startStrokeCap);
-      if (index === points.length - 1) vertex.strokeCap = normalizeConnectorVectorStrokeCap(endStrokeCap);
-      if (index > 0 && index < points.length - 1) {
-        const radius = getConnectorCornerRadius(points, index, cornerRadius);
-        if (radius > 0) vertex.cornerRadius = radius;
-      }
-      return vertex;
-    });
-    const segments = [];
-    for (let index = 0; index < points.length - 1; index++) {
-      segments.push({
-        start: index,
-        end: index + 1,
-        tangentStart: { x: 0, y: 0 },
-        tangentEnd: { x: 0, y: 0 }
-      });
-    }
-    return { vertices, segments, regions: [] };
   }
 
   // src/serializers/connector.ts
@@ -1510,15 +1594,6 @@
         return;
       }
       if (hasUsableVectorNetwork(nodeJson.vectorNetwork) || childNodes.length === 0) return;
-      const svg = yield tryExportSvgMarkup(node, "Boolean");
-      if (svg) {
-        nodeJson.svgMarkup = svg;
-        nodeJson.svgFallback = true;
-        nodeJson.receiveCreateOverride = "SVG";
-        nodeJson.omitChildrenOnRestore = true;
-        nodeJson.omittedChildNodeCount = Math.max(0, countExportableSubtreeNodes(node) - 1);
-        return;
-      }
       markBooleanAsFrameFallback(nodeJson);
     });
   }

@@ -177,6 +177,8 @@
     "SECTION",
     "SLICE",
     "FRAME",
+    "COMPONENT",
+    "COMPONENT_SET",
     "GROUP",
     "CONNECTOR",
     "BOOLEAN_OPERATION"
@@ -199,8 +201,8 @@
       SECTION: { sourceType: "SECTION", restoreType: "SECTION", sendStrategy: "frameLike", receiveCreate: "SECTION", isContainer: true, visualFrameSource: false },
       SLICE: { sourceType: "SLICE", restoreType: "SLICE", sendStrategy: "universalOnly", receiveCreate: "SLICE", isContainer: false, visualFrameSource: false },
       CONNECTOR: { sourceType: "CONNECTOR", restoreType: "CONNECTOR", sendStrategy: "connector", receiveCreate: "CONNECTOR", isContainer: false, visualFrameSource: false },
-      COMPONENT: { sourceType: "COMPONENT", restoreType: "FRAME", sendStrategy: "frameLike", receiveCreate: "FRAME", isContainer: true, visualFrameSource: true },
-      COMPONENT_SET: { sourceType: "COMPONENT_SET", restoreType: "FRAME", sendStrategy: "frameLike", receiveCreate: "FRAME", isContainer: true, visualFrameSource: true },
+      COMPONENT: { sourceType: "COMPONENT", restoreType: "COMPONENT", sendStrategy: "frameLike", receiveCreate: "COMPONENT", isContainer: true, visualFrameSource: false },
+      COMPONENT_SET: { sourceType: "COMPONENT_SET", restoreType: "COMPONENT_SET", sendStrategy: "frameLike", receiveCreate: "COMPONENT_SET", isContainer: true, visualFrameSource: false },
       INSTANCE: { sourceType: "INSTANCE", restoreType: "FRAME", sendStrategy: "frameLike", receiveCreate: "FRAME", isContainer: true, visualFrameSource: true }
     }
   };
@@ -645,6 +647,17 @@ ${style}`;
     if (value === "ROUND_ARROW" || value === "RING") return "CIRCLE_FILLED";
     return "NONE";
   }
+  function normalizeMasterGoStrokeCapForFigma(value) {
+    if (value === "NONE" || value === "ROUND" || value === "SQUARE" || value === "ARROW_LINES" || value === "ARROW_EQUILATERAL") {
+      return value;
+    }
+    if (value === "LINE_ARROW" || value === "LINE") return "ARROW_LINES";
+    if (value === "TRIANGLE_ARROW" || value === "TRIANGLE_FILLED") return "ARROW_EQUILATERAL";
+    if (value === "ROUND_ARROW" || value === "RING") return "ROUND";
+    if (value === "DIAMOND" || value === "DIAMOND_FILLED") return "ARROW_EQUILATERAL";
+    if (value === "CIRCLE_FILLED") return "ROUND";
+    return "NONE";
+  }
   function createConnectorRoutePoints(start, end, startEndpoint, endEndpoint, lineType) {
     const startPoint = normalizeConnectorPoint(start);
     const endPoint = normalizeConnectorPoint(end);
@@ -917,15 +930,15 @@ ${style}`;
       safeSet(node, "layoutGrow", layout.layoutGrow);
       applied = true;
     }
-    if (layout.relativeTransform) {
+    const hasRelativeTransform = hasFiniteRelativeTransform(layout);
+    if (hasRelativeTransform) {
       safeSet(node, "relativeTransform", layout.relativeTransform);
       applied = true;
-    }
-    if (layout.x !== void 0) {
+    } else if (layout.x !== void 0) {
       safeSet(node, "x", layout.x);
       applied = true;
     }
-    if (layout.y !== void 0) {
+    if (!hasRelativeTransform && layout.y !== void 0) {
       safeSet(node, "y", layout.y);
       applied = true;
     }
@@ -938,9 +951,15 @@ ${style}`;
     if (isRemovedNode(node) || isGroup || !hasAutoLayout(node)) return;
     if (layout.width === void 0 || layout.height === void 0 || !shouldRestoreFixedSize(node, layout)) return;
     safeResize(node, layout.width, layout.height);
-    if (layout.relativeTransform) safeSet(node, "relativeTransform", layout.relativeTransform);
-    if (layout.x !== void 0) safeSet(node, "x", layout.x);
-    if (layout.y !== void 0) safeSet(node, "y", layout.y);
+    if (hasFiniteRelativeTransform(layout)) {
+      safeSet(node, "relativeTransform", layout.relativeTransform);
+    } else {
+      if (layout.x !== void 0) safeSet(node, "x", layout.x);
+      if (layout.y !== void 0) safeSet(node, "y", layout.y);
+    }
+  }
+  function hasFiniteRelativeTransform(layout) {
+    return Array.isArray(layout == null ? void 0 : layout.relativeTransform) && Array.isArray(layout.relativeTransform[0]) && Array.isArray(layout.relativeTransform[1]) && Number.isFinite(layout.relativeTransform[0][0]) && Number.isFinite(layout.relativeTransform[0][1]) && Number.isFinite(layout.relativeTransform[0][2]) && Number.isFinite(layout.relativeTransform[1][0]) && Number.isFinite(layout.relativeTransform[1][1]) && Number.isFinite(layout.relativeTransform[1][2]);
   }
   function applySingleChildAutoSpaceAlignmentFix(node, layout) {
     if (!isAutoSpaceAlongPrimaryAxis(layout)) return;
@@ -1029,7 +1048,7 @@ ${style}`;
     return normalizeConnectorVectorStrokeCap(value);
   }
   function applyVectorNetwork(node, vectorNetwork, data) {
-    const normalized = normalizeVectorNetworkForFigma(vectorNetwork);
+    const normalized = normalizeVectorNetworkForFigma(createVectorNetworkWithLayoutBoxAnchors(vectorNetwork, data));
     try {
       node.vectorNetwork = normalized;
       return;
@@ -1041,6 +1060,28 @@ ${style}`;
     } catch (fallbackError) {
       console.warn("Unable to set fallback vectorNetwork:", (data == null ? void 0 : data.name) || (data == null ? void 0 : data.id) || "Untitled", fallbackError);
     }
+  }
+  function createVectorNetworkWithLayoutBoxAnchors(vectorNetwork, data) {
+    var _a, _b;
+    if (!(data == null ? void 0 : data.vectorAutoLayoutBox) || !vectorNetwork || typeof vectorNetwork !== "object") return vectorNetwork;
+    const width = Number((_a = data == null ? void 0 : data.layout) == null ? void 0 : _a.width);
+    const height = Number((_b = data == null ? void 0 : data.layout) == null ? void 0 : _b.height);
+    if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return vectorNetwork;
+    const vertices = Array.isArray(vectorNetwork.vertices) ? vectorNetwork.vertices.slice() : [];
+    const segments = Array.isArray(vectorNetwork.segments) ? vectorNetwork.segments.slice() : [];
+    const startIndex = vertices.length;
+    vertices.push(
+      { x: 0, y: 0, strokeCap: "NONE" },
+      { x: width, y: height, strokeCap: "NONE" }
+    );
+    segments.push(
+      { start: startIndex, end: startIndex, tangentStart: { x: 0, y: 0 }, tangentEnd: { x: 0, y: 0 } },
+      { start: startIndex + 1, end: startIndex + 1, tangentStart: { x: 0, y: 0 }, tangentEnd: { x: 0, y: 0 } }
+    );
+    return __spreadProps(__spreadValues({}, vectorNetwork), {
+      vertices,
+      segments
+    });
   }
   function normalizeVectorNetworkForFigma(vectorNetwork) {
     if (!vectorNetwork || typeof vectorNetwork !== "object") return vectorNetwork;
@@ -1174,7 +1215,6 @@ ${style}`;
           case "VECTOR":
             const vector = figma.createVector();
             node = vector;
-            if (data.vectorNetwork) applyVectorNetwork(vector, data.vectorNetwork, data);
             break;
           case "ELLIPSE":
             const ellipse = figma.createEllipse();
@@ -1203,6 +1243,9 @@ ${style}`;
             break;
           case "SECTION":
             node = figma.createSection();
+            break;
+          case "COMPONENT":
+            node = figma.createComponent();
             break;
           case "SLICE":
             node = figma.createSlice();
@@ -1557,6 +1600,23 @@ ${style}`;
     }
     return normalized;
   }
+  function hasFiniteRelativeTransform2(layout) {
+    return Array.isArray(layout == null ? void 0 : layout.relativeTransform) && Array.isArray(layout.relativeTransform[0]) && Array.isArray(layout.relativeTransform[1]) && Number.isFinite(layout.relativeTransform[0][0]) && Number.isFinite(layout.relativeTransform[0][1]) && Number.isFinite(layout.relativeTransform[0][2]) && Number.isFinite(layout.relativeTransform[1][0]) && Number.isFinite(layout.relativeTransform[1][1]) && Number.isFinite(layout.relativeTransform[1][2]);
+  }
+  function getUniformOpenVectorStrokeCap(vectorNetwork) {
+    if (!vectorNetwork || !Array.isArray(vectorNetwork.vertices) || !Array.isArray(vectorNetwork.segments)) return null;
+    if (Array.isArray(vectorNetwork.regions) && vectorNetwork.regions.length > 0) return null;
+    if (vectorNetwork.segments.length < 1) return null;
+    const firstSegment = vectorNetwork.segments[0];
+    const lastSegment = vectorNetwork.segments[vectorNetwork.segments.length - 1];
+    const startVertex = vectorNetwork.vertices[firstSegment && firstSegment.start];
+    const endVertex = vectorNetwork.vertices[lastSegment && lastSegment.end];
+    const startCap = startVertex && startVertex.strokeCap;
+    const endCap = endVertex && endVertex.strokeCap;
+    if (!startCap || startCap === "NONE") return null;
+    if (endCap && endCap !== "NONE" && endCap !== startCap) return null;
+    return normalizeMasterGoStrokeCapForFigma(startCap);
+  }
   function applyUniversalProperties(node, data) {
     return __async(this, null, function* () {
       var _a, _b, _c, _d;
@@ -1576,6 +1636,7 @@ ${style}`;
         }
       }
       const isGroup = node.type === "GROUP";
+      const isBooleanOperation = node.type === "BOOLEAN_OPERATION";
       if (!isGroup && data.corner && node.type !== "LINE" && node.type !== "TEXT") {
         if (data.corner.cornerRadius === -1) {
           if ("topLeftRadius" in node) {
@@ -1611,22 +1672,29 @@ ${style}`;
         if (data.geometry.strokeAlign) safeSet(node, "strokeAlign", data.geometry.strokeAlign);
         if (data.geometry.strokeJoin) safeSet(node, "strokeJoin", data.geometry.strokeJoin);
         if (data.geometry.dashPattern !== void 0) safeSet(node, "dashPattern", data.geometry.dashPattern);
-        if (data.geometry.strokeCap && !data.connectorFallbackPolyline) safeSet(node, "strokeCap", data.geometry.strokeCap);
+        if (data.geometry.strokeCap && !data.connectorFallbackPolyline) {
+          const vectorCap = data.geometry.strokeCap === "NONE" ? getUniformOpenVectorStrokeCap(data.vectorNetwork) : null;
+          safeSet(node, "strokeCap", vectorCap || normalizeMasterGoStrokeCapForFigma(data.geometry.strokeCap));
+        }
       }
       if (data.constraints) safeSet(node, "constraints", normalizeConstraints(data.constraints));
       if (data.exportSettings) safeSet(node, "exportSettings", data.exportSettings);
       if (data.layout) {
         const layout = normalizeLayoutForParent(node, data.layout);
         state.restoredLayoutByNodeId[node.id] = layout;
-        if (layout.relativeTransform) safeSet(node, "relativeTransform", layout.relativeTransform);
-        if (layout.x !== void 0) safeSet(node, "x", layout.x);
-        if (layout.y !== void 0) safeSet(node, "y", layout.y);
-        if (layout.rotation !== void 0) safeSet(node, "rotation", layout.rotation);
         if (layout.width !== void 0 && layout.height !== void 0) {
-          if (isGroup) {
+          if (isGroup || isBooleanOperation) {
           } else {
             safeResize(node, layout.width, layout.height);
           }
+        }
+        const hasRelativeTransform = hasFiniteRelativeTransform2(layout);
+        if (hasRelativeTransform) {
+          safeSet(node, "relativeTransform", layout.relativeTransform);
+        } else {
+          if (layout.x !== void 0) safeSet(node, "x", layout.x);
+          if (layout.y !== void 0) safeSet(node, "y", layout.y);
+          if (layout.rotation !== void 0) safeSet(node, "rotation", layout.rotation);
         }
         if (layout.constrainProportions !== void 0) {
           applyAspectRatioLock(node, layout.constrainProportions);
@@ -1642,6 +1710,10 @@ ${style}`;
     return __async(this, null, function* () {
       if (!node || !data) return;
       yield applyUniversalProperties(node, data);
+      if (node.type === "VECTOR" && data.vectorNetwork) {
+        applyVectorNetwork(node, data.vectorNetwork, data);
+        reapplyVectorStrokeGeometry(node, data);
+      }
       if (node.type === "TEXT" && data.characters !== void 0) {
         yield applyTextProperties(node, data);
       }
@@ -1650,8 +1722,20 @@ ${style}`;
       }
     });
   }
+  function reapplyVectorStrokeGeometry(node, data) {
+    const geometry = data && data.geometry;
+    if (!geometry) return;
+    if (geometry.strokeWeight !== void 0) safeSet(node, "strokeWeight", geometry.strokeWeight);
+    if (geometry.strokeAlign) safeSet(node, "strokeAlign", geometry.strokeAlign);
+    if (geometry.strokeJoin) safeSet(node, "strokeJoin", geometry.strokeJoin);
+    if (geometry.dashPattern !== void 0) safeSet(node, "dashPattern", geometry.dashPattern);
+    if (geometry.strokeCap && !data.connectorFallbackPolyline) {
+      safeSet(node, "strokeCap", normalizeMasterGoStrokeCapForFigma(geometry.strokeCap));
+    }
+  }
 
   // src/appliers/container.ts
+  var BOOLEAN_RESTORE_DEBUG_BUILD = "boolean-debug-2026-06-11-01";
   function shouldRestoreBooleanVectorAsFrame(data, layerRecord) {
     if (!data || data.sourceType !== "BOOLEAN_OPERATION") return false;
     if (data.receiveCreateOverride || data.svgFallback) return false;
@@ -1659,36 +1743,16 @@ ${style}`;
     if (!layerRecord.childIds || layerRecord.childIds.length === 0) return false;
     return !hasUsableVectorNetwork(data.vectorNetwork);
   }
-  function shouldRestoreBooleanOperationTree(data) {
+  function shouldRestoreBooleanOperationTree(data, layerRecord) {
     if (!data) return false;
-    return data.sourceType === "BOOLEAN_OPERATION" && (data.type === "BOOLEAN_OPERATION" || data.restoreType === "BOOLEAN_OPERATION" || data.receiveCreateOverride === "BOOLEAN_OPERATION");
+    const hasBooleanChildren = data.sourceType === "BOOLEAN_OPERATION" && !!layerRecord && Array.isArray(layerRecord.childIds) && layerRecord.childIds.length > 0;
+    return data.sourceType === "BOOLEAN_OPERATION" && (hasBooleanChildren || data.type === "BOOLEAN_OPERATION" || data.restoreType === "BOOLEAN_OPERATION" || data.receiveCreateOverride === "BOOLEAN_OPERATION");
   }
   function normalizeBooleanOperation(value) {
     if (value === "UNION" || value === "SUBTRACT" || value === "INTERSECT" || value === "EXCLUDE") {
       return value;
     }
     return null;
-  }
-  function createBooleanOperationNode(operation, children, parent, index) {
-    if (operation === "UNION") return figma.union(children, parent, index);
-    if (operation === "SUBTRACT") return figma.subtract(children, parent, index);
-    if (operation === "INTERSECT") return figma.intersect(children, parent, index);
-    return figma.exclude(children, parent, index);
-  }
-  function createSvgFallbackNode(data) {
-    if (typeof (data == null ? void 0 : data.svgMarkup) !== "string" || !data.svgMarkup.trim()) return null;
-    try {
-      return figma.createNodeFromSvg(data.svgMarkup);
-    } catch (error) {
-      console.warn("Unable to create boolean SVG fallback:", (data == null ? void 0 : data.name) || (data == null ? void 0 : data.id) || "Untitled", error);
-      return null;
-    }
-  }
-  function createSvgFallbackProps(data) {
-    return __spreadProps(__spreadValues({}, data), {
-      svgFallback: true,
-      receiveCreateOverride: "SVG"
-    });
   }
   function clearGeometryPaint(geometry) {
     if (!geometry || typeof geometry !== "object") return geometry;
@@ -1712,24 +1776,144 @@ ${style}`;
       geometry: clearGeometryPaint(data.geometry)
     });
   }
+  function createUntransformedContainerShellProps(data) {
+    const props = createBooleanFrameFallbackProps(data);
+    delete props.layout;
+    delete props.constraints;
+    return props;
+  }
+  function createContainerShellFrameProps(data) {
+    return hasNonTranslationTransform(data == null ? void 0 : data.layout) ? createUntransformedContainerShellProps(data) : createBooleanFrameFallbackProps(data);
+  }
+  function createFinalizedContainerProps(data, preserveLayout = false) {
+    const props = __spreadValues({}, data);
+    if (!preserveLayout) {
+      delete props.layout;
+      delete props.constraints;
+    }
+    return props;
+  }
+  function hasNonTranslationTransform(layout) {
+    const transform = layout && layout.relativeTransform;
+    if (!hasFiniteTransform(transform)) return false;
+    return Math.abs(transform[0][0] - 1) > 1e-4 || Math.abs(transform[0][1]) > 1e-4 || Math.abs(transform[1][0]) > 1e-4 || Math.abs(transform[1][1] - 1) > 1e-4;
+  }
+  function hasFiniteTransform(transform) {
+    return Array.isArray(transform) && Array.isArray(transform[0]) && Array.isArray(transform[1]) && Number.isFinite(transform[0][0]) && Number.isFinite(transform[0][1]) && Number.isFinite(transform[0][2]) && Number.isFinite(transform[1][0]) && Number.isFinite(transform[1][1]) && Number.isFinite(transform[1][2]);
+  }
+  function shouldRestoreComponentSetNode(data) {
+    if (!data) return false;
+    if (data.receiveCreateOverride === "SVG" || data.svgFallback) return false;
+    return data.sourceType === "COMPONENT_SET" && (data.type === "COMPONENT_SET" || data.restoreType === "COMPONENT_SET" || data.receiveCreateOverride === "COMPONENT_SET");
+  }
+  function restoreComponentSetNode(nodeProps, parent, layerRecord, layers, restoredBefore, totalNodes, restoreNodeCallback, applyPropertiesCallback, maybeReportProgressCallback) {
+    return __async(this, null, function* () {
+      const shell = figma.createFrame();
+      const childIds = nodeProps.omitChildrenOnRestore ? [] : layerRecord.childIds || [];
+      const shellProps = createBooleanFrameFallbackProps(nodeProps);
+      let appended = false;
+      try {
+        if (!appendRestoredNode(parent, shell)) return 0;
+        appended = true;
+        yield applyPropertiesCallback(shell, shellProps);
+      } catch (error) {
+        console.warn("Unable to create component set restore shell:", (nodeProps == null ? void 0 : nodeProps.name) || layerRecord.name, error);
+        if (appended) safeRemove(shell);
+        return 0;
+      }
+      let restoredCount = 1;
+      yield maybeReportProgressCallback(restoredBefore + restoredCount, totalNodes, "\u6B63\u5728\u8FD8\u539F\uFF1A" + (nodeProps.name || layerRecord.name));
+      for (const childId of childIds) {
+        restoredCount += yield restoreNodeCallback(childId, shell, layers, restoredBefore + restoredCount, totalNodes);
+      }
+      yield finalizeComponentSetShell(shell, nodeProps, applyPropertiesCallback);
+      return restoredCount;
+    });
+  }
+  function finalizeComponentSetShell(shell, data, applyPropertiesCallback) {
+    return __async(this, null, function* () {
+      const parent = shell.parent;
+      if (!parent || !("insertChild" in parent)) {
+        safeSet(shell, "name", data.name);
+        return;
+      }
+      const components = shell.children.filter((child) => child.type === "COMPONENT");
+      if (components.length < 1) {
+        console.warn("Unable to create component set because it has no component children:", (data == null ? void 0 : data.name) || (data == null ? void 0 : data.id) || "Untitled");
+        safeSet(shell, "name", data.name);
+        return;
+      }
+      try {
+        const parentIndex = parent.children.indexOf(shell);
+        for (let index = 0; index < components.length; index++) {
+          const component = components[index];
+          safeSet(component, "name", createFigmaVariantName(component.name, index));
+        }
+        const componentSet = figma.combineAsVariants(
+          components,
+          parent,
+          parentIndex >= 0 ? parentIndex : parent.children.length
+        );
+        safeRemove(shell);
+        yield applyPropertiesCallback(componentSet, data);
+        restoreComponentSetChildLayouts(componentSet);
+      } catch (error) {
+        console.warn("Unable to create native component set, keeping frame fallback:", (data == null ? void 0 : data.name) || (data == null ? void 0 : data.id) || "Untitled", error);
+        safeSet(shell, "name", data.name);
+      }
+    });
+  }
+  function createFigmaVariantName(name, index) {
+    const fallback = `Variant ${index + 1}`;
+    if (!name) return `Property 1=${fallback}`;
+    const bracketed = name.match(/^(.+?)\[[^\]]+\]=(.+)$/);
+    if (bracketed) {
+      return `${sanitizeVariantPropertyName(bracketed[1])}=${sanitizeVariantValue(bracketed[2], fallback)}`;
+    }
+    const equalsIndex = name.indexOf("=");
+    if (equalsIndex > 0 && equalsIndex < name.length - 1) {
+      return `${sanitizeVariantPropertyName(name.slice(0, equalsIndex))}=${sanitizeVariantValue(name.slice(equalsIndex + 1), fallback)}`;
+    }
+    return `Property 1=${sanitizeVariantValue(name, fallback)}`;
+  }
+  function sanitizeVariantPropertyName(value) {
+    const trimmed = String(value || "").trim();
+    return trimmed || "Property 1";
+  }
+  function sanitizeVariantValue(value, fallback) {
+    const trimmed = String(value || "").trim();
+    return trimmed || fallback;
+  }
+  function restoreComponentSetChildLayouts(componentSet) {
+    for (const child of componentSet.children) {
+      if (child.type !== "COMPONENT") continue;
+      const layout = state.restoredLayoutByNodeId[child.id];
+      if (layout) {
+        if (layout.width !== void 0 && layout.height !== void 0) {
+          safeResize(child, layout.width, layout.height);
+        }
+        if (hasFiniteRelativeTransform3(layout)) {
+          safeSet(child, "relativeTransform", layout.relativeTransform);
+        } else {
+          if (layout.x !== void 0) safeSet(child, "x", layout.x);
+          if (layout.y !== void 0) safeSet(child, "y", layout.y);
+        }
+      }
+    }
+  }
+  function hasFiniteRelativeTransform3(layout) {
+    return Array.isArray(layout == null ? void 0 : layout.relativeTransform) && Array.isArray(layout.relativeTransform[0]) && Array.isArray(layout.relativeTransform[1]) && Number.isFinite(layout.relativeTransform[0][0]) && Number.isFinite(layout.relativeTransform[0][1]) && Number.isFinite(layout.relativeTransform[0][2]) && Number.isFinite(layout.relativeTransform[1][0]) && Number.isFinite(layout.relativeTransform[1][1]) && Number.isFinite(layout.relativeTransform[1][2]);
+  }
   function shouldRestoreGroupNode(data) {
     if (!data) return false;
     if (data.receiveCreateOverride === "SVG" || data.svgFallback) return false;
     return data.sourceType === "GROUP" && (data.type === "GROUP" || data.restoreType === "GROUP" || data.receiveCreateOverride === "GROUP");
   }
-  function createGroupShellFrameProps(data) {
-    return __spreadProps(__spreadValues({}, data), {
-      type: "FRAME",
-      restoreType: "FRAME",
-      receiveCreateOverride: "FRAME",
-      clipsContent: false,
-      geometry: clearGeometryPaint(data.geometry)
-    });
-  }
   function restoreGroupNode(nodeProps, parent, layerRecord, layers, restoredBefore, totalNodes, restoreNodeCallback, applyPropertiesCallback, maybeReportProgressCallback) {
     return __async(this, null, function* () {
       const shell = figma.createFrame();
-      const shellProps = createGroupShellFrameProps(nodeProps);
+      const childIds = nodeProps.omitChildrenOnRestore ? [] : layerRecord.childIds || [];
+      const shellProps = createContainerShellFrameProps(nodeProps);
       let appended = false;
       try {
         if (!appendRestoredNode(parent, shell)) return 0;
@@ -1742,7 +1926,6 @@ ${style}`;
       }
       let restoredCount = 1;
       yield maybeReportProgressCallback(restoredBefore + restoredCount, totalNodes, "\u6B63\u5728\u8FD8\u539F\uFF1A" + (nodeProps.name || layerRecord.name));
-      const childIds = nodeProps.omitChildrenOnRestore ? [] : layerRecord.childIds || [];
       for (const childId of childIds) {
         restoredCount += yield restoreNodeCallback(childId, shell, layers, restoredBefore + restoredCount, totalNodes);
       }
@@ -1766,7 +1949,7 @@ ${style}`;
           parentIndex >= 0 ? parentIndex : parent.children.length
         );
         safeRemove(shell);
-        yield applyPropertiesCallback(group, data);
+        yield applyPropertiesCallback(group, createFinalizedContainerProps(data, hasNonTranslationTransform(data == null ? void 0 : data.layout)));
       } catch (error) {
         console.warn("Unable to create native group, keeping frame fallback:", (data == null ? void 0 : data.name) || (data == null ? void 0 : data.id) || "Untitled", error);
         safeSet(shell, "name", data.name);
@@ -1775,6 +1958,17 @@ ${style}`;
   }
   function restoreBooleanOperationTree(nodeProps, parent, layerRecord, layers, restoredBefore, totalNodes, restoreNodeCallback, applyPropertiesCallback, maybeReportProgressCallback) {
     return __async(this, null, function* () {
+      logBooleanRestoreDebug("restore-start", {
+        build: BOOLEAN_RESTORE_DEBUG_BUILD,
+        sourceId: nodeProps == null ? void 0 : nodeProps.id,
+        name: (nodeProps == null ? void 0 : nodeProps.name) || layerRecord.name,
+        sourceType: nodeProps == null ? void 0 : nodeProps.sourceType,
+        type: nodeProps == null ? void 0 : nodeProps.type,
+        restoreType: nodeProps == null ? void 0 : nodeProps.restoreType,
+        operation: nodeProps == null ? void 0 : nodeProps.booleanOperation,
+        childIds: layerRecord.childIds || [],
+        omitChildrenOnRestore: !!(nodeProps == null ? void 0 : nodeProps.omitChildrenOnRestore)
+      });
       const shell = figma.createFrame();
       const shellProps = createBooleanFrameFallbackProps(nodeProps);
       let appended = false;
@@ -1794,6 +1988,13 @@ ${style}`;
       for (const childId of childIds) {
         restoredCount += yield restoreNodeCallback(childId, shell, layers, restoredBefore + restoredCount, totalNodes);
       }
+      logBooleanRestoreDebug("children-restored", {
+        build: BOOLEAN_RESTORE_DEBUG_BUILD,
+        sourceId: nodeProps == null ? void 0 : nodeProps.id,
+        name: (nodeProps == null ? void 0 : nodeProps.name) || layerRecord.name,
+        shell: summarizeSceneNode(shell),
+        children: [...shell.children].map(summarizeSceneNode)
+      });
       const combined = yield combineBooleanShell(shell, nodeProps, applyPropertiesCallback);
       if (!combined) {
         yield restoreBooleanFallbackFromShell(shell, nodeProps, applyPropertiesCallback);
@@ -1806,8 +2007,19 @@ ${style}`;
       const parent = shell.parent;
       if (!parent || !("insertChild" in parent)) return null;
       const children = [...shell.children];
-      if (children.length < 2) {
-        console.warn("Unable to restore boolean operation because it has fewer than two children:", (data == null ? void 0 : data.name) || (data == null ? void 0 : data.id) || "Untitled");
+      logBooleanRestoreDebug("combine-start", {
+        build: BOOLEAN_RESTORE_DEBUG_BUILD,
+        sourceId: data == null ? void 0 : data.id,
+        name: data == null ? void 0 : data.name,
+        operation: data == null ? void 0 : data.booleanOperation,
+        childCount: children.length,
+        children: children.map(summarizeSceneNode)
+      });
+      if (children.length === 1) {
+        return yield promoteSingleBooleanChild(shell, children[0], data);
+      }
+      if (children.length < 1) {
+        console.warn("Unable to restore boolean operation because it has no children:", (data == null ? void 0 : data.name) || (data == null ? void 0 : data.id) || "Untitled");
         return null;
       }
       const operation = normalizeBooleanOperation(data.booleanOperation);
@@ -1816,10 +2028,24 @@ ${style}`;
         return null;
       }
       try {
-        const combined = createBooleanOperationNode(operation, children, shell, 0);
-        const parentIndex = parent.children.indexOf(shell);
-        parent.insertChild(parentIndex >= 0 ? parentIndex : parent.children.length, combined);
+        const booleanChildren = flattenStrokeOnlyBooleanChildren(children, shell);
+        logBooleanRestoreDebug("after-flatten", {
+          build: BOOLEAN_RESTORE_DEBUG_BUILD,
+          sourceId: data == null ? void 0 : data.id,
+          name: data == null ? void 0 : data.name,
+          operation,
+          sourceOperation: data == null ? void 0 : data.booleanOperation,
+          children: booleanChildren.map(summarizeSceneNode)
+        });
+        const combined = createBooleanContainerNode(operation, booleanChildren, shell, parent);
         yield applyPropertiesCallback(combined, data);
+        logBooleanRestoreDebug("combine-complete", {
+          build: BOOLEAN_RESTORE_DEBUG_BUILD,
+          sourceId: data == null ? void 0 : data.id,
+          name: data == null ? void 0 : data.name,
+          combined: summarizeSceneNode(combined),
+          children: [...combined.children].map(summarizeSceneNode)
+        });
         safeRemove(shell);
         return combined;
       } catch (error) {
@@ -1828,33 +2054,167 @@ ${style}`;
       }
     });
   }
+  function flattenStrokeOnlyBooleanChildren(children, parent) {
+    const result = [];
+    for (const child of children) {
+      if (!shouldFlattenBooleanChild(child)) {
+        logBooleanRestoreDebug("flatten-skip", {
+          build: BOOLEAN_RESTORE_DEBUG_BUILD,
+          child: summarizeSceneNode(child),
+          reason: describeFlattenSkipReason(child)
+        });
+        result.push(child);
+        continue;
+      }
+      try {
+        const index = parent.children.indexOf(child);
+        const beforeSummary = summarizeSceneNode(child);
+        logBooleanRestoreDebug("flatten-before", {
+          build: BOOLEAN_RESTORE_DEBUG_BUILD,
+          child: beforeSummary,
+          parentChildIndex: index
+        });
+        const flattened = figma.flatten([child], parent, index >= 0 ? index : parent.children.length);
+        logBooleanRestoreDebug("flatten-after", {
+          build: BOOLEAN_RESTORE_DEBUG_BUILD,
+          before: beforeSummary,
+          flattened: summarizeSceneNode(flattened)
+        });
+        result.push(flattened);
+      } catch (error) {
+        console.warn("Unable to flatten stroked boolean child, keeping original:", child.name, error);
+        result.push(child);
+      }
+    }
+    return result;
+  }
+  function shouldFlattenBooleanChild(node) {
+    if (!isStrokeOnlyWithoutVisibleFill(node)) return false;
+    return hasClosedVectorRegion(node);
+  }
+  function hasClosedVectorRegion(node) {
+    const vectorNetwork = node.vectorNetwork;
+    return !!vectorNetwork && Array.isArray(vectorNetwork.regions) && vectorNetwork.regions.length > 0;
+  }
+  function isStrokeOnlyWithoutVisibleFill(node) {
+    if (!("strokes" in node)) return false;
+    const strokes = node.strokes;
+    if (!Array.isArray(strokes) || strokes.length === 0) return false;
+    if (!("fills" in node)) return true;
+    const fills = node.fills;
+    return !Array.isArray(fills) || fills.length === 0 || fills.every((fill) => !fill || fill.visible === false);
+  }
+  function describeFlattenSkipReason(node) {
+    if (!("strokes" in node)) return "node-has-no-strokes-property";
+    const strokes = node.strokes;
+    if (!Array.isArray(strokes) || strokes.length === 0) return "node-has-no-strokes";
+    if (!hasClosedVectorRegion(node)) return "node-has-no-closed-region";
+    if (!("fills" in node)) return "node-has-strokes-and-no-fills-property";
+    const fills = node.fills;
+    if (!Array.isArray(fills) || fills.length === 0) return "node-has-strokes-and-no-fills";
+    if (fills.every((fill) => !fill || fill.visible === false)) return "node-has-only-hidden-fills";
+    return "node-has-visible-fill";
+  }
+  function summarizeSceneNode(node) {
+    const nodeAny = node;
+    const fills = "fills" in nodeAny && Array.isArray(nodeAny.fills) ? nodeAny.fills : [];
+    const strokes = "strokes" in nodeAny && Array.isArray(nodeAny.strokes) ? nodeAny.strokes : [];
+    const vectorNetwork = nodeAny.vectorNetwork;
+    return {
+      id: node.id,
+      name: node.name,
+      type: node.type,
+      x: "x" in nodeAny ? nodeAny.x : void 0,
+      y: "y" in nodeAny ? nodeAny.y : void 0,
+      width: "width" in nodeAny ? nodeAny.width : void 0,
+      height: "height" in nodeAny ? nodeAny.height : void 0,
+      relativeTransform: nodeAny.relativeTransform,
+      booleanOperation: nodeAny.booleanOperation,
+      fills: fills.map(summarizePaint),
+      strokes: strokes.map(summarizePaint),
+      strokeWeight: nodeAny.strokeWeight,
+      vectorNetwork: vectorNetwork ? {
+        vertices: Array.isArray(vectorNetwork.vertices) ? vectorNetwork.vertices.length : void 0,
+        segments: Array.isArray(vectorNetwork.segments) ? vectorNetwork.segments.length : void 0,
+        regions: Array.isArray(vectorNetwork.regions) ? vectorNetwork.regions.length : void 0
+      } : void 0,
+      children: "children" in nodeAny ? nodeAny.children.length : void 0
+    };
+  }
+  function summarizePaint(paint) {
+    if (!paint || typeof paint !== "object") return paint;
+    return {
+      type: paint.type,
+      visible: paint.visible,
+      opacity: paint.opacity,
+      blendMode: paint.blendMode
+    };
+  }
+  function logBooleanRestoreDebug(stage, payload) {
+    console.log(`[MasterGo2Figma][BooleanRestore][${stage}]`, payload);
+  }
+  function createBooleanContainerNode(operation, children, shell, parent) {
+    const parentIndex = parent.children.indexOf(shell);
+    const operationNode = figma.createBooleanOperation();
+    safeSet(operationNode, "booleanOperation", operation);
+    parent.insertChild(parentIndex >= 0 ? parentIndex : parent.children.length, operationNode);
+    for (const child of children) {
+      operationNode.appendChild(child);
+    }
+    return operationNode;
+  }
+  function promoteSingleBooleanChild(shell, child, data) {
+    return __async(this, null, function* () {
+      const parent = shell.parent;
+      if (!parent || !("insertChild" in parent)) return null;
+      try {
+        const parentIndex = parent.children.indexOf(shell);
+        const transform = composeSingleBooleanChildTransform(shell, child, data);
+        parent.insertChild(parentIndex >= 0 ? parentIndex : parent.children.length, child);
+        if (transform) safeSet(child, "relativeTransform", transform);
+        safeSet(child, "name", (data == null ? void 0 : data.name) || child.name);
+        safeRemove(shell);
+        return child;
+      } catch (error) {
+        console.warn("Unable to promote single-child boolean operation:", (data == null ? void 0 : data.name) || (data == null ? void 0 : data.id) || "Untitled", error);
+        return null;
+      }
+    });
+  }
+  function composeSingleBooleanChildTransform(shell, child, data) {
+    var _a;
+    const parentTransform = ((_a = data == null ? void 0 : data.layout) == null ? void 0 : _a.relativeTransform) || shell.relativeTransform;
+    const childTransform = child.relativeTransform;
+    if (!hasFiniteTransform(parentTransform) || !hasFiniteTransform(childTransform)) return null;
+    return multiplyTransforms(parentTransform, childTransform);
+  }
+  function multiplyTransforms(parent, child) {
+    return [
+      [
+        parent[0][0] * child[0][0] + parent[0][1] * child[1][0],
+        parent[0][0] * child[0][1] + parent[0][1] * child[1][1],
+        parent[0][0] * child[0][2] + parent[0][1] * child[1][2] + parent[0][2]
+      ],
+      [
+        parent[1][0] * child[0][0] + parent[1][1] * child[1][0],
+        parent[1][0] * child[0][1] + parent[1][1] * child[1][1],
+        parent[1][0] * child[0][2] + parent[1][1] * child[1][2] + parent[1][2]
+      ]
+    ];
+  }
   function restoreBooleanFallbackFromShell(shell, data, applyPropertiesCallback) {
     return __async(this, null, function* () {
       const parent = shell.parent;
       if (!parent || !("insertChild" in parent)) return;
       state.booleanFallbackCount++;
-      const svgNode = createSvgFallbackNode(data);
-      if (svgNode) {
-        const index = parent.children.indexOf(shell);
-        try {
-          parent.insertChild(index >= 0 ? index : parent.children.length, svgNode);
-          yield applyPropertiesCallback(svgNode, createSvgFallbackProps(data));
-          safeRemove(shell);
-          return;
-        } catch (error) {
-          console.warn("Unable to insert boolean SVG fallback:", (data == null ? void 0 : data.name) || (data == null ? void 0 : data.id) || "Untitled", error);
-          safeRemove(svgNode);
-        }
-      }
       yield applyPropertiesCallback(shell, createBooleanFrameFallbackProps(data));
     });
   }
   function restoreBooleanFallbackNode(data, parent, layerRecord, restoredBefore, totalNodes, applyPropertiesCallback, maybeReportProgressCallback) {
     return __async(this, null, function* () {
       state.booleanFallbackCount++;
-      const svgNode = createSvgFallbackNode(data);
-      const fallbackNode = svgNode || figma.createFrame();
-      const fallbackProps = svgNode ? createSvgFallbackProps(data) : createBooleanFrameFallbackProps(data);
+      const fallbackNode = figma.createFrame();
+      const fallbackProps = createBooleanFrameFallbackProps(data);
       try {
         if (!appendRestoredNode(parent, fallbackNode)) return 0;
         yield applyPropertiesCallback(fallbackNode, fallbackProps);
@@ -2345,6 +2705,21 @@ ${style}`;
     }
     return props;
   }
+  function shouldPreserveVectorLayoutBoxForAutoLayout(data, parent) {
+    if (!data || !data.vectorNetwork) return false;
+    const sourceType = data.sourceType || data.type;
+    if (sourceType !== "PEN" && sourceType !== "VECTOR") return false;
+    if (!parent || !("id" in parent)) return false;
+    const restoredParentLayout = state.restoredLayoutByNodeId[parent.id];
+    const parentLayoutMode = restoredParentLayout && restoredParentLayout.layoutMode;
+    if (parentLayoutMode && parentLayoutMode !== "NONE") return true;
+    return "layoutMode" in parent && parent.layoutMode !== "NONE";
+  }
+  function markVectorAutoLayoutBox(data) {
+    return __spreadProps(__spreadValues({}, data), {
+      vectorAutoLayoutBox: true
+    });
+  }
   function restoreImportedNode(nodeId, parent, layers, restoredBefore, totalNodes) {
     return __async(this, null, function* () {
       const layerRecord = layers[nodeId];
@@ -2353,7 +2728,7 @@ ${style}`;
         return 0;
       }
       let nodeProps = applyManifestLayoutToProps(layerRecord.props, layerRecord);
-      if (shouldRestoreBooleanOperationTree(nodeProps)) {
+      if (shouldRestoreBooleanOperationTree(nodeProps, layerRecord)) {
         return yield restoreBooleanOperationTree(
           nodeProps,
           parent,
@@ -2379,10 +2754,26 @@ ${style}`;
           maybeReportRestoreProgress
         );
       }
+      if (shouldRestoreComponentSetNode(nodeProps)) {
+        return yield restoreComponentSetNode(
+          nodeProps,
+          parent,
+          layerRecord,
+          layers,
+          restoredBefore,
+          totalNodes,
+          restoreImportedNode,
+          applyProperties,
+          maybeReportRestoreProgress
+        );
+      }
       if (shouldRestoreBooleanVectorAsFrame(nodeProps, layerRecord)) {
         nodeProps = createBooleanFrameFallbackProps(nodeProps);
       }
       nodeProps = prepareConnectorPolylineFallbackProps(nodeProps, parent);
+      if (shouldPreserveVectorLayoutBoxForAutoLayout(nodeProps, parent)) {
+        nodeProps = markVectorAutoLayoutBox(nodeProps);
+      }
       const newNode = yield createNodeFromData(nodeProps);
       if (!newNode) return 0;
       try {

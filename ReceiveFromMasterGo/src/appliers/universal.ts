@@ -1,6 +1,7 @@
 import { state } from "../state";
 import { safeSet, safeResize } from "../../../shared/utils";
 import { cloneTransform } from "../../../shared/matrixUtils";
+import { normalizeMasterGoStrokeCapForFigma } from "../../../shared/connectorUtils";
 import { deferLayoutRestore, applyAspectRatioLock } from "../deferredLayout";
 
 export function recordRestoredNode(data: any, node: SceneNode) {
@@ -414,6 +415,34 @@ export function normalizeLayoutForParent(node: any, layout: any): any {
     return normalized;
 }
 
+export function hasFiniteRelativeTransform(layout: any): boolean {
+    return Array.isArray(layout?.relativeTransform) &&
+        Array.isArray(layout.relativeTransform[0]) &&
+        Array.isArray(layout.relativeTransform[1]) &&
+        Number.isFinite(layout.relativeTransform[0][0]) &&
+        Number.isFinite(layout.relativeTransform[0][1]) &&
+        Number.isFinite(layout.relativeTransform[0][2]) &&
+        Number.isFinite(layout.relativeTransform[1][0]) &&
+        Number.isFinite(layout.relativeTransform[1][1]) &&
+        Number.isFinite(layout.relativeTransform[1][2]);
+}
+
+export function getUniformOpenVectorStrokeCap(vectorNetwork: any): string | null {
+    if (!vectorNetwork || !Array.isArray(vectorNetwork.vertices) || !Array.isArray(vectorNetwork.segments)) return null;
+    if (Array.isArray(vectorNetwork.regions) && vectorNetwork.regions.length > 0) return null;
+    if (vectorNetwork.segments.length < 1) return null;
+
+    const firstSegment = vectorNetwork.segments[0];
+    const lastSegment = vectorNetwork.segments[vectorNetwork.segments.length - 1];
+    const startVertex = vectorNetwork.vertices[firstSegment && firstSegment.start];
+    const endVertex = vectorNetwork.vertices[lastSegment && lastSegment.end];
+    const startCap = startVertex && startVertex.strokeCap;
+    const endCap = endVertex && endVertex.strokeCap;
+    if (!startCap || startCap === "NONE") return null;
+    if (endCap && endCap !== "NONE" && endCap !== startCap) return null;
+    return normalizeMasterGoStrokeCapForFigma(startCap);
+}
+
 export async function applyUniversalProperties(node: any, data: any) {
     if (!node || !data) return;
 
@@ -436,6 +465,7 @@ export async function applyUniversalProperties(node: any, data: any) {
     }
 
     const isGroup = node.type === "GROUP";
+    const isBooleanOperation = node.type === "BOOLEAN_OPERATION";
 
     if (!isGroup && data.corner && node.type !== "LINE" && node.type !== "TEXT") {
         if (data.corner.cornerRadius === -1) {
@@ -475,7 +505,10 @@ export async function applyUniversalProperties(node: any, data: any) {
         if (data.geometry.strokeAlign) safeSet(node, "strokeAlign", data.geometry.strokeAlign);
         if (data.geometry.strokeJoin) safeSet(node, "strokeJoin", data.geometry.strokeJoin);
         if (data.geometry.dashPattern !== undefined) safeSet(node, "dashPattern", data.geometry.dashPattern);
-        if (data.geometry.strokeCap && !data.connectorFallbackPolyline) safeSet(node, "strokeCap", data.geometry.strokeCap);
+        if (data.geometry.strokeCap && !data.connectorFallbackPolyline) {
+            const vectorCap = data.geometry.strokeCap === "NONE" ? getUniformOpenVectorStrokeCap(data.vectorNetwork) : null;
+            safeSet(node, "strokeCap", vectorCap || normalizeMasterGoStrokeCapForFigma(data.geometry.strokeCap));
+        }
     }
 
     if (data.constraints) safeSet(node, "constraints", normalizeConstraints(data.constraints));
@@ -485,16 +518,20 @@ export async function applyUniversalProperties(node: any, data: any) {
         const layout = normalizeLayoutForParent(node, data.layout);
         state.restoredLayoutByNodeId[node.id] = layout;
 
-        if (layout.relativeTransform) safeSet(node, "relativeTransform", layout.relativeTransform);
-        if (layout.x !== undefined) safeSet(node, "x", layout.x);
-        if (layout.y !== undefined) safeSet(node, "y", layout.y);
-        if (layout.rotation !== undefined) safeSet(node, "rotation", layout.rotation);
         if (layout.width !== undefined && layout.height !== undefined) {
-            if (isGroup) {
-                // Group resize is different, but for now we trust relativeTransform
+            if (isGroup || isBooleanOperation) {
+                // Group and boolean geometry is derived from children; resizing can shift nested vector bounds.
             } else {
                 safeResize(node, layout.width, layout.height);
             }
+        }
+        const hasRelativeTransform = hasFiniteRelativeTransform(layout);
+        if (hasRelativeTransform) {
+            safeSet(node, "relativeTransform", layout.relativeTransform);
+        } else {
+            if (layout.x !== undefined) safeSet(node, "x", layout.x);
+            if (layout.y !== undefined) safeSet(node, "y", layout.y);
+            if (layout.rotation !== undefined) safeSet(node, "rotation", layout.rotation);
         }
         if (layout.constrainProportions !== undefined) {
             applyAspectRatioLock(node, layout.constrainProportions);

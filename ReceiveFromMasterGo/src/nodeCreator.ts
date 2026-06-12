@@ -102,7 +102,6 @@ export async function createNodeFromData(data: any): Promise<SceneNode | null> {
             case "VECTOR":
                 const vector = figma.createVector();
                 node = vector;
-                if (data.vectorNetwork) applyVectorNetwork(vector, data.vectorNetwork, data);
                 break;
             case "ELLIPSE":
                 const ellipse = figma.createEllipse();
@@ -131,6 +130,9 @@ export async function createNodeFromData(data: any): Promise<SceneNode | null> {
                 break;
             case "SECTION":
                 node = figma.createSection();
+                break;
+            case "COMPONENT":
+                node = figma.createComponent();
                 break;
             case "SLICE":
                 node = figma.createSlice();

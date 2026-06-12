@@ -6,7 +6,7 @@ export function normalizeVectorStrokeCap(value: any): string {
 }
 
 export function applyVectorNetwork(node: VectorNode, vectorNetwork: any, data: any) {
-    const normalized = normalizeVectorNetworkForFigma(vectorNetwork);
+    const normalized = normalizeVectorNetworkForFigma(createVectorNetworkWithLayoutBoxAnchors(vectorNetwork, data));
     try {
         node.vectorNetwork = normalized;
         return;
@@ -19,6 +19,31 @@ export function applyVectorNetwork(node: VectorNode, vectorNetwork: any, data: a
     } catch (fallbackError) {
         console.warn("Unable to set fallback vectorNetwork:", data?.name || data?.id || "Untitled", fallbackError);
     }
+}
+
+export function createVectorNetworkWithLayoutBoxAnchors(vectorNetwork: any, data: any): any {
+    if (!data?.vectorAutoLayoutBox || !vectorNetwork || typeof vectorNetwork !== "object") return vectorNetwork;
+    const width = Number(data?.layout?.width);
+    const height = Number(data?.layout?.height);
+    if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return vectorNetwork;
+
+    const vertices = Array.isArray(vectorNetwork.vertices) ? vectorNetwork.vertices.slice() : [];
+    const segments = Array.isArray(vectorNetwork.segments) ? vectorNetwork.segments.slice() : [];
+    const startIndex = vertices.length;
+    vertices.push(
+        { x: 0, y: 0, strokeCap: "NONE" },
+        { x: width, y: height, strokeCap: "NONE" }
+    );
+    segments.push(
+        { start: startIndex, end: startIndex, tangentStart: { x: 0, y: 0 }, tangentEnd: { x: 0, y: 0 } },
+        { start: startIndex + 1, end: startIndex + 1, tangentStart: { x: 0, y: 0 }, tangentEnd: { x: 0, y: 0 } }
+    );
+
+    return {
+        ...vectorNetwork,
+        vertices,
+        segments
+    };
 }
 
 export function normalizeVectorNetworkForFigma(vectorNetwork: any): any {

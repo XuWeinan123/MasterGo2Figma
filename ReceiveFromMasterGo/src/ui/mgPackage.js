@@ -366,6 +366,14 @@
           result.type = "BOOLEAN_OPERATION";
           result.sourceType = "BOOLEAN_OPERATION";
           result.restoreType = "BOOLEAN_OPERATION";
+        } else if (name.indexOf("Component_Set") >= 0 || name.indexOf("组件集") >= 0) {
+          result.type = "COMPONENT_SET";
+          result.sourceType = "COMPONENT_SET";
+          result.restoreType = "COMPONENT_SET";
+        } else if (name.indexOf("Component") >= 0 || name.indexOf("组件") >= 0) {
+          result.type = "COMPONENT";
+          result.sourceType = "COMPONENT";
+          result.restoreType = "COMPONENT";
         } else if (name.indexOf("Instance") >= 0 || name.indexOf("实例") >= 0) {
           result.type = "FRAME";
           result.sourceType = "INSTANCE";
@@ -985,10 +993,7 @@
 
     function mgIsFallbackRootNode(n) {
       if (!n || !n.type || n.parent != null) return false;
-      const name = n.name || "";
-      // Component sets are still decoded and can be used as instance templates,
-      // but partial-page zip baselines do not restore them as page roots.
-      return name.indexOf("Component_Set") < 0 && name.indexOf("组件集") < 0;
+      return true;
     }
 
     function convertMgPackageToV2Entries(zipEntries, fileName) {

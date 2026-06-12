@@ -23,7 +23,9 @@ import {
   restoreBooleanOperationTree,
   createBooleanFrameFallbackProps,
   shouldRestoreGroupNode,
-  restoreGroupNode
+  restoreGroupNode,
+  shouldRestoreComponentSetNode,
+  restoreComponentSetNode
 } from "./appliers/container";
 import { yieldToEventLoop } from "../../shared/utils";
 
@@ -582,6 +584,24 @@ function prepareConnectorPolylineFallbackProps(data: any, parent: PageNode | Sce
   return props;
 }
 
+function shouldPreserveVectorLayoutBoxForAutoLayout(data: any, parent: PageNode | SceneNode): boolean {
+  if (!data || !data.vectorNetwork) return false;
+  const sourceType = data.sourceType || data.type;
+  if (sourceType !== "PEN" && sourceType !== "VECTOR") return false;
+  if (!parent || !("id" in parent)) return false;
+  const restoredParentLayout = state.restoredLayoutByNodeId[(parent as SceneNode).id];
+  const parentLayoutMode = restoredParentLayout && restoredParentLayout.layoutMode;
+  if (parentLayoutMode && parentLayoutMode !== "NONE") return true;
+  return "layoutMode" in parent && (parent as any).layoutMode !== "NONE";
+}
+
+function markVectorAutoLayoutBox(data: any): any {
+  return {
+    ...data,
+    vectorAutoLayoutBox: true
+  };
+}
+
 async function restoreImportedNode(
   nodeId: string,
   parent: PageNode | SceneNode,
@@ -596,7 +616,7 @@ async function restoreImportedNode(
   }
 
   let nodeProps = applyManifestLayoutToProps(layerRecord.props, layerRecord);
-  if (shouldRestoreBooleanOperationTree(nodeProps)) {
+  if (shouldRestoreBooleanOperationTree(nodeProps, layerRecord)) {
     return await restoreBooleanOperationTree(
       nodeProps,
       parent,
@@ -624,10 +644,28 @@ async function restoreImportedNode(
     );
   }
 
+  if (shouldRestoreComponentSetNode(nodeProps)) {
+    return await restoreComponentSetNode(
+      nodeProps,
+      parent,
+      layerRecord,
+      layers,
+      restoredBefore,
+      totalNodes,
+      restoreImportedNode,
+      applyProperties,
+      maybeReportRestoreProgress
+    );
+  }
+
   if (shouldRestoreBooleanVectorAsFrame(nodeProps, layerRecord)) {
     nodeProps = createBooleanFrameFallbackProps(nodeProps);
   }
   nodeProps = prepareConnectorPolylineFallbackProps(nodeProps, parent);
+  if (shouldPreserveVectorLayoutBoxForAutoLayout(nodeProps, parent)) {
+    nodeProps = markVectorAutoLayoutBox(nodeProps);
+  }
+
   const newNode = await createNodeFromData(nodeProps);
   if (!newNode) return 0;
 

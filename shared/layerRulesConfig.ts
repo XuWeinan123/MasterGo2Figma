@@ -7,7 +7,8 @@ export const LAYER_RULES_SCHEMA = "mastergo2figma.layer-conversion-rules.v1";
 
 export const VALID_RECEIVE_CREATE_TYPES = [
     "VECTOR", "ELLIPSE", "RECTANGLE", "STAR", "LINE", "POLYGON",
-    "TEXT", "SECTION", "SLICE", "FRAME", "GROUP", "CONNECTOR", "BOOLEAN_OPERATION"
+    "TEXT", "SECTION", "SLICE", "FRAME", "COMPONENT", "COMPONENT_SET",
+    "GROUP", "CONNECTOR", "BOOLEAN_OPERATION"
 ];
 
 export const DEFAULT_LAYER_CONVERSION_CONFIG: LayerConversionConfig = {
@@ -28,8 +29,8 @@ export const DEFAULT_LAYER_CONVERSION_CONFIG: LayerConversionConfig = {
         SECTION: { sourceType: "SECTION", restoreType: "SECTION", sendStrategy: "frameLike", receiveCreate: "SECTION", isContainer: true, visualFrameSource: false },
         SLICE: { sourceType: "SLICE", restoreType: "SLICE", sendStrategy: "universalOnly", receiveCreate: "SLICE", isContainer: false, visualFrameSource: false },
         CONNECTOR: { sourceType: "CONNECTOR", restoreType: "CONNECTOR", sendStrategy: "connector", receiveCreate: "CONNECTOR", isContainer: false, visualFrameSource: false },
-        COMPONENT: { sourceType: "COMPONENT", restoreType: "FRAME", sendStrategy: "frameLike", receiveCreate: "FRAME", isContainer: true, visualFrameSource: true },
-        COMPONENT_SET: { sourceType: "COMPONENT_SET", restoreType: "FRAME", sendStrategy: "frameLike", receiveCreate: "FRAME", isContainer: true, visualFrameSource: true },
+        COMPONENT: { sourceType: "COMPONENT", restoreType: "COMPONENT", sendStrategy: "frameLike", receiveCreate: "COMPONENT", isContainer: true, visualFrameSource: false },
+        COMPONENT_SET: { sourceType: "COMPONENT_SET", restoreType: "COMPONENT_SET", sendStrategy: "frameLike", receiveCreate: "COMPONENT_SET", isContainer: true, visualFrameSource: false },
         INSTANCE: { sourceType: "INSTANCE", restoreType: "FRAME", sendStrategy: "frameLike", receiveCreate: "FRAME", isContainer: true, visualFrameSource: true }
     }
 };

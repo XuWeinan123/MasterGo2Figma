@@ -1,4 +1,5 @@
 import { cloneTransform } from "../../../shared/matrixUtils";
+import { normalizeMasterGoStrokeCapForFigma } from "../../../shared/connectorUtils";
 import { 
     cloneJsonCompatible, finiteNumber, safeRead, isOutOfMemoryError, describeError 
 } from "../../../shared/utils";
@@ -355,24 +356,71 @@ export function fillsAndStrokes2Json(fills: readonly any[] | any, strokes: reado
 
 export function getLayoutMode(node: any): string {
     const mode = readNodeProperty<string>(node, "layoutMode", "NONE");
-    if (mode === "HORIZONTAL" || mode === "VERTICAL" || mode === "NONE") return mode;
+    if (mode === "HORIZONTAL" || mode === "VERTICAL") return mode;
+    const flexMode = readAutoLayoutProperty<string>(node, "flexMode", "NONE");
+    if (flexMode === "HORIZONTAL" || flexMode === "VERTICAL") return flexMode;
+    const direction = readAutoLayoutProperty<string>(node, "direction", "NONE");
+    if (direction === "ROW") return "HORIZONTAL";
+    if (direction === "COLUMN") return "VERTICAL";
     return "NONE";
 }
 
 export function getAxisAlign(value: any): string {
     if (value === "MIN" || value === "CENTER" || value === "MAX" || value === "SPACE_BETWEEN") return value;
+    if (value === "START" || value === "FLEX_START") return "MIN";
+    if (value === "END" || value === "FLEX_END") return "MAX";
+    if (value === "SPACING_BETWEEN") return "SPACE_BETWEEN";
     return "MIN";
 }
 
 export function getCounterAxisAlignContent(node: any): string {
-    const value = readNodeProperty(node, "counterAxisAlignContent", "AUTO");
+    const value = readNodeProperty(node, "counterAxisAlignContent", readAutoLayoutProperty(node, "crossAxisAlignContent", "AUTO"));
     if (value === "AUTO" || value === "SPACE_BETWEEN") return value;
     return "AUTO";
 }
 
 export function getLayoutAlign(value: any): string {
     if (value === "INHERIT" || value === "MIN" || value === "CENTER" || value === "MAX" || value === "STRETCH") return value;
+    if (value === "AUTO") return "INHERIT";
+    if (value === "START" || value === "FLEX_START") return "MIN";
+    if (value === "END" || value === "FLEX_END") return "MAX";
     return "INHERIT";
+}
+
+export function readAutoLayoutProperty<T>(node: any, property: string, fallback: T): T {
+    const direct = readNodeProperty(node, property, undefined as any);
+    if (direct !== undefined && direct !== null) return direct;
+
+    const autoLayout = readNodeProperty<any>(node, "autoLayout", null);
+    if (autoLayout && autoLayout[property] !== undefined && autoLayout[property] !== null) return autoLayout[property];
+
+    const layout = readNodeProperty<any>(node, "layout", null);
+    const layoutAuto = layout && layout.autoLayout;
+    if (layoutAuto && layoutAuto[property] !== undefined && layoutAuto[property] !== null) return layoutAuto[property];
+
+    return fallback;
+}
+
+export function readAutoLayoutNumber(node: any, property: string, fallback = 0): number {
+    const value = readAutoLayoutProperty<any>(node, property, fallback);
+    if (typeof value === "number") return value;
+    if (value && typeof value === "object") {
+        if (typeof value.value === "number") return value.value;
+        if (typeof value.rawValue === "number") return value.rawValue;
+    }
+    return finiteNumber(value, fallback);
+}
+
+export function getPrimaryAxisSizingMode(node: any): string {
+    return readNodeProperty(node, "primaryAxisSizingMode",
+        readNodeProperty(node, "mainAxisSizingMode",
+            readAutoLayoutProperty(node, "mainAxisSizingMode", "FIXED")));
+}
+
+export function getCounterAxisSizingMode(node: any): string {
+    return readNodeProperty(node, "counterAxisSizingMode",
+        readNodeProperty(node, "crossAxisSizingMode",
+            readAutoLayoutProperty(node, "crossAxisSizingMode", "FIXED")));
 }
 
 export function getRelativeLayoutTransform(selection: any) {
@@ -461,7 +509,7 @@ export function getUniversalProperty(selection: any, sourceType?: string, restor
             "strokeAlign": readNodeProperty(selection, "strokeAlign", "CENTER"),
             "strokeJoin": readNodeProperty(selection, "strokeJoin", "MITER"),
             "dashPattern": cloneJsonCompatible(readNodeProperty<any[]>(selection, "strokeDashes", []), []),
-            "strokeCap": readNodeProperty(selection, "strokeCap", "NONE"),
+            "strokeCap": normalizeMasterGoStrokeCapForFigma(readNodeProperty(selection, "strokeCap", "NONE")),
             "strokeTopWeight": ((selection as any).strokeTopWeight !== undefined) ? readNodeProperty(selection, "strokeTopWeight", 0) : undefined,
             "strokeBottomWeight": ((selection as any).strokeBottomWeight !== undefined) ? readNodeProperty(selection, "strokeBottomWeight", 0) : undefined,
             "strokeLeftWeight": ((selection as any).strokeLeftWeight !== undefined) ? readNodeProperty(selection, "strokeLeftWeight", 0) : undefined,
@@ -475,18 +523,18 @@ export function getUniversalProperty(selection: any, sourceType?: string, restor
             "height": readNodeProperty(selection, "height", 0),
             "constrainProportions": readNodeProperty(selection, "constrainProportions", false) || false,
             "layoutMode": getLayoutMode(selection as any),
-            "itemSpacing": readNodeProperty(selection, "itemSpacing", 0) || 0,
-            "paddingLeft": readNodeProperty(selection, "paddingLeft", 0) || 0,
-            "paddingRight": readNodeProperty(selection, "paddingRight", 0) || 0,
-            "paddingTop": readNodeProperty(selection, "paddingTop", 0) || 0,
-            "paddingBottom": readNodeProperty(selection, "paddingBottom", 0) || 0,
-            "primaryAxisAlignItems": getAxisAlign(readNodeProperty(selection, "primaryAxisAlignItems", readNodeProperty(selection, "mainAxisAlignItems", "MIN"))),
-            "counterAxisAlignItems": getAxisAlign(readNodeProperty(selection, "counterAxisAlignItems", readNodeProperty(selection, "crossAxisAlignItems", "MIN"))),
+            "itemSpacing": readAutoLayoutNumber(selection, "itemSpacing", 0),
+            "paddingLeft": readAutoLayoutNumber(selection, "paddingLeft", 0),
+            "paddingRight": readAutoLayoutNumber(selection, "paddingRight", 0),
+            "paddingTop": readAutoLayoutNumber(selection, "paddingTop", 0),
+            "paddingBottom": readAutoLayoutNumber(selection, "paddingBottom", 0),
+            "primaryAxisAlignItems": getAxisAlign(readNodeProperty(selection, "primaryAxisAlignItems", readAutoLayoutProperty(selection, "mainAxisAlignItems", "MIN"))),
+            "counterAxisAlignItems": getAxisAlign(readNodeProperty(selection, "counterAxisAlignItems", readAutoLayoutProperty(selection, "crossAxisAlignItems", "MIN"))),
             "counterAxisAlignContent": getCounterAxisAlignContent(selection as any),
-            "primaryAxisSizingMode": readNodeProperty(selection, "primaryAxisSizingMode", readNodeProperty(selection, "mainAxisSizingMode", "FIXED")),
-            "counterAxisSizingMode": readNodeProperty(selection, "counterAxisSizingMode", readNodeProperty(selection, "crossAxisSizingMode", "FIXED")),
-            "itemReverseZIndex": readNodeProperty(selection, "itemReverseZIndex", false) || false,
-            "strokesIncludedInLayout": readNodeProperty(selection, "strokesIncludedInLayout", false) || false,
+            "primaryAxisSizingMode": getPrimaryAxisSizingMode(selection as any),
+            "counterAxisSizingMode": getCounterAxisSizingMode(selection as any),
+            "itemReverseZIndex": readNodeProperty(selection, "itemReverseZIndex", readAutoLayoutProperty(selection, "itemReverseZIndex", false)) || false,
+            "strokesIncludedInLayout": readNodeProperty(selection, "strokesIncludedInLayout", readAutoLayoutProperty(selection, "strokesIncludedInLayout", false)) || false,
             "layoutAlign": getLayoutAlign(readNodeProperty(selection, "layoutAlign", readNodeProperty(selection, "alignSelf", "INHERIT"))),
             "layoutGrow": readNodeProperty(selection, "layoutGrow", readNodeProperty(selection, "flexGrow", 0)),
             "layoutPositioning": readNodeProperty(selection, "layoutPositioning", "AUTO")

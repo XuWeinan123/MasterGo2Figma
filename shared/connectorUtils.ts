@@ -99,6 +99,32 @@ export function normalizeConnectorVectorStrokeCap(value: any): string {
     return "NONE";
 }
 
+export function normalizeMasterGoStrokeCapForFigma(value: any): string {
+    if (value === "NONE" ||
+        value === "ROUND" ||
+        value === "SQUARE" ||
+        value === "ARROW_LINES" ||
+        value === "ARROW_EQUILATERAL") {
+        return value;
+    }
+
+    if (value === "LINE_ARROW" || value === "LINE") return "ARROW_LINES";
+    if (value === "TRIANGLE_ARROW" || value === "TRIANGLE_FILLED") return "ARROW_EQUILATERAL";
+    if (value === "ROUND_ARROW" || value === "RING") return "ROUND";
+    if (value === "DIAMOND" || value === "DIAMOND_FILLED") return "ARROW_EQUILATERAL";
+    if (value === "CIRCLE_FILLED") return "ROUND";
+    return "NONE";
+}
+
+export function shouldRestoreStrokeCapAsVector(value: any): boolean {
+    return value === "ROUND_ARROW" ||
+        value === "RING" ||
+        value === "DIAMOND" ||
+        value === "DIAMOND_FILLED" ||
+        value === "CIRCLE_FILLED" ||
+        value === "TRIANGLE_FILLED";
+}
+
 export function createConnectorRoutePoints(
     start: any,
     end: any,

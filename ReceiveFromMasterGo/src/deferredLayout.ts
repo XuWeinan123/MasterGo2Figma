@@ -135,15 +135,15 @@ function applyDeferredParentAutoLayout(record: { node: SceneNode; layout: any; i
         safeSet(node, "layoutGrow", layout.layoutGrow);
         applied = true;
     }
-    if (layout.relativeTransform) {
+    const hasRelativeTransform = hasFiniteRelativeTransform(layout);
+    if (hasRelativeTransform) {
         safeSet(node, "relativeTransform", layout.relativeTransform);
         applied = true;
-    }
-    if (layout.x !== undefined) {
+    } else if (layout.x !== undefined) {
         safeSet(node, "x", layout.x);
         applied = true;
     }
-    if (layout.y !== undefined) {
+    if (!hasRelativeTransform && layout.y !== undefined) {
         safeSet(node, "y", layout.y);
         applied = true;
     }
@@ -159,9 +159,24 @@ function finalizeDeferredAutoLayout(record: { node: SceneNode; layout: any; isGr
     if (layout.width === undefined || layout.height === undefined || !shouldRestoreFixedSize(node, layout)) return;
 
     safeResize(node, layout.width, layout.height);
-    if (layout.relativeTransform) safeSet(node, "relativeTransform", layout.relativeTransform);
-    if (layout.x !== undefined) safeSet(node, "x", layout.x);
-    if (layout.y !== undefined) safeSet(node, "y", layout.y);
+    if (hasFiniteRelativeTransform(layout)) {
+        safeSet(node, "relativeTransform", layout.relativeTransform);
+    } else {
+        if (layout.x !== undefined) safeSet(node, "x", layout.x);
+        if (layout.y !== undefined) safeSet(node, "y", layout.y);
+    }
+}
+
+function hasFiniteRelativeTransform(layout: any): boolean {
+    return Array.isArray(layout?.relativeTransform) &&
+        Array.isArray(layout.relativeTransform[0]) &&
+        Array.isArray(layout.relativeTransform[1]) &&
+        Number.isFinite(layout.relativeTransform[0][0]) &&
+        Number.isFinite(layout.relativeTransform[0][1]) &&
+        Number.isFinite(layout.relativeTransform[0][2]) &&
+        Number.isFinite(layout.relativeTransform[1][0]) &&
+        Number.isFinite(layout.relativeTransform[1][1]) &&
+        Number.isFinite(layout.relativeTransform[1][2]);
 }
 
 export function applySingleChildAutoSpaceAlignmentFix(node: any, layout: any) {

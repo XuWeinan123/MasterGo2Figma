@@ -236,16 +236,6 @@ export async function enrichBooleanOperationExport(node: SceneNode, nodeJson: an
 
     if (hasUsableVectorNetwork(nodeJson.vectorNetwork) || childNodes.length === 0) return;
 
-    const svg = await tryExportSvgMarkup(node, "Boolean");
-    if (svg) {
-        nodeJson.svgMarkup = svg;
-        nodeJson.svgFallback = true;
-        nodeJson.receiveCreateOverride = "SVG";
-        nodeJson.omitChildrenOnRestore = true;
-        nodeJson.omittedChildNodeCount = Math.max(0, countExportableSubtreeNodes(node) - 1);
-        return;
-    }
-
     markBooleanAsFrameFallback(nodeJson);
 }
 

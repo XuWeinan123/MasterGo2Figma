@@ -53,6 +53,8 @@ export type ReceiveCreateType =
     | "SECTION" 
     | "SLICE" 
     | "FRAME" 
+    | "COMPONENT"
+    | "COMPONENT_SET"
     | "GROUP" 
     | "CONNECTOR" 
     | "BOOLEAN_OPERATION"

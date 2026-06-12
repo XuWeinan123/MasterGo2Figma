@@ -1,5 +1,6 @@
 import { getUniversalProperty, readNodeProperty, cloneJsonCompatible } from "./universal";
 import { normalizeVectorWindingRuleForFigma } from "../../../shared/vectorUtils";
+import { normalizeMasterGoStrokeCapForFigma } from "../../../shared/connectorUtils";
 import { getRuleRestoreType } from "../layerRules";
 
 export function normalizeVectorRegionLoops(loops: any): number[][] {
@@ -41,6 +42,28 @@ export function cloneVectorNetworkForExport(vectorNetwork: any) {
     };
 }
 
+export function getUniformOpenVectorStrokeCap(vectorNetwork: any): string | null {
+    if (!vectorNetwork || !Array.isArray(vectorNetwork.vertices) || !Array.isArray(vectorNetwork.segments)) return null;
+    if (Array.isArray(vectorNetwork.regions) && vectorNetwork.regions.length > 0) return null;
+    if (vectorNetwork.segments.length < 1) return null;
+
+    const firstSegment = vectorNetwork.segments[0];
+    const lastSegment = vectorNetwork.segments[vectorNetwork.segments.length - 1];
+    const startVertex = vectorNetwork.vertices[firstSegment && firstSegment.start];
+    const endVertex = vectorNetwork.vertices[lastSegment && lastSegment.end];
+    const startCap = startVertex && startVertex.strokeCap;
+    const endCap = endVertex && endVertex.strokeCap;
+    if (!startCap || startCap === "NONE") return null;
+    if (endCap && endCap !== "NONE" && endCap !== startCap) return null;
+    return normalizeMasterGoStrokeCapForFigma(startCap);
+}
+
+export function applyUniformVectorStrokeCap(resultStruct: any, vectorNetwork: any) {
+    const strokeCap = getUniformOpenVectorStrokeCap(vectorNetwork);
+    if (!strokeCap || !resultStruct.geometry || resultStruct.geometry.strokeCap !== "NONE") return;
+    resultStruct.geometry.strokeCap = strokeCap;
+}
+
 export function transPenNode(selection: any, sourceType?: string, restoreType?: string) {
     const universalStruct = getUniversalProperty(selection, sourceType, restoreType);
     const originJson = selection.penNetwork;
@@ -48,6 +71,7 @@ export function transPenNode(selection: any, sourceType?: string, restoreType?: 
         const vectorNetwork = cloneVectorNetworkForExport(selection.vectorNetwork);
         const resultStruct = Object.assign(vectorNetwork ? { vectorNetwork } : {}, universalStruct);
         resultStruct.type = restoreType || getRuleRestoreType(sourceType || selection.type);
+        applyUniformVectorStrokeCap(resultStruct, vectorNetwork);
         return resultStruct;
     }
 
@@ -91,5 +115,6 @@ export function transPenNode(selection: any, sourceType?: string, restoreType?: 
 
     const resultStruct = Object.assign(otherStruct, universalStruct);
     resultStruct.type = restoreType || getRuleRestoreType(sourceType || selection.type);
+    applyUniformVectorStrokeCap(resultStruct, finalPathJson);
     return resultStruct;
 }
