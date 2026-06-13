@@ -1,8 +1,12 @@
 import { state } from "./state";
-import { safeSet, safeResize, isSceneNode } from "../../shared/utils";
+import { safeSet, safeResize, isSceneNode, yieldToEventLoop } from "../../shared/utils";
 
 const INTERNAL_PROPS_PREFIX = "[PROPS]";
 const SIBLING_PROPS_PREFIX = "[PROPS_SIBLING]";
+const POSTPROCESS_BATCH_SIZE = 500;
+const POSTPROCESS_YIELD_INTERVAL_MS = 50;
+
+type PostprocessProgressCallback = (done: number, total: number, label: string) => Promise<void> | void;
 
 export function deferLayoutRestore(node: any, layout: any, isGroup: boolean) {
     if (!node || !layout || !isSceneNode(node)) return;
@@ -12,15 +16,30 @@ export function deferLayoutRestore(node: any, layout: any, isGroup: boolean) {
     }
 }
 
-export function applyDeferredLayoutRestores() {
+export async function applyDeferredLayoutRestores(progress?: PostprocessProgressCallback) {
     if (state.deferredLayoutRestores.length === 0) return;
 
     const records = state.deferredLayoutRestores;
     state.deferredLayoutRestores = [];
+    const total = Math.max(1, records.length * 3);
+    let done = 0;
+    let lastYieldAt = Date.now();
 
-    for (const record of records) applyDeferredNodeAutoLayout(record);
-    for (const record of records) applyDeferredParentAutoLayout(record);
-    for (const record of records) finalizeDeferredAutoLayout(record);
+    for (const record of records) {
+        applyDeferredNodeAutoLayout(record);
+        done++;
+        lastYieldAt = await maybeYieldPostprocess(done, total, "正在应用自动布局...", lastYieldAt, progress);
+    }
+    for (const record of records) {
+        applyDeferredParentAutoLayout(record);
+        done++;
+        lastYieldAt = await maybeYieldPostprocess(done, total, "正在恢复父级自动布局...", lastYieldAt, progress);
+    }
+    for (const record of records) {
+        finalizeDeferredAutoLayout(record);
+        done++;
+        lastYieldAt = await maybeYieldPostprocess(done, total, "正在完成自动布局...", lastYieldAt, progress);
+    }
 }
 
 function isRemovedNode(node: any): boolean {
@@ -187,19 +206,52 @@ export function applySingleChildAutoSpaceAlignmentFix(node: any, layout: any) {
     safeSet(node, "primaryAxisAlignItems", "MIN");
 }
 
-export function applyDeferredSingleChildAutoSpaceAlignmentFixes(root: BaseNode) {
-    if (!("children" in root)) return;
+export async function applyDeferredSingleChildAutoSpaceAlignmentFixes(root: BaseNode, progress?: PostprocessProgressCallback) {
+    const nodes = collectDescendants(root);
+    const total = Math.max(1, nodes.length);
+    let done = 0;
+    let lastYieldAt = Date.now();
 
-    const children = [...(root as any).children];
-    for (const child of children) {
-        applyDeferredSingleChildAutoSpaceAlignmentFixes(child);
+    for (let index = nodes.length - 1; index >= 0; index--) {
+        const node = nodes[index];
+        if (isSceneNode(node)) {
+            const layout = state.restoredLayoutByNodeId[node.id];
+            if (layout && hasAutoLayout(node)) applySingleChildAutoSpaceAlignmentFix(node, layout);
+        }
+        done++;
+        lastYieldAt = await maybeYieldPostprocess(done, total, "正在修正自动布局对齐...", lastYieldAt, progress);
     }
+}
 
-    if (!isSceneNode(root)) return;
+function collectDescendants(root: BaseNode): BaseNode[] {
+    const nodes: BaseNode[] = [];
+    const stack: BaseNode[] = [root];
+    while (stack.length > 0) {
+        const node = stack.pop() as BaseNode;
+        nodes.push(node);
+        if (!("children" in node)) continue;
+        const children = [...(node as any).children] as BaseNode[];
+        for (let index = children.length - 1; index >= 0; index--) {
+            stack.push(children[index]);
+        }
+    }
+    return nodes;
+}
 
-    const layout = state.restoredLayoutByNodeId[root.id];
-    if (!layout || !hasAutoLayout(root)) return;
-    applySingleChildAutoSpaceAlignmentFix(root, layout);
+async function maybeYieldPostprocess(
+    done: number,
+    total: number,
+    label: string,
+    lastYieldAt: number,
+    progress?: PostprocessProgressCallback
+): Promise<number> {
+    const now = Date.now();
+    if (done < total && done % POSTPROCESS_BATCH_SIZE !== 0 && now - lastYieldAt < POSTPROCESS_YIELD_INTERVAL_MS) {
+        return lastYieldAt;
+    }
+    if (progress) await progress(done, total, label);
+    await yieldToEventLoop();
+    return Date.now();
 }
 
 function isAutoSpaceAlongPrimaryAxis(layout: any): boolean {

@@ -1,8 +1,13 @@
 import { state } from "./state";
 import { getReceiveCreateType } from "./layerRules";
-import { safeSet, isSceneNode } from "../../shared/utils";
+import { safeSet, isSceneNode, yieldToEventLoop } from "../../shared/utils";
 import { applyVectorNetwork } from "./appliers/vector";
 import { createConnectorVectorNetworkFromData } from "./appliers/connector";
+
+const POSTPROCESS_BATCH_SIZE = 500;
+const POSTPROCESS_YIELD_INTERVAL_MS = 50;
+
+type PostprocessProgressCallback = (done: number, total: number, label: string) => Promise<void> | void;
 
 export function appendRestoredNode(parent: PageNode | SceneNode, node: SceneNode): boolean {
     if ("appendChild" in parent) {
@@ -57,15 +62,36 @@ export function isInsideInstance(node: BaseNode): boolean {
     return false;
 }
 
-export function cleanupImportedContainerShells(root: BaseNode) {
-    if (!("children" in root)) return;
-    if (isSceneNode(root) && (root.type === "INSTANCE" || isInsideInstance(root))) return;
+export async function cleanupImportedContainerShells(root: BaseNode, progress?: PostprocessProgressCallback) {
+    const nodes = collectCleanupNodes(root);
+    const total = Math.max(1, nodes.length);
+    let done = 0;
+    let lastYieldAt = Date.now();
 
-    const children = [...(root as any).children] as SceneNode[];
-    for (const child of children) {
-        cleanupImportedContainerShells(child);
+    for (let index = nodes.length - 1; index >= 0; index--) {
+        cleanupImportedContainerShell(nodes[index]);
+        done++;
+        lastYieldAt = await maybeYieldPostprocess(done, total, "正在清理容器...", lastYieldAt, progress);
     }
+}
 
+function collectCleanupNodes(root: BaseNode): BaseNode[] {
+    const nodes: BaseNode[] = [];
+    const stack: BaseNode[] = [root];
+    while (stack.length > 0) {
+        const node = stack.pop() as BaseNode;
+        if (!("children" in node)) continue;
+        if (isSceneNode(node) && (node.type === "INSTANCE" || isInsideInstance(node))) continue;
+        nodes.push(node);
+        const children = [...(node as any).children] as BaseNode[];
+        for (let index = children.length - 1; index >= 0; index--) {
+            stack.push(children[index]);
+        }
+    }
+    return nodes;
+}
+
+function cleanupImportedContainerShell(root: BaseNode) {
     if (!isSceneNode(root) || !isShellContainer(root)) return;
 
     const shellChildren = [...(root as any).children] as SceneNode[];
@@ -76,6 +102,22 @@ export function cleanupImportedContainerShells(root: BaseNode) {
             return;
         }
     }
+}
+
+async function maybeYieldPostprocess(
+    done: number,
+    total: number,
+    label: string,
+    lastYieldAt: number,
+    progress?: PostprocessProgressCallback
+): Promise<number> {
+    const now = Date.now();
+    if (done < total && done % POSTPROCESS_BATCH_SIZE !== 0 && now - lastYieldAt < POSTPROCESS_YIELD_INTERVAL_MS) {
+        return lastYieldAt;
+    }
+    if (progress) await progress(done, total, label);
+    await yieldToEventLoop();
+    return Date.now();
 }
 
 export function hasUsableVectorNetwork(vectorNetwork: any): boolean {

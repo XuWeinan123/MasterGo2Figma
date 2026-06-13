@@ -31,6 +31,7 @@ import { yieldToEventLoop } from "../../shared/utils";
 
 const RESTORE_PROGRESS_NODE_INTERVAL = 100;
 const RESTORE_PROGRESS_TIME_INTERVAL_MS = 500;
+const PAGE_POSTPROCESS_STAGE_COUNT = 3;
 
 type ImportSession = {
   transferId: string;
@@ -38,6 +39,7 @@ type ImportSession = {
   totalPages: number;
   totalNodes: number;
   restoredNodes: number;
+  postProcessedNodes: number;
   restoredPages: PageNode[];
   previousCurrentPage: PageNode;
 };
@@ -204,12 +206,15 @@ async function startImportSession(message: any) {
     totalPages,
     totalNodes,
     restoredNodes: 0,
+    postProcessedNodes: 0,
     restoredPages: [],
     previousCurrentPage: figma.currentPage
   };
 
   figma.ui.postMessage({
     type: "progress",
+    transferId: activeImportSession.transferId,
+    stage: "restore",
     current: 0,
     total: totalNodes,
     label: "正在接收导入数据..."
@@ -285,13 +290,14 @@ function appendImportPageChunk(message: any) {
 
 async function finishImportPage(message: any) {
   requireImportSession(message.transferId);
-  const pageIndex = String(Number(message.pageIndex || 0));
-  const pending = pendingImportPages[pageIndex];
-  if (!pending) throw new Error(`页面传输不存在：${pageIndex}`);
+  const pageIndex = Number(message.pageIndex || 0);
+  const pendingKey = String(pageIndex);
+  const pending = pendingImportPages[pendingKey];
+  if (!pending) throw new Error(`页面传输不存在：${pendingKey}`);
   try {
-    await restoreImportPageData(pending.page, pending.layers);
+    await restoreImportPageData(pending.page, pending.layers, pageIndex);
   } finally {
-    delete pendingImportPages[pageIndex];
+    delete pendingImportPages[pendingKey];
   }
 }
 
@@ -302,21 +308,28 @@ async function restoreImportSessionPage(message: any) {
   if (!importPage || !Array.isArray(importPage.rootNodeIds) || !layers || typeof layers !== "object") {
     throw new Error("页面导入数据不完整");
   }
-  await restoreImportPageData(importPage, layers);
+  await restoreImportPageData(importPage, layers, Number(message.pageIndex || 0));
 }
 
-async function restoreImportPageData(importPage: ImportPageIndex, layers: { [id: string]: ImportLayerRecord }) {
+async function restoreImportPageData(importPage: ImportPageIndex, layers: { [id: string]: ImportLayerRecord }, pageIndex = 0) {
   if (!activeImportSession) throw new Error("导入会话不存在或已重置");
   const session = activeImportSession;
+  const pageName = createRestoredPageName(importPage.name);
+  const pageNodeCount = countLayerRecords(layers);
+  const postprocessStart = session.postProcessedNodes;
+  logImportStage("page-start", "开始还原页面", { pageIndex, pageName, restoredNodes: session.restoredNodes, pageNodeCount });
   figma.ui.postMessage({
     type: "progress",
+    transferId: session.transferId,
+    stage: "restore",
+    pageIndex,
     current: session.restoredNodes,
     total: session.totalNodes,
-    label: "正在创建页面：" + createRestoredPageName(importPage.name)
+    label: "正在创建页面：" + pageName
   });
 
   const restoredPage = figma.createPage();
-  restoredPage.name = createRestoredPageName(importPage.name);
+  restoredPage.name = pageName;
   session.restoredPages.push(restoredPage);
   figma.currentPage = restoredPage;
 
@@ -325,27 +338,91 @@ async function restoreImportPageData(importPage: ImportPageIndex, layers: { [id:
     session.restoredNodes += await restoreImportedNode(rootId, restoredPage, layers, session.restoredNodes, session.totalNodes);
   }
 
-  applyDeferredLayoutRestores();
-  cleanupImportedContainerShells(restoredPage);
-  applyDeferredSingleChildAutoSpaceAlignmentFixes(restoredPage);
+  await reportPagePostprocessProgress(session, pageIndex, pageName, postprocessStart, pageNodeCount, 0, 0, 1, "正在应用自动布局...");
+  await applyDeferredLayoutRestores((done, total, label) => {
+    return reportPagePostprocessProgress(session, pageIndex, pageName, postprocessStart, pageNodeCount, 0, done, total, label);
+  });
+  await cleanupImportedContainerShells(restoredPage, (done, total, label) => {
+    return reportPagePostprocessProgress(session, pageIndex, pageName, postprocessStart, pageNodeCount, 1, done, total, label);
+  });
+  await applyDeferredSingleChildAutoSpaceAlignmentFixes(restoredPage, (done, total, label) => {
+    return reportPagePostprocessProgress(session, pageIndex, pageName, postprocessStart, pageNodeCount, 2, done, total, label);
+  });
+  session.postProcessedNodes = Math.min(session.totalNodes, postprocessStart + pageNodeCount);
+  await reportPagePostprocessProgress(session, pageIndex, pageName, postprocessStart, pageNodeCount, PAGE_POSTPROCESS_STAGE_COUNT - 1, 1, 1, "页面完成：" + pageName);
+  logImportStage("page-complete", "页面还原完成", { pageIndex, pageName, restoredNodes: session.restoredNodes, postProcessedNodes: session.postProcessedNodes });
   await yieldToEventLoop();
+}
+
+function countLayerRecords(layers: { [id: string]: ImportLayerRecord }): number {
+  return layers && typeof layers === "object" ? Object.keys(layers).length : 0;
+}
+
+async function reportPagePostprocessProgress(
+  session: ImportSession,
+  pageIndex: number,
+  pageName: string,
+  pagePostprocessStart: number,
+  pageNodeCount: number,
+  stageIndex: number,
+  done: number,
+  total: number,
+  label: string
+) {
+  const stageRatio = total > 0 ? Math.max(0, Math.min(1, done / total)) : 1;
+  const completedRatio = Math.max(0, Math.min(1, (stageIndex + stageRatio) / PAGE_POSTPROCESS_STAGE_COUNT));
+  const postprocessCurrent = Math.min(session.totalNodes, pagePostprocessStart + pageNodeCount * completedRatio);
+  figma.ui.postMessage({
+    type: "progress",
+    transferId: session.transferId,
+    stage: "postprocess",
+    pageIndex,
+    current: session.restoredNodes,
+    total: session.totalNodes,
+    postprocessCurrent,
+    postprocessTotal: session.totalNodes,
+    label
+  });
+  logImportStage("postprocess", label, {
+    pageIndex,
+    pageName,
+    done,
+    total,
+    postprocessCurrent,
+    postprocessTotal: session.totalNodes,
+    restoredNodes: session.restoredNodes
+  });
+}
+
+function logImportStage(stage: string, label: string, detail: { [key: string]: any } = {}) {
+  const session = activeImportSession;
+  console.log("[MasterGo2Figma] Import progress", {
+    transferId: session ? session.transferId : "",
+    stage,
+    label,
+    elapsedMs: state.activeRestoreStats ? Date.now() - state.activeRestoreStats.startedAt : 0,
+    ...detail
+  });
 }
 
 async function completeImportSession(message: any) {
   const session = requireImportSession(message.transferId);
   try {
+    postFinalizeProgress(session, 0, 4, "正在恢复连接线...");
     applyDeferredConnectorRestores();
-    await maybeReportRestoreProgress(session.restoredNodes, session.totalNodes, "正在还原缺失字体...", true);
+    postFinalizeProgress(session, 1, 4, "正在还原缺失字体...");
     const missingFontRestoreResult = await restoreMissingFontTextLayers(session.restoredPages);
-    await maybeReportRestoreProgress(session.restoredNodes, session.totalNodes, "正在完成还原...", true);
+    postFinalizeProgress(session, 2, 4, "正在完成还原...");
 
     if (session.restoredPages.length > 0) {
       figma.currentPage = session.restoredPages[0];
       figma.viewport.scrollAndZoomIntoView(session.restoredPages[0].children as SceneNode[]);
     }
+    postFinalizeProgress(session, 4, 4, "正在完成还原...");
 
     figma.ui.postMessage({
       type: "complete",
+      transferId: session.transferId,
       pageCount: session.restoredPages.length,
       layerCount: session.restoredNodes,
       missingImageAssetCount: state.missingImageAssetCount,
@@ -361,6 +438,7 @@ async function completeImportSession(message: any) {
     console.error("Import failed:", error);
     figma.ui.postMessage({
       type: "error",
+      transferId: session.transferId,
       message: error instanceof Error ? error.message : "导入失败，请查看控制台"
     });
   } finally {
@@ -369,6 +447,20 @@ async function completeImportSession(message: any) {
     clearPendingImportAssets();
     clearPendingImportPages();
   }
+}
+
+function postFinalizeProgress(session: ImportSession, current: number, total: number, label: string) {
+  figma.ui.postMessage({
+    type: "progress",
+    transferId: session.transferId,
+    stage: "finalize",
+    current,
+    total,
+    finalizeCurrent: current,
+    finalizeTotal: total,
+    label
+  });
+  logImportStage("finalize", label, { current, total, restoredNodes: session.restoredNodes });
 }
 
 function requireImportSession(transferId: string): ImportSession {
@@ -464,10 +556,13 @@ async function maybeReportRestoreProgress(current: number, total: number, label:
 
   figma.ui.postMessage({
     type: "progress",
+    transferId: activeImportSession ? activeImportSession.transferId : undefined,
+    stage: "restore",
     current,
     total,
     label
   });
+  logImportStage("restore", label, { current, total });
   progState.total = total;
   progState.lastCurrent = current;
   progState.lastPostedAt = now;
@@ -502,6 +597,7 @@ async function restoreImportPayload(payload: ImportPayload) {
   try {
     figma.ui.postMessage({
       type: "progress",
+      stage: "restore",
       current: 0,
       total: totalNodes,
       label: "正在创建 Figma 页面..."
@@ -519,9 +615,9 @@ async function restoreImportPayload(payload: ImportPayload) {
         restoredNodes += await restoreImportedNode(rootId, restoredPage, payload.layers, restoredNodes, totalNodes);
       }
 
-      applyDeferredLayoutRestores();
-      cleanupImportedContainerShells(restoredPage);
-      applyDeferredSingleChildAutoSpaceAlignmentFixes(restoredPage);
+      await applyDeferredLayoutRestores();
+      await cleanupImportedContainerShells(restoredPage);
+      await applyDeferredSingleChildAutoSpaceAlignmentFixes(restoredPage);
     }
   } catch (error) {
     figma.currentPage = previousCurrentPage;

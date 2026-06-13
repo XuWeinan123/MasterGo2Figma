@@ -814,6 +814,8 @@ ${style}`;
   // src/deferredLayout.ts
   var INTERNAL_PROPS_PREFIX = "[PROPS]";
   var SIBLING_PROPS_PREFIX = "[PROPS_SIBLING]";
+  var POSTPROCESS_BATCH_SIZE = 500;
+  var POSTPROCESS_YIELD_INTERVAL_MS = 50;
   function deferLayoutRestore(node, layout, isGroup) {
     if (!node || !layout || !isSceneNode(node)) return;
     state.deferredLayoutRestores.push({ node, layout, isGroup });
@@ -821,13 +823,30 @@ ${style}`;
       state.activeRestoreStats.deferredLayoutNodeCount++;
     }
   }
-  function applyDeferredLayoutRestores() {
-    if (state.deferredLayoutRestores.length === 0) return;
-    const records = state.deferredLayoutRestores;
-    state.deferredLayoutRestores = [];
-    for (const record of records) applyDeferredNodeAutoLayout(record);
-    for (const record of records) applyDeferredParentAutoLayout(record);
-    for (const record of records) finalizeDeferredAutoLayout(record);
+  function applyDeferredLayoutRestores(progress) {
+    return __async(this, null, function* () {
+      if (state.deferredLayoutRestores.length === 0) return;
+      const records = state.deferredLayoutRestores;
+      state.deferredLayoutRestores = [];
+      const total = Math.max(1, records.length * 3);
+      let done = 0;
+      let lastYieldAt = Date.now();
+      for (const record of records) {
+        applyDeferredNodeAutoLayout(record);
+        done++;
+        lastYieldAt = yield maybeYieldPostprocess(done, total, "\u6B63\u5728\u5E94\u7528\u81EA\u52A8\u5E03\u5C40...", lastYieldAt, progress);
+      }
+      for (const record of records) {
+        applyDeferredParentAutoLayout(record);
+        done++;
+        lastYieldAt = yield maybeYieldPostprocess(done, total, "\u6B63\u5728\u6062\u590D\u7236\u7EA7\u81EA\u52A8\u5E03\u5C40...", lastYieldAt, progress);
+      }
+      for (const record of records) {
+        finalizeDeferredAutoLayout(record);
+        done++;
+        lastYieldAt = yield maybeYieldPostprocess(done, total, "\u6B63\u5728\u5B8C\u6210\u81EA\u52A8\u5E03\u5C40...", lastYieldAt, progress);
+      }
+    });
   }
   function isRemovedNode(node) {
     return !node || !!node.removed;
@@ -966,16 +985,47 @@ ${style}`;
     if (getRestorableChildCount(node) !== 1) return;
     safeSet(node, "primaryAxisAlignItems", "MIN");
   }
-  function applyDeferredSingleChildAutoSpaceAlignmentFixes(root) {
-    if (!("children" in root)) return;
-    const children = [...root.children];
-    for (const child of children) {
-      applyDeferredSingleChildAutoSpaceAlignmentFixes(child);
+  function applyDeferredSingleChildAutoSpaceAlignmentFixes(root, progress) {
+    return __async(this, null, function* () {
+      const nodes = collectDescendants(root);
+      const total = Math.max(1, nodes.length);
+      let done = 0;
+      let lastYieldAt = Date.now();
+      for (let index = nodes.length - 1; index >= 0; index--) {
+        const node = nodes[index];
+        if (isSceneNode(node)) {
+          const layout = state.restoredLayoutByNodeId[node.id];
+          if (layout && hasAutoLayout(node)) applySingleChildAutoSpaceAlignmentFix(node, layout);
+        }
+        done++;
+        lastYieldAt = yield maybeYieldPostprocess(done, total, "\u6B63\u5728\u4FEE\u6B63\u81EA\u52A8\u5E03\u5C40\u5BF9\u9F50...", lastYieldAt, progress);
+      }
+    });
+  }
+  function collectDescendants(root) {
+    const nodes = [];
+    const stack = [root];
+    while (stack.length > 0) {
+      const node = stack.pop();
+      nodes.push(node);
+      if (!("children" in node)) continue;
+      const children = [...node.children];
+      for (let index = children.length - 1; index >= 0; index--) {
+        stack.push(children[index]);
+      }
     }
-    if (!isSceneNode(root)) return;
-    const layout = state.restoredLayoutByNodeId[root.id];
-    if (!layout || !hasAutoLayout(root)) return;
-    applySingleChildAutoSpaceAlignmentFix(root, layout);
+    return nodes;
+  }
+  function maybeYieldPostprocess(done, total, label, lastYieldAt, progress) {
+    return __async(this, null, function* () {
+      const now = Date.now();
+      if (done < total && done % POSTPROCESS_BATCH_SIZE !== 0 && now - lastYieldAt < POSTPROCESS_YIELD_INTERVAL_MS) {
+        return lastYieldAt;
+      }
+      if (progress) yield progress(done, total, label);
+      yield yieldToEventLoop();
+      return Date.now();
+    });
   }
   function isAutoSpaceAlongPrimaryAxis(layout) {
     return normalizeAxisAlign(layout.primaryAxisAlignItems) === "SPACE_BETWEEN" || normalizeAxisAlign(layout.mainAxisAlignItems) === "SPACE_BETWEEN";
@@ -1141,6 +1191,8 @@ ${style}`;
   }
 
   // src/nodeCreator.ts
+  var POSTPROCESS_BATCH_SIZE2 = 500;
+  var POSTPROCESS_YIELD_INTERVAL_MS2 = 50;
   function appendRestoredNode(parent, node) {
     if ("appendChild" in parent) {
       parent.appendChild(node);
@@ -1178,13 +1230,35 @@ ${style}`;
     }
     return false;
   }
-  function cleanupImportedContainerShells(root) {
-    if (!("children" in root)) return;
-    if (isSceneNode(root) && (root.type === "INSTANCE" || isInsideInstance(root))) return;
-    const children = [...root.children];
-    for (const child of children) {
-      cleanupImportedContainerShells(child);
+  function cleanupImportedContainerShells(root, progress) {
+    return __async(this, null, function* () {
+      const nodes = collectCleanupNodes(root);
+      const total = Math.max(1, nodes.length);
+      let done = 0;
+      let lastYieldAt = Date.now();
+      for (let index = nodes.length - 1; index >= 0; index--) {
+        cleanupImportedContainerShell(nodes[index]);
+        done++;
+        lastYieldAt = yield maybeYieldPostprocess2(done, total, "\u6B63\u5728\u6E05\u7406\u5BB9\u5668...", lastYieldAt, progress);
+      }
+    });
+  }
+  function collectCleanupNodes(root) {
+    const nodes = [];
+    const stack = [root];
+    while (stack.length > 0) {
+      const node = stack.pop();
+      if (!("children" in node)) continue;
+      if (isSceneNode(node) && (node.type === "INSTANCE" || isInsideInstance(node))) continue;
+      nodes.push(node);
+      const children = [...node.children];
+      for (let index = children.length - 1; index >= 0; index--) {
+        stack.push(children[index]);
+      }
     }
+    return nodes;
+  }
+  function cleanupImportedContainerShell(root) {
     if (!isSceneNode(root) || !isShellContainer(root)) return;
     const shellChildren = [...root.children];
     for (const child of shellChildren) {
@@ -1194,6 +1268,17 @@ ${style}`;
         return;
       }
     }
+  }
+  function maybeYieldPostprocess2(done, total, label, lastYieldAt, progress) {
+    return __async(this, null, function* () {
+      const now = Date.now();
+      if (done < total && done % POSTPROCESS_BATCH_SIZE2 !== 0 && now - lastYieldAt < POSTPROCESS_YIELD_INTERVAL_MS2) {
+        return lastYieldAt;
+      }
+      if (progress) yield progress(done, total, label);
+      yield yieldToEventLoop();
+      return Date.now();
+    });
   }
   function hasUsableVectorNetwork(vectorNetwork) {
     return !!(vectorNetwork && Array.isArray(vectorNetwork.vertices) && vectorNetwork.vertices.length > 0 && Array.isArray(vectorNetwork.segments));
@@ -2125,6 +2210,7 @@ ${style}`;
   // src/code.ts
   var RESTORE_PROGRESS_NODE_INTERVAL = 100;
   var RESTORE_PROGRESS_TIME_INTERVAL_MS = 500;
+  var PAGE_POSTPROCESS_STAGE_COUNT = 3;
   var activeImportSession = null;
   var pendingImportAssets = {};
   var pendingImportPages = {};
@@ -2256,11 +2342,14 @@ ${style}`;
         totalPages,
         totalNodes,
         restoredNodes: 0,
+        postProcessedNodes: 0,
         restoredPages: [],
         previousCurrentPage: figma.currentPage
       };
       figma.ui.postMessage({
         type: "progress",
+        transferId: activeImportSession.transferId,
+        stage: "restore",
         current: 0,
         total: totalNodes,
         label: "\u6B63\u5728\u63A5\u6536\u5BFC\u5165\u6570\u636E..."
@@ -2330,13 +2419,14 @@ ${style}`;
   function finishImportPage(message) {
     return __async(this, null, function* () {
       requireImportSession(message.transferId);
-      const pageIndex = String(Number(message.pageIndex || 0));
-      const pending = pendingImportPages[pageIndex];
-      if (!pending) throw new Error(`\u9875\u9762\u4F20\u8F93\u4E0D\u5B58\u5728\uFF1A${pageIndex}`);
+      const pageIndex = Number(message.pageIndex || 0);
+      const pendingKey = String(pageIndex);
+      const pending = pendingImportPages[pendingKey];
+      if (!pending) throw new Error(`\u9875\u9762\u4F20\u8F93\u4E0D\u5B58\u5728\uFF1A${pendingKey}`);
       try {
-        yield restoreImportPageData(pending.page, pending.layers);
+        yield restoreImportPageData(pending.page, pending.layers, pageIndex);
       } finally {
-        delete pendingImportPages[pageIndex];
+        delete pendingImportPages[pendingKey];
       }
     });
   }
@@ -2348,47 +2438,106 @@ ${style}`;
       if (!importPage || !Array.isArray(importPage.rootNodeIds) || !layers || typeof layers !== "object") {
         throw new Error("\u9875\u9762\u5BFC\u5165\u6570\u636E\u4E0D\u5B8C\u6574");
       }
-      yield restoreImportPageData(importPage, layers);
+      yield restoreImportPageData(importPage, layers, Number(message.pageIndex || 0));
     });
   }
-  function restoreImportPageData(importPage, layers) {
+  function restoreImportPageData(importPage, layers, pageIndex = 0) {
     return __async(this, null, function* () {
       if (!activeImportSession) throw new Error("\u5BFC\u5165\u4F1A\u8BDD\u4E0D\u5B58\u5728\u6216\u5DF2\u91CD\u7F6E");
       const session = activeImportSession;
+      const pageName = createRestoredPageName(importPage.name);
+      const pageNodeCount = countLayerRecords(layers);
+      const postprocessStart = session.postProcessedNodes;
+      logImportStage("page-start", "\u5F00\u59CB\u8FD8\u539F\u9875\u9762", { pageIndex, pageName, restoredNodes: session.restoredNodes, pageNodeCount });
       figma.ui.postMessage({
         type: "progress",
+        transferId: session.transferId,
+        stage: "restore",
+        pageIndex,
         current: session.restoredNodes,
         total: session.totalNodes,
-        label: "\u6B63\u5728\u521B\u5EFA\u9875\u9762\uFF1A" + createRestoredPageName(importPage.name)
+        label: "\u6B63\u5728\u521B\u5EFA\u9875\u9762\uFF1A" + pageName
       });
       const restoredPage = figma.createPage();
-      restoredPage.name = createRestoredPageName(importPage.name);
+      restoredPage.name = pageName;
       session.restoredPages.push(restoredPage);
       figma.currentPage = restoredPage;
       for (let rootIndex = 0; rootIndex < importPage.rootNodeIds.length; rootIndex++) {
         const rootId = importPage.rootNodeIds[rootIndex];
         session.restoredNodes += yield restoreImportedNode(rootId, restoredPage, layers, session.restoredNodes, session.totalNodes);
       }
-      applyDeferredLayoutRestores();
-      cleanupImportedContainerShells(restoredPage);
-      applyDeferredSingleChildAutoSpaceAlignmentFixes(restoredPage);
+      yield reportPagePostprocessProgress(session, pageIndex, pageName, postprocessStart, pageNodeCount, 0, 0, 1, "\u6B63\u5728\u5E94\u7528\u81EA\u52A8\u5E03\u5C40...");
+      yield applyDeferredLayoutRestores((done, total, label) => {
+        return reportPagePostprocessProgress(session, pageIndex, pageName, postprocessStart, pageNodeCount, 0, done, total, label);
+      });
+      yield cleanupImportedContainerShells(restoredPage, (done, total, label) => {
+        return reportPagePostprocessProgress(session, pageIndex, pageName, postprocessStart, pageNodeCount, 1, done, total, label);
+      });
+      yield applyDeferredSingleChildAutoSpaceAlignmentFixes(restoredPage, (done, total, label) => {
+        return reportPagePostprocessProgress(session, pageIndex, pageName, postprocessStart, pageNodeCount, 2, done, total, label);
+      });
+      session.postProcessedNodes = Math.min(session.totalNodes, postprocessStart + pageNodeCount);
+      yield reportPagePostprocessProgress(session, pageIndex, pageName, postprocessStart, pageNodeCount, PAGE_POSTPROCESS_STAGE_COUNT - 1, 1, 1, "\u9875\u9762\u5B8C\u6210\uFF1A" + pageName);
+      logImportStage("page-complete", "\u9875\u9762\u8FD8\u539F\u5B8C\u6210", { pageIndex, pageName, restoredNodes: session.restoredNodes, postProcessedNodes: session.postProcessedNodes });
       yield yieldToEventLoop();
     });
+  }
+  function countLayerRecords(layers) {
+    return layers && typeof layers === "object" ? Object.keys(layers).length : 0;
+  }
+  function reportPagePostprocessProgress(session, pageIndex, pageName, pagePostprocessStart, pageNodeCount, stageIndex, done, total, label) {
+    return __async(this, null, function* () {
+      const stageRatio = total > 0 ? Math.max(0, Math.min(1, done / total)) : 1;
+      const completedRatio = Math.max(0, Math.min(1, (stageIndex + stageRatio) / PAGE_POSTPROCESS_STAGE_COUNT));
+      const postprocessCurrent = Math.min(session.totalNodes, pagePostprocessStart + pageNodeCount * completedRatio);
+      figma.ui.postMessage({
+        type: "progress",
+        transferId: session.transferId,
+        stage: "postprocess",
+        pageIndex,
+        current: session.restoredNodes,
+        total: session.totalNodes,
+        postprocessCurrent,
+        postprocessTotal: session.totalNodes,
+        label
+      });
+      logImportStage("postprocess", label, {
+        pageIndex,
+        pageName,
+        done,
+        total,
+        postprocessCurrent,
+        postprocessTotal: session.totalNodes,
+        restoredNodes: session.restoredNodes
+      });
+    });
+  }
+  function logImportStage(stage, label, detail = {}) {
+    const session = activeImportSession;
+    console.log("[MasterGo2Figma] Import progress", __spreadValues({
+      transferId: session ? session.transferId : "",
+      stage,
+      label,
+      elapsedMs: state.activeRestoreStats ? Date.now() - state.activeRestoreStats.startedAt : 0
+    }, detail));
   }
   function completeImportSession(message) {
     return __async(this, null, function* () {
       const session = requireImportSession(message.transferId);
       try {
+        postFinalizeProgress(session, 0, 4, "\u6B63\u5728\u6062\u590D\u8FDE\u63A5\u7EBF...");
         applyDeferredConnectorRestores();
-        yield maybeReportRestoreProgress(session.restoredNodes, session.totalNodes, "\u6B63\u5728\u8FD8\u539F\u7F3A\u5931\u5B57\u4F53...", true);
+        postFinalizeProgress(session, 1, 4, "\u6B63\u5728\u8FD8\u539F\u7F3A\u5931\u5B57\u4F53...");
         const missingFontRestoreResult = yield restoreMissingFontTextLayers(session.restoredPages);
-        yield maybeReportRestoreProgress(session.restoredNodes, session.totalNodes, "\u6B63\u5728\u5B8C\u6210\u8FD8\u539F...", true);
+        postFinalizeProgress(session, 2, 4, "\u6B63\u5728\u5B8C\u6210\u8FD8\u539F...");
         if (session.restoredPages.length > 0) {
           figma.currentPage = session.restoredPages[0];
           figma.viewport.scrollAndZoomIntoView(session.restoredPages[0].children);
         }
+        postFinalizeProgress(session, 4, 4, "\u6B63\u5728\u5B8C\u6210\u8FD8\u539F...");
         figma.ui.postMessage({
           type: "complete",
+          transferId: session.transferId,
           pageCount: session.restoredPages.length,
           layerCount: session.restoredNodes,
           missingImageAssetCount: state.missingImageAssetCount,
@@ -2403,6 +2552,7 @@ ${style}`;
         console.error("Import failed:", error);
         figma.ui.postMessage({
           type: "error",
+          transferId: session.transferId,
           message: error instanceof Error ? error.message : "\u5BFC\u5165\u5931\u8D25\uFF0C\u8BF7\u67E5\u770B\u63A7\u5236\u53F0"
         });
       } finally {
@@ -2412,6 +2562,19 @@ ${style}`;
         clearPendingImportPages();
       }
     });
+  }
+  function postFinalizeProgress(session, current, total, label) {
+    figma.ui.postMessage({
+      type: "progress",
+      transferId: session.transferId,
+      stage: "finalize",
+      current,
+      total,
+      finalizeCurrent: current,
+      finalizeTotal: total,
+      label
+    });
+    logImportStage("finalize", label, { current, total, restoredNodes: session.restoredNodes });
   }
   function requireImportSession(transferId) {
     if (!activeImportSession || activeImportSession.transferId !== transferId) {
@@ -2494,10 +2657,13 @@ ${style}`;
       if (!shouldPost) return;
       figma.ui.postMessage({
         type: "progress",
+        transferId: activeImportSession ? activeImportSession.transferId : void 0,
+        stage: "restore",
         current,
         total,
         label
       });
+      logImportStage("restore", label, { current, total });
       progState.total = total;
       progState.lastCurrent = current;
       progState.lastPostedAt = now;
@@ -2527,6 +2693,7 @@ ${style}`;
       try {
         figma.ui.postMessage({
           type: "progress",
+          stage: "restore",
           current: 0,
           total: totalNodes,
           label: "\u6B63\u5728\u521B\u5EFA Figma \u9875\u9762..."
@@ -2541,9 +2708,9 @@ ${style}`;
             const rootId = importPage.rootNodeIds[rootIndex];
             restoredNodes += yield restoreImportedNode(rootId, restoredPage, payload.layers, restoredNodes, totalNodes);
           }
-          applyDeferredLayoutRestores();
-          cleanupImportedContainerShells(restoredPage);
-          applyDeferredSingleChildAutoSpaceAlignmentFixes(restoredPage);
+          yield applyDeferredLayoutRestores();
+          yield cleanupImportedContainerShells(restoredPage);
+          yield applyDeferredSingleChildAutoSpaceAlignmentFixes(restoredPage);
         }
       } catch (error) {
         figma.currentPage = previousCurrentPage;
