@@ -60,6 +60,19 @@ mastergo2figma-relay-output/<transferId>.zip
 - zip 根目录直接包含 `manifest.json`。
 - zip 内有一个顶层目录，顶层目录内包含 `manifest.json`。
 
+### 接收端还原阶段
+
+接收端导入 zip 后，会按下面阶段还原页面和图层：
+
+1. `startImportSession()` 校验 v2 package manifest，初始化运行时状态、图片/页面缓存和进度统计。
+2. 通过 `import-asset-*` 接收图片资源分块，通过 `import-page-*` 接收页面 layer 分块，并把每个 layer record 累积到当前页面的导入缓存中。
+3. `restoreImportPageData()` 为每个导入页面创建新的 Figma Page，再按 `rootNodeIds` 从根节点开始递归还原。
+4. `restoreImportedNode()` 根据图层类型选择还原路径：Boolean tree、native Group、ComponentSet 或普通节点创建；普通节点由 `createNodeFromData()` 创建后 append 到父级。
+5. `applyProperties()` 应用名称、可见性、blend、fills/strokes/effects、constraints、layout 等通用属性，并按节点类型继续应用 vector network、文本属性或 connector 属性。
+6. 特殊容器在子节点递归完成后 finalize：Group 使用临时 Frame 承载子节点后调用 `figma.group()`，Boolean 执行组合或 fallback，ComponentSet 执行 `combineAsVariants()`。
+7. 页面节点创建完成后执行 `applyDeferredLayoutRestores()`，分三步补齐 auto-layout：节点自身 auto-layout、作为父级 auto-layout 子项的属性、固定尺寸和 transform 收尾。native Group 子节点会在这里把局部坐标转换为 Figma Group 所需的父级坐标。
+8. 最后执行清理和后处理：删除导入 shell、修正单子节点 `SPACE_BETWEEN`、恢复 deferred connector、尝试恢复缺失字体、定位视口并发送完成通知。
+
 ## OOM（Out of Memory 内存溢出） 和 MasterGo 限制说明
 
 这是 MasterGo 插件架构下的共性问题，不是单纯的本项目打包逻辑问题。
@@ -109,4 +122,3 @@ npm run build
 ## 开源协议
 
 本项目采用 [知识共享 署名-非商业性使用-相同方式共享 4.0 国际许可协议 (CC BY-NC-SA 4.0)](LICENSE) 进行许可。
-

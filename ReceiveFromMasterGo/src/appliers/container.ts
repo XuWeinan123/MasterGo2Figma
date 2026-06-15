@@ -333,6 +333,12 @@ export async function finalizeGroupShell(
         );
         safeRemove(shell);
         await applyPropertiesCallback(group as any, createFinalizedContainerProps(data, hasNonTranslationTransform(data?.layout)));
+        if (!hasNonTranslationTransform(data?.layout)) {
+            state.nativeGroupOffsetByNodeId[group.id] = {
+                x: Number.isFinite(group.x) ? group.x : 0,
+                y: Number.isFinite(group.y) ? group.y : 0
+            };
+        }
     } catch (error) {
         console.warn("Unable to create native group, keeping frame fallback:", data?.name || data?.id || "Untitled", error);
         safeSet(shell, "name", data.name);

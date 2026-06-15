@@ -87,6 +87,7 @@
       this.missingImageAssetCount = 0;
       this.placeholderImageHash = null;
       this.restoredNodeIdBySourceId = {};
+      this.nativeGroupOffsetByNodeId = {};
       this.deferredConnectorRestores = [];
       this.deferredLayoutRestores = [];
       this.fontLoadPromises = {};
@@ -103,6 +104,7 @@
       this.missingImageAssetNames = {};
       this.missingImageAssetCount = 0;
       this.restoredNodeIdBySourceId = {};
+      this.nativeGroupOffsetByNodeId = {};
       this.deferredConnectorRestores = [];
       this.deferredLayoutRestores = [];
       this.fallbackConnectorCount = 0;
@@ -966,8 +968,9 @@ ${style}`;
     }
   }
   function finalizeDeferredAutoLayout(record) {
-    const { node, layout, isGroup } = record;
+    const { node, isGroup } = record;
     if (isRemovedNode(node) || isGroup || !hasAutoLayout(node)) return;
+    const layout = normalizeDeferredLayoutForNativeGroupParent(node, record.layout);
     if (layout.width === void 0 || layout.height === void 0 || !shouldRestoreFixedSize(node, layout)) return;
     safeResize(node, layout.width, layout.height);
     if (hasFiniteRelativeTransform(layout)) {
@@ -976,6 +979,24 @@ ${style}`;
       if (layout.x !== void 0) safeSet(node, "x", layout.x);
       if (layout.y !== void 0) safeSet(node, "y", layout.y);
     }
+  }
+  function normalizeDeferredLayoutForNativeGroupParent(node, layout) {
+    const parent = node.parent;
+    if (!parent || parent.type !== "GROUP") return layout;
+    const offset = state.nativeGroupOffsetByNodeId[parent.id];
+    if (!offset || !offset.x && !offset.y) return layout;
+    const normalized = __spreadValues({}, layout);
+    if (layout.x !== void 0) normalized.x = (layout.x || 0) + offset.x;
+    if (layout.y !== void 0) normalized.y = (layout.y || 0) + offset.y;
+    if (hasFiniteRelativeTransform(layout)) {
+      normalized.relativeTransform = [
+        [...layout.relativeTransform[0]],
+        [...layout.relativeTransform[1]]
+      ];
+      normalized.relativeTransform[0][2] += offset.x;
+      normalized.relativeTransform[1][2] += offset.y;
+    }
+    return normalized;
   }
   function hasFiniteRelativeTransform(layout) {
     return Array.isArray(layout == null ? void 0 : layout.relativeTransform) && Array.isArray(layout.relativeTransform[0]) && Array.isArray(layout.relativeTransform[1]) && Number.isFinite(layout.relativeTransform[0][0]) && Number.isFinite(layout.relativeTransform[0][1]) && Number.isFinite(layout.relativeTransform[0][2]) && Number.isFinite(layout.relativeTransform[1][0]) && Number.isFinite(layout.relativeTransform[1][1]) && Number.isFinite(layout.relativeTransform[1][2]);
@@ -2034,6 +2055,12 @@ ${style}`;
         );
         safeRemove(shell);
         yield applyPropertiesCallback(group, createFinalizedContainerProps(data, hasNonTranslationTransform(data == null ? void 0 : data.layout)));
+        if (!hasNonTranslationTransform(data == null ? void 0 : data.layout)) {
+          state.nativeGroupOffsetByNodeId[group.id] = {
+            x: Number.isFinite(group.x) ? group.x : 0,
+            y: Number.isFinite(group.y) ? group.y : 0
+          };
+        }
       } catch (error) {
         console.warn("Unable to create native group, keeping frame fallback:", (data == null ? void 0 : data.name) || (data == null ? void 0 : data.id) || "Untitled", error);
         safeSet(shell, "name", data.name);

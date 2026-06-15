@@ -173,8 +173,9 @@ function applyDeferredParentAutoLayout(record: { node: SceneNode; layout: any; i
 }
 
 function finalizeDeferredAutoLayout(record: { node: SceneNode; layout: any; isGroup: boolean }) {
-    const { node, layout, isGroup } = record;
+    const { node, isGroup } = record;
     if (isRemovedNode(node) || isGroup || !hasAutoLayout(node)) return;
+    const layout = normalizeDeferredLayoutForNativeGroupParent(node, record.layout);
     if (layout.width === undefined || layout.height === undefined || !shouldRestoreFixedSize(node, layout)) return;
 
     safeResize(node, layout.width, layout.height);
@@ -184,6 +185,29 @@ function finalizeDeferredAutoLayout(record: { node: SceneNode; layout: any; isGr
         if (layout.x !== undefined) safeSet(node, "x", layout.x);
         if (layout.y !== undefined) safeSet(node, "y", layout.y);
     }
+}
+
+function normalizeDeferredLayoutForNativeGroupParent(node: SceneNode, layout: any): any {
+    const parent = node.parent as any;
+    if (!parent || parent.type !== "GROUP") return layout;
+
+    const offset = state.nativeGroupOffsetByNodeId[parent.id];
+    if (!offset || (!offset.x && !offset.y)) return layout;
+
+    const normalized: any = { ...layout };
+    if (layout.x !== undefined) normalized.x = (layout.x || 0) + offset.x;
+    if (layout.y !== undefined) normalized.y = (layout.y || 0) + offset.y;
+
+    if (hasFiniteRelativeTransform(layout)) {
+        normalized.relativeTransform = [
+            [...layout.relativeTransform[0]],
+            [...layout.relativeTransform[1]]
+        ];
+        normalized.relativeTransform[0][2] += offset.x;
+        normalized.relativeTransform[1][2] += offset.y;
+    }
+
+    return normalized;
 }
 
 function hasFiniteRelativeTransform(layout: any): boolean {

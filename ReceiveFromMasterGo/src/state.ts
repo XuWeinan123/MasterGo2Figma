@@ -14,6 +14,7 @@ class RestorerState {
     public missingImageAssetCount = 0;
     public placeholderImageHash: string | null = null;
     public restoredNodeIdBySourceId: { [sourceId: string]: string } = {};
+    public nativeGroupOffsetByNodeId: { [nodeId: string]: { x: number; y: number } } = {};
     public deferredConnectorRestores: Array<{ node: ConnectorNode; data: any }> = [];
     public deferredLayoutRestores: Array<{ node: SceneNode; layout: any; isGroup: boolean }> = [];
     public fontLoadPromises: { [key: string]: Promise<void> } = {};
@@ -30,6 +31,7 @@ class RestorerState {
         this.missingImageAssetNames = {};
         this.missingImageAssetCount = 0;
         this.restoredNodeIdBySourceId = {};
+        this.nativeGroupOffsetByNodeId = {};
         this.deferredConnectorRestores = [];
         this.deferredLayoutRestores = [];
         this.fallbackConnectorCount = 0;
