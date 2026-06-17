@@ -1,5 +1,4 @@
 import { RestorePerformanceStats, RestoreProgressState, CachedLayerConversionRules, LayerConversionRule } from "../../shared/types";
-import { formatDurationMs } from "../../shared/utils";
 
 class RestorerState {
     public documentFonts: Font[] = [];
@@ -69,30 +68,6 @@ class RestorerState {
 
         this.activeRestoreStats.restoredNodes = restoredNodes;
         this.activeRestoreStats.pageCount = pageCount;
-        const durationMs = Math.max(Date.now() - this.activeRestoreStats.startedAt, 1);
-        const nodesPerSecond = Math.round((restoredNodes / durationMs) * 10000) / 10;
-
-        console.log("[MasterGo2Figma] Restore performance", {
-            durationMs,
-            duration: formatDurationMs(durationMs),
-            nodesPerSecond,
-            totalNodes: this.activeRestoreStats.totalNodes,
-            restoredNodes,
-            pageCount,
-            textNodeCount: this.activeRestoreStats.textNodeCount,
-            fontListLoadCount: this.activeRestoreStats.fontListLoadCount,
-            fontLoadRequestCount: this.activeRestoreStats.fontLoadRequestCount,
-            fontLoadCacheHitCount: this.activeRestoreStats.fontLoadCacheHitCount,
-            fontLoadFailureCount: this.activeRestoreStats.fontLoadFailureCount,
-            deferredLayoutNodeCount: this.activeRestoreStats.deferredLayoutNodeCount,
-            deferredLayoutAppliedCount: this.activeRestoreStats.deferredLayoutAppliedCount,
-            safeSetWriteCount: this.activeRestoreStats.safeSetWriteCount,
-            safeSetSkipCount: this.activeRestoreStats.safeSetSkipCount,
-            resizeWriteCount: this.activeRestoreStats.resizeWriteCount,
-            resizeSkipCount: this.activeRestoreStats.resizeSkipCount,
-            booleanFallbackCount: this.booleanFallbackCount,
-            fallbackConnectorCount: this.fallbackConnectorCount
-        });
     }
 }
 

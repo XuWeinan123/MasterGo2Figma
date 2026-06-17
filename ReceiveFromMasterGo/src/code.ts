@@ -317,7 +317,6 @@ async function restoreImportPageData(importPage: ImportPageIndex, layers: { [id:
   const pageName = createRestoredPageName(importPage.name);
   const pageNodeCount = countLayerRecords(layers);
   const postprocessStart = session.postProcessedNodes;
-  logImportStage("page-start", "开始还原页面", { pageIndex, pageName, restoredNodes: session.restoredNodes, pageNodeCount });
   figma.ui.postMessage({
     type: "progress",
     transferId: session.transferId,
@@ -350,7 +349,6 @@ async function restoreImportPageData(importPage: ImportPageIndex, layers: { [id:
   });
   session.postProcessedNodes = Math.min(session.totalNodes, postprocessStart + pageNodeCount);
   await reportPagePostprocessProgress(session, pageIndex, pageName, postprocessStart, pageNodeCount, PAGE_POSTPROCESS_STAGE_COUNT - 1, 1, 1, "页面完成：" + pageName);
-  logImportStage("page-complete", "页面还原完成", { pageIndex, pageName, restoredNodes: session.restoredNodes, postProcessedNodes: session.postProcessedNodes });
   await yieldToEventLoop();
 }
 
@@ -382,26 +380,6 @@ async function reportPagePostprocessProgress(
     postprocessCurrent,
     postprocessTotal: session.totalNodes,
     label
-  });
-  logImportStage("postprocess", label, {
-    pageIndex,
-    pageName,
-    done,
-    total,
-    postprocessCurrent,
-    postprocessTotal: session.totalNodes,
-    restoredNodes: session.restoredNodes
-  });
-}
-
-function logImportStage(stage: string, label: string, detail: { [key: string]: any } = {}) {
-  const session = activeImportSession;
-  console.log("[MasterGo2Figma] Import progress", {
-    transferId: session ? session.transferId : "",
-    stage,
-    label,
-    elapsedMs: state.activeRestoreStats ? Date.now() - state.activeRestoreStats.startedAt : 0,
-    ...detail
   });
 }
 
@@ -460,7 +438,6 @@ function postFinalizeProgress(session: ImportSession, current: number, total: nu
     finalizeTotal: total,
     label
   });
-  logImportStage("finalize", label, { current, total, restoredNodes: session.restoredNodes });
 }
 
 function requireImportSession(transferId: string): ImportSession {
@@ -562,7 +539,6 @@ async function maybeReportRestoreProgress(current: number, total: number, label:
     total,
     label
   });
-  logImportStage("restore", label, { current, total });
   progState.total = total;
   progState.lastCurrent = current;
   progState.lastPostedAt = now;

@@ -779,8 +779,6 @@
       postprocess: { offset: 90, weight: 8 },
       finalize: { offset: 98, weight: 2 }
     };
-    const IMPORT_PROGRESS_DEBUG = true;
-
     function send(pluginMessage) {
       parent.postMessage({ pluginMessage }, "*");
     }
@@ -823,7 +821,6 @@
       lastDisplayedPercent = percent;
       lastImportProgressLabel = label || "";
       bar.style.width = `${percent}%`;
-      logImportProgress(label || "处理中...", current || 0, total || 0, percent);
       setStatus(label || "处理中...", detail || formatStageProgressDetail(importProgressStage, current || 0, total || 0, percent), false);
     }
 
@@ -835,13 +832,6 @@
       if (stage === "postprocess") return `${current}/${total} 个图层后处理 · ${totalProgress}`;
       if (stage === "finalize") return totalProgress;
       return total > 0 ? `${current}/${total} 项准备任务 · ${totalProgress}` : totalProgress;
-    }
-
-    function logImportProgress(label, current, total, percent) {
-      if (!IMPORT_PROGRESS_DEBUG) return;
-      const timestamp = new Date().toISOString();
-      const elapsedMs = restoreStartMs ? Date.now() - restoreStartMs : 0;
-      console.log(`[MasterGo2Figma Import] ${timestamp} | transfer=${activeImportTransferId || "-"} | mode=${importProgressMode} | stage=${importProgressStage} | ${label} | progress=${percent}% | current=${current} | total=${total} | elapsedMs=${elapsedMs}`);
     }
 
     function beginImportPrepareProgress(selectedPages, transferId) {
@@ -913,7 +903,6 @@
       if (message.stage === "restore" && current <= 0 && importProgressMode === "prepare") {
         if (label) {
           setStatus(label, summary.textContent, false);
-          logImportProgress(label, current, total, lastDisplayedPercent);
         }
         return;
       }
@@ -927,7 +916,6 @@
       }
       if (importProgressMode === "prepare" && label) {
           setStatus(label, summary.textContent, false);
-          logImportProgress(label, current, total, lastDisplayedPercent);
           return;
       }
       setProgress(current, total, label);
@@ -2863,8 +2851,6 @@
       }
       mgApplyButtonInstanceTextCentering(records);
       mgApplyCardInstanceOverrides(records);
-      console.log(`[.mg] 原生解码 ${pageList.length} 页，${records.length} 图层（共 ${nodeIds.length} 条记录，展开实例子层 ${expandedInstanceCount} 个，嵌入 props ${embeddedProps.length} 个，跳过画布外/注册表节点）`);
-
       const encoder = new TextEncoder();
       const out = {};
       const recordsById = {};

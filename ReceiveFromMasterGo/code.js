@@ -40,38 +40,6 @@
     });
   };
 
-  // ../shared/utils.ts
-  function formatDurationMs(ms) {
-    const totalSeconds = Math.round(ms / 1e3);
-    const minutes = Math.floor(totalSeconds / 60);
-    const seconds = totalSeconds % 60;
-    return `${minutes}m ${seconds}s`;
-  }
-  function safeSet(node, key, value) {
-    try {
-      if (node[key] === value) return false;
-      node[key] = value;
-      return true;
-    } catch (e) {
-      return false;
-    }
-  }
-  function safeResize(node, width, height) {
-    try {
-      if (node.width === width && node.height === height) return false;
-      node.resize(width, height);
-      return true;
-    } catch (e) {
-      return false;
-    }
-  }
-  function yieldToEventLoop() {
-    return new Promise((resolve) => setTimeout(resolve, 0));
-  }
-  function isSceneNode(node) {
-    return !!(node && typeof node === "object" && typeof node.type === "string" && node.type !== "DOCUMENT" && node.type !== "PAGE");
-  }
-
   // src/state.ts
   var RestorerState = class {
     constructor() {
@@ -139,29 +107,6 @@
       if (!this.activeRestoreStats) return;
       this.activeRestoreStats.restoredNodes = restoredNodes;
       this.activeRestoreStats.pageCount = pageCount;
-      const durationMs = Math.max(Date.now() - this.activeRestoreStats.startedAt, 1);
-      const nodesPerSecond = Math.round(restoredNodes / durationMs * 1e4) / 10;
-      console.log("[MasterGo2Figma] Restore performance", {
-        durationMs,
-        duration: formatDurationMs(durationMs),
-        nodesPerSecond,
-        totalNodes: this.activeRestoreStats.totalNodes,
-        restoredNodes,
-        pageCount,
-        textNodeCount: this.activeRestoreStats.textNodeCount,
-        fontListLoadCount: this.activeRestoreStats.fontListLoadCount,
-        fontLoadRequestCount: this.activeRestoreStats.fontLoadRequestCount,
-        fontLoadCacheHitCount: this.activeRestoreStats.fontLoadCacheHitCount,
-        fontLoadFailureCount: this.activeRestoreStats.fontLoadFailureCount,
-        deferredLayoutNodeCount: this.activeRestoreStats.deferredLayoutNodeCount,
-        deferredLayoutAppliedCount: this.activeRestoreStats.deferredLayoutAppliedCount,
-        safeSetWriteCount: this.activeRestoreStats.safeSetWriteCount,
-        safeSetSkipCount: this.activeRestoreStats.safeSetSkipCount,
-        resizeWriteCount: this.activeRestoreStats.resizeWriteCount,
-        resizeSkipCount: this.activeRestoreStats.resizeSkipCount,
-        booleanFallbackCount: this.booleanFallbackCount,
-        fallbackConnectorCount: this.fallbackConnectorCount
-      });
     }
   };
   var state = new RestorerState();
@@ -517,7 +462,6 @@ ${style}`;
       requestedToResolved[target.requestedFontKey].count++;
     }
     const resolutions = Object.keys(requestedToResolved).map((key) => requestedToResolved[key]);
-    console.log("[MasterGo2Figma] Missing font restore targets", resolutions);
     for (const item of resolutions) {
       if (item.resolved) continue;
       console.warn("[MasterGo2Figma] No available font match for missing font", {
@@ -595,9 +539,34 @@ ${style}`;
           }, error);
         }
       }
-      console.log("[MasterGo2Figma] Missing font restore", result);
       return result;
     });
+  }
+
+  // ../shared/utils.ts
+  function safeSet(node, key, value) {
+    try {
+      if (node[key] === value) return false;
+      node[key] = value;
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+  function safeResize(node, width, height) {
+    try {
+      if (node.width === width && node.height === height) return false;
+      node.resize(width, height);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+  function yieldToEventLoop() {
+    return new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  function isSceneNode(node) {
+    return !!(node && typeof node === "object" && typeof node.type === "string" && node.type !== "DOCUMENT" && node.type !== "PAGE");
   }
 
   // ../shared/connectorUtils.ts
@@ -1214,6 +1183,7 @@ ${style}`;
   // src/nodeCreator.ts
   var POSTPROCESS_BATCH_SIZE2 = 500;
   var POSTPROCESS_YIELD_INTERVAL_MS2 = 50;
+  var SHELL_PLACEHOLDER_PLUGIN_DATA_KEY = "mastergo2figma.shellPlaceholder";
   function appendRestoredNode(parent, node) {
     if ("appendChild" in parent) {
       parent.appendChild(node);
@@ -1241,6 +1211,25 @@ ${style}`;
       nodeAny.isMask = false;
     } catch (e) {
       console.warn("Unable to clear mask before removing imported rectangle:", node.name, e);
+    }
+  }
+  function markShellPlaceholderNode(node, data) {
+    if (!data || data.shellPlaceholder !== true) return;
+    const nodeAny = node;
+    if (typeof nodeAny.setPluginData !== "function") return;
+    try {
+      nodeAny.setPluginData(SHELL_PLACEHOLDER_PLUGIN_DATA_KEY, "1");
+    } catch (e) {
+      console.warn("Unable to mark shell placeholder:", node.name, e);
+    }
+  }
+  function isShellPlaceholderNode(node) {
+    const nodeAny = node;
+    if (typeof nodeAny.getPluginData !== "function") return false;
+    try {
+      return nodeAny.getPluginData(SHELL_PLACEHOLDER_PLUGIN_DATA_KEY) === "1";
+    } catch (_) {
+      return false;
     }
   }
   function isInsideInstance(node) {
@@ -1283,7 +1272,7 @@ ${style}`;
     if (!isSceneNode(root) || !isShellContainer(root)) return;
     const shellChildren = [...root.children];
     for (const child of shellChildren) {
-      if (child.type === "RECTANGLE" && child.name === root.name) {
+      if (child.type === "RECTANGLE" && isShellPlaceholderNode(child)) {
         clearMaskFlag(child);
         safeRemove(child);
         return;
@@ -1389,6 +1378,7 @@ ${style}`;
         if (node) safeRemove(node);
         return null;
       }
+      if (node) markShellPlaceholderNode(node, data);
       return node;
     });
   }
@@ -2475,7 +2465,6 @@ ${style}`;
       const pageName = createRestoredPageName(importPage.name);
       const pageNodeCount = countLayerRecords(layers);
       const postprocessStart = session.postProcessedNodes;
-      logImportStage("page-start", "\u5F00\u59CB\u8FD8\u539F\u9875\u9762", { pageIndex, pageName, restoredNodes: session.restoredNodes, pageNodeCount });
       figma.ui.postMessage({
         type: "progress",
         transferId: session.transferId,
@@ -2505,7 +2494,6 @@ ${style}`;
       });
       session.postProcessedNodes = Math.min(session.totalNodes, postprocessStart + pageNodeCount);
       yield reportPagePostprocessProgress(session, pageIndex, pageName, postprocessStart, pageNodeCount, PAGE_POSTPROCESS_STAGE_COUNT - 1, 1, 1, "\u9875\u9762\u5B8C\u6210\uFF1A" + pageName);
-      logImportStage("page-complete", "\u9875\u9762\u8FD8\u539F\u5B8C\u6210", { pageIndex, pageName, restoredNodes: session.restoredNodes, postProcessedNodes: session.postProcessedNodes });
       yield yieldToEventLoop();
     });
   }
@@ -2528,25 +2516,7 @@ ${style}`;
         postprocessTotal: session.totalNodes,
         label
       });
-      logImportStage("postprocess", label, {
-        pageIndex,
-        pageName,
-        done,
-        total,
-        postprocessCurrent,
-        postprocessTotal: session.totalNodes,
-        restoredNodes: session.restoredNodes
-      });
     });
-  }
-  function logImportStage(stage, label, detail = {}) {
-    const session = activeImportSession;
-    console.log("[MasterGo2Figma] Import progress", __spreadValues({
-      transferId: session ? session.transferId : "",
-      stage,
-      label,
-      elapsedMs: state.activeRestoreStats ? Date.now() - state.activeRestoreStats.startedAt : 0
-    }, detail));
   }
   function completeImportSession(message) {
     return __async(this, null, function* () {
@@ -2601,7 +2571,6 @@ ${style}`;
       finalizeTotal: total,
       label
     });
-    logImportStage("finalize", label, { current, total, restoredNodes: session.restoredNodes });
   }
   function requireImportSession(transferId) {
     if (!activeImportSession || activeImportSession.transferId !== transferId) {
@@ -2690,7 +2659,6 @@ ${style}`;
         total,
         label
       });
-      logImportStage("restore", label, { current, total });
       progState.total = total;
       progState.lastCurrent = current;
       progState.lastPostedAt = now;

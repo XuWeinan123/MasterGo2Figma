@@ -3,7 +3,7 @@ import {
     CachedLayerConversionRules, LayerConversionRule, ImageAssetContext, 
     ExportTransferAckResolver, ExportFileAckResolver, ExportFile, ExportManifest 
 } from "../../shared/types";
-import { formatDurationMs, describeError, yieldToEventLoop } from "../../shared/utils";
+import { yieldToEventLoop } from "../../shared/utils";
 
 class SendToFigmaState {
     public totalNodes = 0;
@@ -11,7 +11,6 @@ class SendToFigmaState {
     public loadingNotify: any = null; // NotificationHandler
     public lastNotifyAt = 0;
     public exportInProgress = false;
-    public isVerboseLoggingActive = false;
 
     public cachedLayerRules: CachedLayerConversionRules | null = null;
     public layerRulesBySourceType: { [sourceType: string]: LayerConversionRule } | null = null;
@@ -25,19 +24,11 @@ class SendToFigmaState {
     public activeExportStats: ExportPerformanceStats | null = null;
     public activeExportProgress: ExportProgressState | null = null;
 
-    public logDebug(message: string, ...args: any[]) {
-        if (this.isVerboseLoggingActive) {
-            console.log(`[MasterGo2Figma] [DEBUG] ${message}`, ...args);
-        }
-    }
-
     public logDiagnostic(level: "log" | "warn" | "error", message: string, payload?: any) {
         if (level === "error") {
             console.error(message, payload);
         } else if (level === "warn") {
             console.warn(message, payload);
-        } else {
-            console.log(message, payload);
         }
     }
 
@@ -59,13 +50,6 @@ class SendToFigmaState {
     }
 
     public resetExportStats(options: ExportOptions, pageCount: number, rootCount: number) {
-        this.logDiagnostic("log", "[MasterGo2Figma] Export session stats reset", {
-            pageCount,
-            rootCount,
-            transferMode: options.transferMode,
-            relayUrl: options.relayUrl || ""
-        });
-
         this.totalNodes = 0;
         this.processedNodes = 0;
 
@@ -141,35 +125,6 @@ class SendToFigmaState {
     public logExportPerformanceSummary(label: string, manifest?: ExportManifest) {
         if (!this.activeExportStats) return;
         this.updateExportStatsFromManifest(manifest);
-        const durationMs = Math.max(Date.now() - this.activeExportStats.startedAt, 1);
-        const nodesPerSecond = Math.round((this.activeExportStats.processedNodes / durationMs) * 10000) / 10;
-        console.log("[MasterGo2Figma] Export performance", {
-            label,
-            durationMs,
-            duration: formatDurationMs(durationMs),
-            nodesPerSecond,
-            scope: this.activeExportStats.scope,
-            transferMode: this.activeExportStats.transferMode,
-            pageCount: this.activeExportStats.pageCount,
-            rootCount: this.activeExportStats.rootCount,
-            totalNodes: this.activeExportStats.totalNodes,
-            processedNodes: this.activeExportStats.processedNodes,
-            scanMs: this.activeExportStats.scanMs,
-            exportMs: this.activeExportStats.exportMs,
-            assetMs: this.activeExportStats.assetMs,
-            manifestMs: this.activeExportStats.manifestMs,
-            ackMs: this.activeExportStats.ackMs,
-            files: this.activeExportStats.files,
-            chunks: this.activeExportStats.chunks,
-            bytes: this.activeExportStats.bytes,
-            layerChunkFiles: this.activeExportStats.layerChunkFiles,
-            layerRecords: this.activeExportStats.layerRecords,
-            splitPackages: this.activeExportStats.splitPackages,
-            imageAssets: this.activeExportStats.imageAssets,
-            missingImageAssets: this.activeExportStats.missingImageAssets,
-            progressPosts: this.activeExportStats.progressPosts,
-            progressYields: this.activeExportStats.progressYields
-        });
     }
 
     public postUI(message: any) {

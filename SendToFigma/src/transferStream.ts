@@ -19,11 +19,8 @@ import {
     EXPORT_FILE_YIELD_EVERY_FILES,
     LAYER_CHUNK_MAX_RECORDS,
     LAYER_CHUNK_MAX_BYTES,
-    LAYER_CHUNK_LOG_BYTES,
-    LAYER_CHUNK_LOG_EVERY,
     PAGE_SEGMENT_TARGET_LAYERS,
     EXPORT_SCAN_YIELD_EVERY_NODES,
-    DEBUG_LOGGING_PAGE_INDEX_START,
     EXPORT_FILE_ACK_TIMEOUT_MS,
     EXPORT_TRANSFER_ACK_TIMEOUT_MS,
 } from "./exportConfig";
@@ -536,17 +533,6 @@ export async function flushLayerChunk(
         fileSize: byteCount,
         streamedBytes: transfer.streamedBytes
     });
-    if (fileIndex === 1 || fileIndex % LAYER_CHUNK_LOG_EVERY === 0 || byteCount >= LAYER_CHUNK_LOG_BYTES) {
-        state.logDiagnostic("log", "[MasterGo2Figma] Layer chunk flush", {
-            page: pageIndex.name,
-            path,
-            chunkIndex: fileIndex,
-            records: recordCount,
-            bytes: byteCount,
-            processedNodes: state.processedNodes,
-            transfer: summarizeTransfer(transfer)
-        });
-    }
     const contentParts = [
         `{"schema":"mastergo2figma.layers.v2","version":2,"pageId":${JSON.stringify(chunk.pageId)},"records":[`
     ];
@@ -705,11 +691,6 @@ export async function streamPageExportToTransfer(
     const pageId = safeRead(() => pageTarget.page.id, `page-${pageIndex + 1}`);
     const pageName = pageNameOverride || safeRead(() => pageTarget.page.name, "Untitled");
     const nodes = ensureTargetNodes(pageTarget);
-    state.isVerboseLoggingActive = pageIndex >= DEBUG_LOGGING_PAGE_INDEX_START;
-    if (state.isVerboseLoggingActive) {
-        console.log(`[MasterGo2Figma] [DEBUG] Verbose logging activated for page: ${pageName}`);
-    }
-    console.log(`[MasterGo2Figma] Page export start ${pageIndex + 1}/${pageCount}: ${pageName}, roots=${nodes.length}`);
     const pageIndexRecord: ExportPageIndex = {
         schema: "mastergo2figma.page.v2",
         version: 2,
@@ -741,8 +722,6 @@ export async function streamPageExportToTransfer(
         path: pageFile,
         content: JSON.stringify(pageIndexRecord)
     });
-    console.log(`[MasterGo2Figma] Page export complete ${pageIndex + 1}/${pageCount}: ${pageIndexRecord.name}, layers=${pageIndexRecord.layerCount}, files=${pageIndexRecord.layerChunks.length}`);
-
     manifest.pages.push({
         id: pageIndexRecord.id,
         name: pageIndexRecord.name,
@@ -783,10 +762,6 @@ export async function streamPageRootSegmentsToPackages(
     aggregateManifest: ExportManifest
 ) {
     const pageName = safeRead(() => pageTarget.page.name, "Untitled");
-    state.isVerboseLoggingActive = pageIndex >= DEBUG_LOGGING_PAGE_INDEX_START;
-    if (state.isVerboseLoggingActive) {
-        console.log(`[MasterGo2Figma] [DEBUG] Verbose logging activated for split package page: ${pageName}`);
-    }
     let rootIndex = 0;
     let segmentIndex = 0;
     const nodes = ensureTargetNodes(pageTarget);
@@ -811,19 +786,6 @@ export async function streamPageRootSegmentsToPackages(
         const segmentLabel = useSegmentNames ? ` segment ${segmentIndex + 1}` : "";
         const pageNameOverride = useSegmentNames ? `${pageName} ${segmentIndex + 1}` : undefined;
         const startRootIndex = rootIndex;
-        console.log(`[MasterGo2Figma] Split package start ${pageIndex + 1}/${pageCount}${segmentLabel}: ${pageName}, roots=${startRootIndex + 1}-${nodes.length}`);
-        state.logDiagnostic("log", "[MasterGo2Figma] Split package detail", {
-            pageIndex: pageIndex + 1,
-            pageCount,
-            pageName,
-            segmentIndex: segmentIndex + 1,
-            startRootIndex,
-            remainingRootCount: nodes.length - startRootIndex,
-            targetLayerCount: PAGE_SEGMENT_TARGET_LAYERS,
-            chunkMaxRecords: LAYER_CHUNK_MAX_RECORDS,
-            chunkMaxBytes: LAYER_CHUNK_MAX_BYTES,
-            transfer: summarizeTransfer(transfer)
-        });
 
         state.noteExportSplitPackage();
         const segmentResult = await state.timeExportPhase("exportMs", async () => await streamPageRootSegmentToTransfer(
@@ -868,8 +830,7 @@ export async function streamPageRootSegmentsToPackages(
         completeExportTransfer(transfer, manifest, isFinal, isFinal ? aggregateManifest.stats : manifest.stats);
         releaseExportPackageMemory(manifest, imageAssetContext);
         state.activeImageAssetContext = null;
-        const ack = await state.timeExportPhase("ackMs", async () => await ackPromise);
-        console.log(`[MasterGo2Figma] Split package complete ${pageIndex + 1}/${pageCount}${segmentLabel}: ${ack.filename || transfer.filename}, roots=${segmentResult.rootCount}, layers=${segmentResult.layerCount}, files=${transfer.fileIndex}, bytes=${transfer.streamedBytes}`);
+        await state.timeExportPhase("ackMs", async () => await ackPromise);
         segmentIndex++;
         await yieldToHost();
     }
@@ -918,8 +879,6 @@ export async function streamJsonExportPackage(options: ExportOptions): Promise<E
         const transfer = createExportTransfer(manifest, undefined, options);
         startExportTransfer(transfer);
 
-        console.log(`[MasterGo2Figma] Export v2 start: ${targets.length} pages, ${rootCount} roots, nodes=${state.totalNodes}.`);
-
         await state.timeExportPhase("exportMs", async () => {
             for (let pageIndex = 0; pageIndex < targets.length; pageIndex++) {
                 const pageTarget = targets[pageIndex];
@@ -945,8 +904,7 @@ export async function streamJsonExportPackage(options: ExportOptions): Promise<E
         state.postProgressUI({ type: "progress", phase: "complete", current: state.processedNodes, total: state.processedNodes, label: "JSON 已生成，正在准备下载..." });
         const ackPromise = waitForExportTransferAck(transfer);
         completeExportTransfer(transfer, manifest);
-        const ack = await state.timeExportPhase("ackMs", async () => await ackPromise);
-        console.log(`[MasterGo2Figma] UI zip complete: ${ack.filename || transfer.filename}, files=${transfer.fileIndex}, bytes=${transfer.streamedBytes}`);
+        await state.timeExportPhase("ackMs", async () => await ackPromise);
         state.logExportPerformanceSummary("complete", manifest);
         return manifest;
     } catch (error) {
@@ -971,7 +929,6 @@ export async function streamSplitJsonExportPackages(
         rootCount += ensureTargetNodes(target).length;
         clearTargetNodes(target);
     }
-    console.log(`[MasterGo2Figma] Split export start: ${targets.length} pages, ${rootCount} roots. Node pre-scan skipped.`);
     state.postProgressUI({
         type: "progress",
         phase: "prepare",

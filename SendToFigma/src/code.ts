@@ -81,11 +81,9 @@ function showPluginUI() {
         state.exportInProgress = true;
         try {
             const prepared = await prepareExportRun(options);
-            state.logDiagnostic("log", "[MasterGo2Figma] Export start", createPreparedExportLog(options, prepared));
             await savePendingExportQueueForRecovery(prepared);
             const success = await runWithUI(prepared.options);
             if (success) {
-                state.logDiagnostic("log", "[MasterGo2Figma] Export complete", createPreparedExportLog(options, prepared));
                 await updatePendingExportQueue(prepared);
             }
         } catch (error) {
@@ -205,29 +203,6 @@ async function runWithUI(options: ExportOptions): Promise<boolean> {
         });
         return false;
     }
-}
-
-function createPreparedExportLog(requested: ExportOptions, prepared: PreparedExportRun) {
-    return {
-        scope: requested.scope,
-        transferMode: requested.transferMode,
-        requestedPageCount: requested.pageIds.length,
-        requestedPages: summarizePageIds(requested.pageIds.slice(0, 5)),
-        runPageCount: prepared.options.pageIds.length,
-        runPages: summarizePageIds(prepared.options.pageIds)
-    };
-}
-
-function summarizePageIds(pageIds: string[]) {
-    if (!Array.isArray(pageIds) || pageIds.length === 0) return [];
-    const pageById: { [id: string]: string } = {};
-    for (const page of mg.document.children) {
-        pageById[page.id] = safeRead(() => page.name, "Untitled");
-    }
-    return pageIds.map(id => ({
-        id,
-        name: pageById[id] || ""
-    }));
 }
 
 async function prepareExportRun(options: ExportOptions): Promise<PreparedExportRun> {

@@ -1106,8 +1106,6 @@
       }
       mgApplyButtonInstanceTextCentering(records);
       mgApplyCardInstanceOverrides(records);
-      console.log(`[.mg] 原生解码 ${pageList.length} 页，${records.length} 图层（共 ${nodeIds.length} 条记录，展开实例子层 ${expandedInstanceCount} 个，嵌入 props ${embeddedProps.length} 个，跳过画布外/注册表节点）`);
-
       const encoder = new TextEncoder();
       const out = {};
       const recordsById = {};

@@ -42,12 +42,6 @@
   };
 
   // ../shared/utils.ts
-  function formatDurationMs(ms) {
-    const totalSeconds = Math.round(ms / 1e3);
-    const minutes = Math.floor(totalSeconds / 60);
-    const seconds = totalSeconds % 60;
-    return `${minutes}m ${seconds}s`;
-  }
   function describeError(error) {
     if (!error) return "Unknown error";
     if (error instanceof Error) {
@@ -104,7 +98,6 @@
       // NotificationHandler
       this.lastNotifyAt = 0;
       this.exportInProgress = false;
-      this.isVerboseLoggingActive = false;
       this.cachedLayerRules = null;
       this.layerRulesBySourceType = null;
       this.layerRulesLoadPromise = null;
@@ -115,18 +108,11 @@
       this.activeExportStats = null;
       this.activeExportProgress = null;
     }
-    logDebug(message, ...args) {
-      if (this.isVerboseLoggingActive) {
-        console.log(`[MasterGo2Figma] [DEBUG] ${message}`, ...args);
-      }
-    }
     logDiagnostic(level, message, payload) {
       if (level === "error") {
         console.error(message, payload);
       } else if (level === "warn") {
         console.warn(message, payload);
-      } else {
-        console.log(message, payload);
       }
     }
     setExportDebugState(nextState) {
@@ -146,12 +132,6 @@
       this.exportDebugState.totalNodes = this.totalNodes;
     }
     resetExportStats(options, pageCount, rootCount) {
-      this.logDiagnostic("log", "[MasterGo2Figma] Export session stats reset", {
-        pageCount,
-        rootCount,
-        transferMode: options.transferMode,
-        relayUrl: options.relayUrl || ""
-      });
       this.totalNodes = 0;
       this.processedNodes = 0;
       this.activeExportStats = {
@@ -222,35 +202,6 @@
     logExportPerformanceSummary(label, manifest) {
       if (!this.activeExportStats) return;
       this.updateExportStatsFromManifest(manifest);
-      const durationMs = Math.max(Date.now() - this.activeExportStats.startedAt, 1);
-      const nodesPerSecond = Math.round(this.activeExportStats.processedNodes / durationMs * 1e4) / 10;
-      console.log("[MasterGo2Figma] Export performance", {
-        label,
-        durationMs,
-        duration: formatDurationMs(durationMs),
-        nodesPerSecond,
-        scope: this.activeExportStats.scope,
-        transferMode: this.activeExportStats.transferMode,
-        pageCount: this.activeExportStats.pageCount,
-        rootCount: this.activeExportStats.rootCount,
-        totalNodes: this.activeExportStats.totalNodes,
-        processedNodes: this.activeExportStats.processedNodes,
-        scanMs: this.activeExportStats.scanMs,
-        exportMs: this.activeExportStats.exportMs,
-        assetMs: this.activeExportStats.assetMs,
-        manifestMs: this.activeExportStats.manifestMs,
-        ackMs: this.activeExportStats.ackMs,
-        files: this.activeExportStats.files,
-        chunks: this.activeExportStats.chunks,
-        bytes: this.activeExportStats.bytes,
-        layerChunkFiles: this.activeExportStats.layerChunkFiles,
-        layerRecords: this.activeExportStats.layerRecords,
-        splitPackages: this.activeExportStats.splitPackages,
-        imageAssets: this.activeExportStats.imageAssets,
-        missingImageAssets: this.activeExportStats.missingImageAssets,
-        progressPosts: this.activeExportStats.progressPosts,
-        progressYields: this.activeExportStats.progressYields
-      });
     }
     postUI(message) {
       try {
@@ -1384,11 +1335,8 @@
   var EXPORT_FILE_YIELD_EVERY_FILES = 25;
   var LAYER_CHUNK_MAX_RECORDS = 16;
   var LAYER_CHUNK_MAX_BYTES = 64 * 1024;
-  var LAYER_CHUNK_LOG_BYTES = 48 * 1024;
-  var LAYER_CHUNK_LOG_EVERY = 50;
   var PAGE_SEGMENT_TARGET_LAYERS = 8e3;
   var EXPORT_SCAN_YIELD_EVERY_NODES = 500;
-  var DEBUG_LOGGING_PAGE_INDEX_START = 9999;
   var EXPORT_FILE_ACK_TIMEOUT_MS = 6e4;
   var EXPORT_TRANSFER_ACK_TIMEOUT_MS = 12e4;
   var SVG_FALLBACK_MAX_NODES = 48;
@@ -1396,9 +1344,6 @@
   var SVG_FALLBACK_MAX_DIMENSION = 256;
   var SVG_FALLBACK_MAX_BYTES = 64 * 1024;
   var SVG_FALLBACK_MAX_DOCUMENT_NODES = 5e3;
-  var STRINGIFY_PROBE_VERTEX_THRESHOLD = 1e3;
-  var STRINGIFY_PROBE_REGION_THRESHOLD = 50;
-  var STRINGIFY_PROBE_CHILD_THRESHOLD = 300;
   var STRINGIFY_RECORD_WARN_BYTES = 48 * 1024;
 
   // src/nodeSerializer.ts
@@ -1508,17 +1453,22 @@
       console.warn("Unsupported layer type:", resolvedSourceType, node.type);
       return {};
     }
-    if (rule.sendStrategy === "flattenBoolean") return transBONode(node);
-    if (rule.sendStrategy === "booleanTree") return transBooleanTreeNode(node, rule.restoreType);
-    if (rule.sendStrategy === "penNetwork") return transPenNode(node, resolvedSourceType, rule.restoreType);
-    if (rule.sendStrategy === "ellipseArc") return transEllipseNode(node);
-    if (rule.sendStrategy === "text") return transTextNode(node);
-    if (rule.sendStrategy === "star") return transStarNode(node);
-    if (rule.sendStrategy === "polygon") return transPolygonNode(node);
-    if (rule.sendStrategy === "connector") return transConnectorNode(node);
-    if (rule.sendStrategy === "frameLike") return transFrameNode(node, resolvedSourceType);
-    if (rule.sendStrategy === "groupLike") return transGroupNode(node);
-    return getUniversalProperty(node, resolvedSourceType, rule.restoreType);
+    let nodeJson;
+    if (rule.sendStrategy === "flattenBoolean") nodeJson = transBONode(node);
+    else if (rule.sendStrategy === "booleanTree") nodeJson = transBooleanTreeNode(node, rule.restoreType);
+    else if (rule.sendStrategy === "penNetwork") nodeJson = transPenNode(node, resolvedSourceType, rule.restoreType);
+    else if (rule.sendStrategy === "ellipseArc") nodeJson = transEllipseNode(node);
+    else if (rule.sendStrategy === "text") nodeJson = transTextNode(node);
+    else if (rule.sendStrategy === "star") nodeJson = transStarNode(node);
+    else if (rule.sendStrategy === "polygon") nodeJson = transPolygonNode(node);
+    else if (rule.sendStrategy === "connector") nodeJson = transConnectorNode(node);
+    else if (rule.sendStrategy === "frameLike") nodeJson = transFrameNode(node, resolvedSourceType);
+    else if (rule.sendStrategy === "groupLike") nodeJson = transGroupNode(node);
+    else nodeJson = getUniversalProperty(node, resolvedSourceType, rule.restoreType);
+    if (rule.visualFrameSource && nodeJson && typeof nodeJson === "object") {
+      nodeJson.shellPlaceholder = true;
+    }
+    return nodeJson;
   }
   function sanitizeExportNodeJson(nodeJson) {
     if (!nodeJson || typeof nodeJson !== "object") return nodeJson;
@@ -1550,9 +1500,7 @@
       const area = Math.abs(width * height);
       if (subtreeNodeCount <= SVG_FALLBACK_MAX_NODES && area <= SVG_FALLBACK_MAX_AREA && Math.max(Math.abs(width), Math.abs(height)) <= SVG_FALLBACK_MAX_DIMENSION) {
         try {
-          state.logDebug(`    * [SVG-Export] calling exportAsync for ${node.id} (${node.type}) - name=${node.name}, dims=${width}x${height}`);
           const svg = yield node.exportAsync({ format: "SVG" });
-          state.logDebug(`    * [SVG-Export] completed exportAsync for ${node.id}: bytes=${svg ? svg.length : 0}`);
           if (typeof svg === "string" && svg.trim()) {
             if (svg.length > SVG_FALLBACK_MAX_BYTES) {
               console.warn(`[MasterGo2Figma] ${label} SVG fallback skipped because SVG is too large: ${getNodeDebugLabel(node)}, bytes=${svg.length}`);
@@ -1561,7 +1509,6 @@
             return svg;
           }
         } catch (error) {
-          state.logDebug(`    * [SVG-Export] exportAsync failed for ${node.id}:`, describeError(error));
           console.warn(`Unable to export ${label} as SVG fallback:`, getNodeDebugLabel(node), error);
         }
       }
@@ -1652,13 +1599,6 @@
       } : void 0
     };
   }
-  function shouldLogStringifyProbe(complexity) {
-    const vertexCount = complexity.vectorNetwork && complexity.vectorNetwork.vertices || 0;
-    const segmentCount = complexity.vectorNetwork && complexity.vectorNetwork.segments || 0;
-    const regionCount = complexity.vectorNetwork && complexity.vectorNetwork.regions || 0;
-    const childCount = complexity.childCount || complexity.rawChildCount || 0;
-    return vertexCount >= STRINGIFY_PROBE_VERTEX_THRESHOLD || segmentCount >= STRINGIFY_PROBE_VERTEX_THRESHOLD || regionCount >= STRINGIFY_PROBE_REGION_THRESHOLD || childCount >= STRINGIFY_PROBE_CHILD_THRESHOLD;
-  }
   function getNodeDebugLabel(node) {
     const nodeId = safeRead(() => node.id, "");
     const nodeType = safeRead(() => node.type, "");
@@ -1739,10 +1679,8 @@
       let recordAppended = false;
       let childNodes = [];
       let shouldExportChildren = false;
-      state.logDebug(`[DFS] Start node: id=${nodeId}, name=${nodeName}, type=${node.type}, page=${pageName}`);
       const setNodeDebug = (nextPhase, nodeComplexity) => {
         phase = nextPhase;
-        state.logDebug(`  - [DFS] Node ${nodeId} enter phase: ${nextPhase}`);
         state.setExportDebugState({
           phase: `node:${nextPhase}`,
           page: pageName,
@@ -1758,19 +1696,14 @@
       try {
         setNodeDebug("read-children");
         childNodes = getSafeExportableChildren(node);
-        state.logDebug(`  - [DFS] Node ${nodeId} read-children done: childCount=${childNodes.length}`);
         setNodeDebug("analyse");
         let nodeJson = analyseNodes(node);
-        state.logDebug(`  - [DFS] Node ${nodeId} analyse done`);
         setNodeDebug("enrich-boolean");
         yield enrichBooleanOperationExport(node, nodeJson, childNodes);
-        state.logDebug(`  - [DFS] Node ${nodeId} enrich-boolean done`);
         setNodeDebug("enrich-vector");
         yield enrichFilledVectorExport(node, nodeJson);
-        state.logDebug(`  - [DFS] Node ${nodeId} enrich-vector done`);
         setNodeDebug("override-layout");
         overrideExportLayoutFromSourceNode(nodeJson, node);
-        state.logDebug(`  - [DFS] Node ${nodeId} override-layout done`);
         setNodeDebug("build-record");
         shouldExportChildren = !nodeJson || !nodeJson.omitChildrenOnRestore;
         const childIds = shouldExportChildren ? childNodes.map((child) => safeRead(() => child.id, "")) : [];
@@ -1786,14 +1719,6 @@
         };
         let nodeComplexity = createNodeComplexitySnapshot(node, childNodes, nodeJson);
         childNodes = [];
-        if (shouldLogStringifyProbe(nodeComplexity)) {
-          state.logDiagnostic("log", "[MasterGo2Figma] Stringify probe", {
-            page: pageName,
-            processedNodes: state.processedNodes,
-            totalNodes: state.totalNodes,
-            complexity: nodeComplexity
-          });
-        }
         setNodeDebug("stringify", nodeComplexity);
         let recordJson = stringifyLayerPayload(layerRecord, node, nodeComplexity);
         const recordBytes = recordJson.length;
@@ -1808,7 +1733,6 @@
             transfer: summarizeTransfer(transfer)
           });
         }
-        state.logDebug(`  - [DFS] Node ${nodeId} stringify done: length=${recordBytes}`);
         layerRecord = null;
         nodeJson = null;
         nodeComplexity = null;
@@ -1818,7 +1742,6 @@
         yield appendLayerRecord(recordJson, pageIndex, chunk, transfer);
         markLayerWritten(chunk, nodeId);
         recordAppended = true;
-        state.logDebug(`  - [DFS] Node ${nodeId} append done`);
         if (omittedChildNodeCount) {
           state.processedNodes += omittedChildNodeCount;
         }
@@ -1826,10 +1749,8 @@
         yield state.maybeReportExportProgress(state.processedNodes, state.totalNodes, "\u6B63\u5728\u5BFC\u51FA\u56FE\u5C42...");
         recordJson = null;
         childNodes = null;
-        state.logDebug(`[DFS] Complete node: id=${nodeId}`);
         return { nodeId, shouldExportChildren, childIds };
       } catch (error) {
-        state.logDebug(`[DFS] Node export caught error: id=${nodeId}, phase=${phase}, error=`, describeError(error));
         const fatalOom = isOutOfMemoryError(error);
         state.logDiagnostic("error", fatalOom ? `[MasterGo2Figma] Fatal node OOM, stopping export: ${nodeId}` : `[MasterGo2Figma] Node export failed: ${nodeId}`, {
           phase,
@@ -2398,17 +2319,6 @@
         fileSize: byteCount,
         streamedBytes: transfer.streamedBytes
       });
-      if (fileIndex === 1 || fileIndex % LAYER_CHUNK_LOG_EVERY === 0 || byteCount >= LAYER_CHUNK_LOG_BYTES) {
-        state.logDiagnostic("log", "[MasterGo2Figma] Layer chunk flush", {
-          page: pageIndex.name,
-          path,
-          chunkIndex: fileIndex,
-          records: recordCount,
-          bytes: byteCount,
-          processedNodes: state.processedNodes,
-          transfer: summarizeTransfer2(transfer)
-        });
-      }
       const contentParts = [
         `{"schema":"mastergo2figma.layers.v2","version":2,"pageId":${JSON.stringify(chunk.pageId)},"records":[`
       ];
@@ -2531,11 +2441,6 @@
       const pageId = safeRead(() => pageTarget.page.id, `page-${pageIndex + 1}`);
       const pageName = pageNameOverride || safeRead(() => pageTarget.page.name, "Untitled");
       const nodes = ensureTargetNodes(pageTarget);
-      state.isVerboseLoggingActive = pageIndex >= DEBUG_LOGGING_PAGE_INDEX_START;
-      if (state.isVerboseLoggingActive) {
-        console.log(`[MasterGo2Figma] [DEBUG] Verbose logging activated for page: ${pageName}`);
-      }
-      console.log(`[MasterGo2Figma] Page export start ${pageIndex + 1}/${pageCount}: ${pageName}, roots=${nodes.length}`);
       const pageIndexRecord = {
         schema: "mastergo2figma.page.v2",
         version: 2,
@@ -2565,7 +2470,6 @@
         path: pageFile,
         content: JSON.stringify(pageIndexRecord)
       });
-      console.log(`[MasterGo2Figma] Page export complete ${pageIndex + 1}/${pageCount}: ${pageIndexRecord.name}, layers=${pageIndexRecord.layerCount}, files=${pageIndexRecord.layerChunks.length}`);
       manifest.pages.push({
         id: pageIndexRecord.id,
         name: pageIndexRecord.name,
@@ -2597,10 +2501,6 @@
   function streamPageRootSegmentsToPackages(options, pageTarget, pageIndex, pageCount, aggregateManifest) {
     return __async(this, null, function* () {
       const pageName = safeRead(() => pageTarget.page.name, "Untitled");
-      state.isVerboseLoggingActive = pageIndex >= DEBUG_LOGGING_PAGE_INDEX_START;
-      if (state.isVerboseLoggingActive) {
-        console.log(`[MasterGo2Figma] [DEBUG] Verbose logging activated for split package page: ${pageName}`);
-      }
       let rootIndex = 0;
       let segmentIndex = 0;
       const nodes = ensureTargetNodes(pageTarget);
@@ -2623,19 +2523,6 @@
         const segmentLabel = useSegmentNames ? ` segment ${segmentIndex + 1}` : "";
         const pageNameOverride = useSegmentNames ? `${pageName} ${segmentIndex + 1}` : void 0;
         const startRootIndex = rootIndex;
-        console.log(`[MasterGo2Figma] Split package start ${pageIndex + 1}/${pageCount}${segmentLabel}: ${pageName}, roots=${startRootIndex + 1}-${nodes.length}`);
-        state.logDiagnostic("log", "[MasterGo2Figma] Split package detail", {
-          pageIndex: pageIndex + 1,
-          pageCount,
-          pageName,
-          segmentIndex: segmentIndex + 1,
-          startRootIndex,
-          remainingRootCount: nodes.length - startRootIndex,
-          targetLayerCount: PAGE_SEGMENT_TARGET_LAYERS,
-          chunkMaxRecords: LAYER_CHUNK_MAX_RECORDS,
-          chunkMaxBytes: LAYER_CHUNK_MAX_BYTES,
-          transfer: summarizeTransfer2(transfer)
-        });
         state.noteExportSplitPackage();
         const segmentResult = yield state.timeExportPhase("exportMs", () => __async(null, null, function* () {
           return yield streamPageRootSegmentToTransfer(
@@ -2677,10 +2564,9 @@
         completeExportTransfer(transfer, manifest, isFinal, isFinal ? aggregateManifest.stats : manifest.stats);
         releaseExportPackageMemory(manifest, imageAssetContext);
         state.activeImageAssetContext = null;
-        const ack = yield state.timeExportPhase("ackMs", () => __async(null, null, function* () {
+        yield state.timeExportPhase("ackMs", () => __async(null, null, function* () {
           return yield ackPromise;
         }));
-        console.log(`[MasterGo2Figma] Split package complete ${pageIndex + 1}/${pageCount}${segmentLabel}: ${ack.filename || transfer.filename}, roots=${segmentResult.rootCount}, layers=${segmentResult.layerCount}, files=${transfer.fileIndex}, bytes=${transfer.streamedBytes}`);
         segmentIndex++;
         yield yieldToHost();
       }
@@ -2724,7 +2610,6 @@
         const manifest = createBaseExportManifest(options, targets.length);
         const transfer = createExportTransfer(manifest, void 0, options);
         startExportTransfer(transfer);
-        console.log(`[MasterGo2Figma] Export v2 start: ${targets.length} pages, ${rootCount} roots, nodes=${state.totalNodes}.`);
         yield state.timeExportPhase("exportMs", () => __async(null, null, function* () {
           for (let pageIndex = 0; pageIndex < targets.length; pageIndex++) {
             const pageTarget = targets[pageIndex];
@@ -2747,10 +2632,9 @@
         state.postProgressUI({ type: "progress", phase: "complete", current: state.processedNodes, total: state.processedNodes, label: "JSON \u5DF2\u751F\u6210\uFF0C\u6B63\u5728\u51C6\u5907\u4E0B\u8F7D..." });
         const ackPromise = waitForExportTransferAck(transfer);
         completeExportTransfer(transfer, manifest);
-        const ack = yield state.timeExportPhase("ackMs", () => __async(null, null, function* () {
+        yield state.timeExportPhase("ackMs", () => __async(null, null, function* () {
           return yield ackPromise;
         }));
-        console.log(`[MasterGo2Figma] UI zip complete: ${ack.filename || transfer.filename}, files=${transfer.fileIndex}, bytes=${transfer.streamedBytes}`);
         state.logExportPerformanceSummary("complete", manifest);
         return manifest;
       } catch (error) {
@@ -2773,7 +2657,6 @@
         rootCount += ensureTargetNodes(target).length;
         clearTargetNodes(target);
       }
-      console.log(`[MasterGo2Figma] Split export start: ${targets.length} pages, ${rootCount} roots. Node pre-scan skipped.`);
       state.postProgressUI({
         type: "progress",
         phase: "prepare",
@@ -2848,11 +2731,9 @@
       state.exportInProgress = true;
       try {
         const prepared = yield prepareExportRun(options);
-        state.logDiagnostic("log", "[MasterGo2Figma] Export start", createPreparedExportLog(options, prepared));
         yield savePendingExportQueueForRecovery(prepared);
         const success = yield runWithUI(prepared.options);
         if (success) {
-          state.logDiagnostic("log", "[MasterGo2Figma] Export complete", createPreparedExportLog(options, prepared));
           yield updatePendingExportQueue(prepared);
         }
       } catch (error) {
@@ -2968,27 +2849,6 @@
         return false;
       }
     });
-  }
-  function createPreparedExportLog(requested, prepared) {
-    return {
-      scope: requested.scope,
-      transferMode: requested.transferMode,
-      requestedPageCount: requested.pageIds.length,
-      requestedPages: summarizePageIds(requested.pageIds.slice(0, 5)),
-      runPageCount: prepared.options.pageIds.length,
-      runPages: summarizePageIds(prepared.options.pageIds)
-    };
-  }
-  function summarizePageIds(pageIds) {
-    if (!Array.isArray(pageIds) || pageIds.length === 0) return [];
-    const pageById = {};
-    for (const page of mg.document.children) {
-      pageById[page.id] = safeRead(() => page.name, "Untitled");
-    }
-    return pageIds.map((id) => ({
-      id,
-      name: pageById[id] || ""
-    }));
   }
   function prepareExportRun(options) {
     return __async(this, null, function* () {

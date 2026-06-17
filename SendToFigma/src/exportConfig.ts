@@ -25,20 +25,11 @@ export const LAYER_CHUNK_MAX_RECORDS = 16;
 /** Max accumulated bytes before a layer-chunk file is flushed. 64 KiB caps per-file memory. */
 export const LAYER_CHUNK_MAX_BYTES = 64 * 1024;
 
-/** A flushed layer chunk at or above this byte size is logged for diagnostics. */
-export const LAYER_CHUNK_LOG_BYTES = 48 * 1024;
-
-/** Also log a chunk flush on the first chunk and every Nth chunk thereafter (sampling, to avoid log spam). */
-export const LAYER_CHUNK_LOG_EVERY = 50;
-
 /** Soft target of layers per split package; a single page is segmented once a segment reaches this many layers. */
 export const PAGE_SEGMENT_TARGET_LAYERS = 8000;
 
 /** Yield to the host during the pre-scan after counting this many nodes. */
 export const EXPORT_SCAN_YIELD_EVERY_NODES = 500;
-
-/** Page index from which verbose per-node logging activates; 9999 effectively keeps it off in normal runs. */
-export const DEBUG_LOGGING_PAGE_INDEX_START = 9999;
 
 /** Timeout (ms) waiting for the UI to acknowledge one streamed file before failing the transfer. */
 export const EXPORT_FILE_ACK_TIMEOUT_MS = 60000;
@@ -65,19 +56,6 @@ export const SVG_FALLBACK_MAX_BYTES = 64 * 1024;
 
 /** Skip SVG fallback entirely once the whole document exceeds this node count (too expensive to rasterize). */
 export const SVG_FALLBACK_MAX_DOCUMENT_NODES = 5000;
-
-// ---- Stringify diagnostics (nodeSerializer.ts) -----------------------------
-// Thresholds that only flag unusually heavy nodes for diagnostic logging; they
-// do not change export behavior.
-
-/** Log a stringify probe when a node has at least this many vector vertices or segments. */
-export const STRINGIFY_PROBE_VERTEX_THRESHOLD = 1000;
-
-/** Log a stringify probe when a node has at least this many vector regions. */
-export const STRINGIFY_PROBE_REGION_THRESHOLD = 50;
-
-/** Log a stringify probe when a node has at least this many children. */
-export const STRINGIFY_PROBE_CHILD_THRESHOLD = 300;
 
 /** Warn when a single serialized layer record reaches this byte size. */
 export const STRINGIFY_RECORD_WARN_BYTES = 48 * 1024;

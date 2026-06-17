@@ -21,9 +21,6 @@ import {
     SVG_FALLBACK_MAX_DIMENSION,
     SVG_FALLBACK_MAX_BYTES,
     SVG_FALLBACK_MAX_DOCUMENT_NODES,
-    STRINGIFY_PROBE_VERTEX_THRESHOLD,
-    STRINGIFY_PROBE_REGION_THRESHOLD,
-    STRINGIFY_PROBE_CHILD_THRESHOLD,
     STRINGIFY_RECORD_WARN_BYTES,
 } from "./exportConfig";
 import { cloneTransform } from "../../shared/matrixUtils";
@@ -139,17 +136,24 @@ export function analyseNodesUnsafe(node: SceneNode, sourceType?: string): any {
         return {};
     }
 
-    if (rule.sendStrategy === "flattenBoolean") return transBONode(node as any);
-    if (rule.sendStrategy === "booleanTree") return transBooleanTreeNode(node as BooleanOperationNode, rule.restoreType);
-    if (rule.sendStrategy === "penNetwork") return transPenNode(node as any, resolvedSourceType, rule.restoreType);
-    if (rule.sendStrategy === "ellipseArc") return transEllipseNode(node as any);
-    if (rule.sendStrategy === "text") return transTextNode(node as any);
-    if (rule.sendStrategy === "star") return transStarNode(node as any);
-    if (rule.sendStrategy === "polygon") return transPolygonNode(node as any);
-    if (rule.sendStrategy === "connector") return transConnectorNode(node as any);
-    if (rule.sendStrategy === "frameLike") return transFrameNode(node as any, resolvedSourceType);
-    if (rule.sendStrategy === "groupLike") return transGroupNode(node as any);
-    return getUniversalProperty(node as any, resolvedSourceType, rule.restoreType);
+    let nodeJson: any;
+    if (rule.sendStrategy === "flattenBoolean") nodeJson = transBONode(node as any);
+    else if (rule.sendStrategy === "booleanTree") nodeJson = transBooleanTreeNode(node as BooleanOperationNode, rule.restoreType);
+    else if (rule.sendStrategy === "penNetwork") nodeJson = transPenNode(node as any, resolvedSourceType, rule.restoreType);
+    else if (rule.sendStrategy === "ellipseArc") nodeJson = transEllipseNode(node as any);
+    else if (rule.sendStrategy === "text") nodeJson = transTextNode(node as any);
+    else if (rule.sendStrategy === "star") nodeJson = transStarNode(node as any);
+    else if (rule.sendStrategy === "polygon") nodeJson = transPolygonNode(node as any);
+    else if (rule.sendStrategy === "connector") nodeJson = transConnectorNode(node as any);
+    else if (rule.sendStrategy === "frameLike") nodeJson = transFrameNode(node as any, resolvedSourceType);
+    else if (rule.sendStrategy === "groupLike") nodeJson = transGroupNode(node as any);
+    else nodeJson = getUniversalProperty(node as any, resolvedSourceType, rule.restoreType);
+
+    if (rule.visualFrameSource && nodeJson && typeof nodeJson === "object") {
+        nodeJson.shellPlaceholder = true;
+    }
+
+    return nodeJson;
 }
 
 export function sanitizeExportNodeJson(nodeJson: any) {
@@ -188,9 +192,7 @@ export async function tryExportSvgMarkup(node: SceneNode, label: string): Promis
         area <= SVG_FALLBACK_MAX_AREA &&
         Math.max(Math.abs(width), Math.abs(height)) <= SVG_FALLBACK_MAX_DIMENSION) {
         try {
-            state.logDebug(`    * [SVG-Export] calling exportAsync for ${node.id} (${node.type}) - name=${node.name}, dims=${width}x${height}`);
             const svg = await (node as any).exportAsync({ format: "SVG" });
-            state.logDebug(`    * [SVG-Export] completed exportAsync for ${node.id}: bytes=${svg ? svg.length : 0}`);
             if (typeof svg === "string" && svg.trim()) {
                 if (svg.length > SVG_FALLBACK_MAX_BYTES) { // generated SVG markup too large
                     console.warn(`[MasterGo2Figma] ${label} SVG fallback skipped because SVG is too large: ${getNodeDebugLabel(node)}, bytes=${svg.length}`);
@@ -199,7 +201,6 @@ export async function tryExportSvgMarkup(node: SceneNode, label: string): Promis
                 return svg;
             }
         } catch (error) {
-            state.logDebug(`    * [SVG-Export] exportAsync failed for ${node.id}:`, describeError(error));
             console.warn(`Unable to export ${label} as SVG fallback:`, getNodeDebugLabel(node), error);
         }
     }
@@ -297,17 +298,6 @@ export function createNodeComplexitySnapshot(node: any, childNodes?: SceneNode[]
             loops: regions ? regions.reduce((sum: number, region: any) => sum + (region && Array.isArray(region.loops) ? region.loops.length : 0), 0) : undefined
         } : undefined
     };
-}
-
-export function shouldLogStringifyProbe(complexity: any): boolean {
-    const vertexCount = complexity.vectorNetwork && complexity.vectorNetwork.vertices || 0;
-    const segmentCount = complexity.vectorNetwork && complexity.vectorNetwork.segments || 0;
-    const regionCount = complexity.vectorNetwork && complexity.vectorNetwork.regions || 0;
-    const childCount = complexity.childCount || complexity.rawChildCount || 0;
-    return vertexCount >= STRINGIFY_PROBE_VERTEX_THRESHOLD ||
-        segmentCount >= STRINGIFY_PROBE_VERTEX_THRESHOLD ||
-        regionCount >= STRINGIFY_PROBE_REGION_THRESHOLD ||
-        childCount >= STRINGIFY_PROBE_CHILD_THRESHOLD;
 }
 
 export function getNodeDebugLabel(node: any): string {
@@ -420,11 +410,8 @@ export async function collectSingleNodeExport(
     let childNodes: SceneNode[] = [];
     let shouldExportChildren = false;
 
-    state.logDebug(`[DFS] Start node: id=${nodeId}, name=${nodeName}, type=${node.type}, page=${pageName}`);
-
     const setNodeDebug = (nextPhase: string, nodeComplexity?: any) => {
         phase = nextPhase;
-        state.logDebug(`  - [DFS] Node ${nodeId} enter phase: ${nextPhase}`);
         state.setExportDebugState({
             phase: `node:${nextPhase}`,
             page: pageName,
@@ -441,23 +428,18 @@ export async function collectSingleNodeExport(
     try {
         setNodeDebug("read-children");
         childNodes = getSafeExportableChildren(node);
-        state.logDebug(`  - [DFS] Node ${nodeId} read-children done: childCount=${childNodes.length}`);
 
         setNodeDebug("analyse");
         let nodeJson: any = analyseNodes(node);
-        state.logDebug(`  - [DFS] Node ${nodeId} analyse done`);
 
         setNodeDebug("enrich-boolean");
         await enrichBooleanOperationExport(node, nodeJson, childNodes);
-        state.logDebug(`  - [DFS] Node ${nodeId} enrich-boolean done`);
 
         setNodeDebug("enrich-vector");
         await enrichFilledVectorExport(node, nodeJson);
-        state.logDebug(`  - [DFS] Node ${nodeId} enrich-vector done`);
 
         setNodeDebug("override-layout");
         overrideExportLayoutFromSourceNode(nodeJson, node);
-        state.logDebug(`  - [DFS] Node ${nodeId} override-layout done`);
 
         setNodeDebug("build-record");
         shouldExportChildren = !nodeJson || !nodeJson.omitChildrenOnRestore;
@@ -478,14 +460,6 @@ export async function collectSingleNodeExport(
 
         let nodeComplexity: any = createNodeComplexitySnapshot(node, childNodes, nodeJson);
         childNodes = [];
-        if (shouldLogStringifyProbe(nodeComplexity)) {
-            state.logDiagnostic("log", "[MasterGo2Figma] Stringify probe", {
-                page: pageName,
-                processedNodes: state.processedNodes,
-                totalNodes: state.totalNodes,
-                complexity: nodeComplexity
-            });
-        }
 
         setNodeDebug("stringify", nodeComplexity);
         let recordJson: any = stringifyLayerPayload(layerRecord, node, nodeComplexity);
@@ -501,7 +475,6 @@ export async function collectSingleNodeExport(
                 transfer: summarizeTransfer(transfer)
             });
         }
-        state.logDebug(`  - [DFS] Node ${nodeId} stringify done: length=${recordBytes}`);
         layerRecord = null;
         nodeJson = null;
         nodeComplexity = null;
@@ -512,7 +485,6 @@ export async function collectSingleNodeExport(
         await appendLayerRecord(recordJson, pageIndex, chunk, transfer);
         markLayerWritten(chunk, nodeId);
         recordAppended = true;
-        state.logDebug(`  - [DFS] Node ${nodeId} append done`);
 
         if (omittedChildNodeCount) {
             state.processedNodes += omittedChildNodeCount;
@@ -525,10 +497,8 @@ export async function collectSingleNodeExport(
         recordJson = null;
         childNodes = null as any;
 
-        state.logDebug(`[DFS] Complete node: id=${nodeId}`);
         return { nodeId, shouldExportChildren, childIds };
     } catch (error) {
-        state.logDebug(`[DFS] Node export caught error: id=${nodeId}, phase=${phase}, error=`, describeError(error));
         const fatalOom = isOutOfMemoryError(error);
         state.logDiagnostic("error", fatalOom ? `[MasterGo2Figma] Fatal node OOM, stopping export: ${nodeId}` : `[MasterGo2Figma] Node export failed: ${nodeId}`, {
             phase,

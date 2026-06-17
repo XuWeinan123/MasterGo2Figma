@@ -123,7 +123,6 @@ export function logMissingFontRestoreTargets(targets: MissingFontTextRestoreTarg
     }
 
     const resolutions = Object.keys(requestedToResolved).map(key => requestedToResolved[key]);
-    console.log("[MasterGo2Figma] Missing font restore targets", resolutions);
 
     for (const item of resolutions) {
         if (item.resolved) continue;
@@ -211,6 +210,5 @@ export async function restoreMissingFontTextLayers(pages: PageNode[]): Promise<M
         }
     }
 
-    console.log("[MasterGo2Figma] Missing font restore", result);
     return result;
 }

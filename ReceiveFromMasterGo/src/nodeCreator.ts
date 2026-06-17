@@ -6,6 +6,7 @@ import { createConnectorVectorNetworkFromData } from "./appliers/connector";
 
 const POSTPROCESS_BATCH_SIZE = 500;
 const POSTPROCESS_YIELD_INTERVAL_MS = 50;
+const SHELL_PLACEHOLDER_PLUGIN_DATA_KEY = "mastergo2figma.shellPlaceholder";
 
 type PostprocessProgressCallback = (done: number, total: number, label: string) => Promise<void> | void;
 
@@ -53,6 +54,29 @@ export function clearMaskFlag(node: SceneNode) {
     }
 }
 
+export function markShellPlaceholderNode(node: SceneNode, data: any) {
+    if (!data || data.shellPlaceholder !== true) return;
+    const nodeAny = node as any;
+    if (typeof nodeAny.setPluginData !== "function") return;
+
+    try {
+        nodeAny.setPluginData(SHELL_PLACEHOLDER_PLUGIN_DATA_KEY, "1");
+    } catch (e) {
+        console.warn("Unable to mark shell placeholder:", node.name, e);
+    }
+}
+
+export function isShellPlaceholderNode(node: BaseNode): boolean {
+    const nodeAny = node as any;
+    if (typeof nodeAny.getPluginData !== "function") return false;
+
+    try {
+        return nodeAny.getPluginData(SHELL_PLACEHOLDER_PLUGIN_DATA_KEY) === "1";
+    } catch (_) {
+        return false;
+    }
+}
+
 export function isInsideInstance(node: BaseNode): boolean {
     let parent = node.parent;
     while (parent && parent.type !== "PAGE" && parent.type !== "DOCUMENT") {
@@ -96,7 +120,7 @@ function cleanupImportedContainerShell(root: BaseNode) {
 
     const shellChildren = [...(root as any).children] as SceneNode[];
     for (const child of shellChildren) {
-        if (child.type === "RECTANGLE" && child.name === root.name) {
+        if (child.type === "RECTANGLE" && isShellPlaceholderNode(child)) {
             clearMaskFlag(child);
             safeRemove(child);
             return;
@@ -212,6 +236,8 @@ export async function createNodeFromData(data: any): Promise<SceneNode | null> {
         if (node) safeRemove(node);
         return null;
     }
+
+    if (node) markShellPlaceholderNode(node, data);
 
     return node;
 }
