@@ -1,4 +1,4 @@
-import { ImportPayload, ImportLayerRecord, ImportManifest, ImportPageIndex } from "../../shared/types";
+import { ImportPayload, ImportLayerRecord, ImportManifest, ImportPageIndex, MissingFontTextRestoreResult } from "../../shared/types";
 import { state } from "./state";
 import {
   ensureLayerRulesLoaded, hasValidLayerRules, getLayerRuleStatus
@@ -12,6 +12,7 @@ import {
   applyDeferredLayoutRestores,
   applyDeferredSingleChildAutoSpaceAlignmentFixes
 } from "./deferredLayout";
+import { refreshAvailableFonts } from "./fontLoader";
 import {
   cleanupImportedContainerShells, createNodeFromData,
   appendRestoredNode, safeRemove, hasUsableVectorNetwork
@@ -132,6 +133,11 @@ function showImportUI() {
       return;
     }
 
+    if (message.type === "refresh-fonts") {
+      await refreshMissingFontsInDocument();
+      return;
+    }
+
     if (message.type !== "start-import") return;
     if (state.importInProgress) return;
 
@@ -152,6 +158,44 @@ function showImportUI() {
     }
     state.importInProgress = false;
   };
+}
+
+async function refreshMissingFontsInDocument() {
+  try {
+    await ensureLayerRulesLoaded();
+    if (!hasValidLayerRules()) throw new Error("请先导入有效的图层转换规则 JSON");
+
+    await refreshAvailableFonts();
+    const pages = figma.root.children.filter(node => node.type === "PAGE") as PageNode[];
+    const missingFontRestoreResult = await restoreMissingFontTextLayers(pages);
+    logMissingFontRefreshDiagnostics(missingFontRestoreResult);
+    figma.ui.postMessage({
+      type: "refresh-fonts-complete",
+      scannedTextNodeCount: missingFontRestoreResult.scannedTextNodeCount,
+      candidateTextNodeCount: missingFontRestoreResult.candidateTextNodeCount,
+      manuallyResolvedTextNodeCount: missingFontRestoreResult.manuallyResolvedTextNodeCount,
+      restoredTextNodeCount: missingFontRestoreResult.restoredTextNodeCount,
+      failedTextNodeCount: missingFontRestoreResult.failedTextNodeCount,
+      missingFonts: missingFontRestoreResult.missingFonts
+    });
+    const details: string[] = [];
+    if (missingFontRestoreResult.manuallyResolvedTextNodeCount) {
+      details.push(`${missingFontRestoreResult.manuallyResolvedTextNodeCount} manually resolved`);
+    }
+    if (missingFontRestoreResult.restoredTextNodeCount) {
+      details.push(`${missingFontRestoreResult.restoredTextNodeCount} restored`);
+    }
+    if (missingFontRestoreResult.failedTextNodeCount) {
+      details.push(`${missingFontRestoreResult.failedTextNodeCount} still missing`);
+    }
+    figma.notify(details.length > 0 ? `Font refresh complete. ${details.join("; ")}` : "Font refresh complete.");
+  } catch (error) {
+    console.error("Refresh fonts failed:", error);
+    figma.ui.postMessage({
+      type: "error",
+      message: error instanceof Error ? error.message : "刷新字体失败，请查看控制台"
+    });
+  }
 }
 
 async function handleImportRequest(message: any, action: () => Promise<void> | void) {
@@ -409,6 +453,7 @@ async function completeImportSession(message: any) {
       failedMissingFontTextNodeCount: missingFontRestoreResult.failedTextNodeCount
     });
 
+    logMissingImportDiagnostics(missingFontRestoreResult);
     state.logRestorePerformanceSummary(session.restoredNodes, session.restoredPages.length);
     figma.notify("Restore complete!");
   } catch (error) {
@@ -633,8 +678,47 @@ async function restoreImportPayload(payload: ImportPayload) {
   if (missingFontRestoreResult.failedTextNodeCount > 0) {
     completeDetails.push(`Fonts still missing: ${missingFontRestoreResult.failedTextNodeCount}`);
   }
+  logMissingImportDiagnostics(missingFontRestoreResult);
   state.logRestorePerformanceSummary(restoredNodes, restoredPages.length);
   figma.notify(completeDetails.length > 0 ? `Restore complete. ${completeDetails.join("; ")}` : "Restore complete!");
+}
+
+function logMissingImportDiagnostics(missingFontRestoreResult: MissingFontTextRestoreResult) {
+  logMissingFontRefreshDiagnostics(missingFontRestoreResult);
+
+  const missingImageNames = Object.keys(state.missingImageAssetNames).sort();
+  if (missingImageNames.length > 0) {
+    console.warn("[MasterGo2Figma] 缺失图片资源（去重）", missingImageNames);
+  }
+
+  if (state.missingImageAssetDetails.length > 0) {
+    console.warn("[MasterGo2Figma] 缺失图片影响图层", state.missingImageAssetDetails.map(detail => ({
+      assetName: detail.assetName,
+      layerName: detail.nodeName,
+      layerPath: detail.layerPath,
+      nodeId: detail.nodeId,
+      nodeType: detail.nodeType,
+      paintTarget: detail.paintTarget,
+      x: detail.x,
+      y: detail.y,
+      width: detail.width,
+      height: detail.height
+    })));
+  } else if (missingImageNames.length > 0) {
+    console.warn("[MasterGo2Figma] 缺失图片影响图层未能定位；资源可能在传输阶段创建失败。");
+  }
+}
+
+function logMissingFontRefreshDiagnostics(missingFontRestoreResult: MissingFontTextRestoreResult) {
+  if (missingFontRestoreResult.missingFonts.length > 0) {
+    console.warn("[MasterGo2Figma] 缺失字体（去重）", missingFontRestoreResult.missingFonts.map(font => ({
+      family: font.family,
+      style: font.style,
+      textNodeCount: font.count
+    })));
+    return;
+  }
+  console.info("[MasterGo2Figma] 缺失字体（去重）", []);
 }
 
 function applyManifestLayoutToProps(props: any, _meta: ImportLayerRecord): any {

@@ -1,7 +1,8 @@
 import { state } from "../state";
 import { 
     resolveAvailableFontName, ensureAvailableFontsLoaded, 
-    loadFontCached, getFontKey, getNearbyAvailableFontsForLog 
+    loadFontCached, getFontKey, getNearbyAvailableFontsForLog,
+    normalizeFontFamilyForMatch
 } from "../fontLoader";
 import { MissingFontTextRestoreResult, MissingFontTextRestoreTarget } from "../../../shared/types";
 
@@ -137,10 +138,12 @@ export async function restoreMissingFontTextLayers(pages: PageNode[]): Promise<M
     const result: MissingFontTextRestoreResult = {
         scannedTextNodeCount: 0,
         candidateTextNodeCount: 0,
+        manuallyResolvedTextNodeCount: 0,
         restoredTextNodeCount: 0,
         failedTextNodeCount: 0,
         loadedFontCount: 0,
-        failedFontCount: 0
+        failedFontCount: 0,
+        missingFonts: []
     };
     const targets: MissingFontTextRestoreTarget[] = [];
     await ensureAvailableFontsLoaded();
@@ -152,6 +155,14 @@ export async function restoreMissingFontTextLayers(pages: PageNode[]): Promise<M
         for (const node of textNodes) {
             const parsed = parseMissingFontTextLayerName(node.name);
             if (!parsed) continue;
+            result.candidateTextNodeCount++;
+
+            if (textNodeUsesNonInterFont(node)) {
+                node.name = parsed.restoredName;
+                result.manuallyResolvedTextNodeCount++;
+                continue;
+            }
+
             const requestedFontName = { family: parsed.family, style: parsed.style };
             const resolvedFontName = resolveAvailableFontName(requestedFontName);
             targets.push({
@@ -165,15 +176,16 @@ export async function restoreMissingFontTextLayers(pages: PageNode[]): Promise<M
         }
     }
 
-    result.candidateTextNodeCount = targets.length;
     if (targets.length === 0) return result;
 
     logMissingFontRestoreTargets(targets);
 
     const fontLoadState = new Map<string, boolean>();
+    const failedFontsByKey: { [key: string]: { family: string; style: string; count: number } } = {};
     for (const target of targets) {
         if (!target.resolvedFontName) {
             result.failedTextNodeCount++;
+            recordFailedMissingFont(failedFontsByKey, target.requestedFontName);
             continue;
         }
 
@@ -194,6 +206,7 @@ export async function restoreMissingFontTextLayers(pages: PageNode[]): Promise<M
 
         if (!fontLoadState.get(target.resolvedFontKey)) {
             result.failedTextNodeCount++;
+            recordFailedMissingFont(failedFontsByKey, target.requestedFontName);
             continue;
         }
 
@@ -203,6 +216,7 @@ export async function restoreMissingFontTextLayers(pages: PageNode[]): Promise<M
             result.restoredTextNodeCount++;
         } catch (error) {
             result.failedTextNodeCount++;
+            recordFailedMissingFont(failedFontsByKey, target.requestedFontName);
             console.warn("Unable to apply restored font:", target.node.name, {
                 requested: target.requestedFontName,
                 resolved: target.resolvedFontName
@@ -210,5 +224,44 @@ export async function restoreMissingFontTextLayers(pages: PageNode[]): Promise<M
         }
     }
 
+    result.missingFonts = Object.keys(failedFontsByKey)
+        .map(key => failedFontsByKey[key])
+        .sort((a, b) => `${a.family} ${a.style}`.localeCompare(`${b.family} ${b.style}`));
     return result;
+}
+
+function textNodeUsesNonInterFont(node: TextNode): boolean {
+    const fontName = node.fontName;
+    if (isNonInterFontName(fontName)) return true;
+
+    const textLength = node.characters.length;
+    const getRangeAllFontNames = (node as any).getRangeAllFontNames;
+    if (textLength <= 0 || typeof getRangeAllFontNames !== "function") return false;
+
+    try {
+        const rangeFonts = getRangeAllFontNames.call(node, 0, textLength) as FontName[];
+        return Array.isArray(rangeFonts) && rangeFonts.some(isNonInterFontName);
+    } catch (_) {
+        return false;
+    }
+}
+
+function isNonInterFontName(fontName: FontName | typeof figma.mixed): boolean {
+    if (!fontName || fontName === figma.mixed) return false;
+    return normalizeFontFamilyForMatch(fontName.family) !== "inter";
+}
+
+function recordFailedMissingFont(
+    failedFontsByKey: { [key: string]: { family: string; style: string; count: number } },
+    fontName: { family: string; style: string }
+) {
+    const key = getFontKey(fontName.family, fontName.style);
+    if (!failedFontsByKey[key]) {
+        failedFontsByKey[key] = {
+            family: fontName.family,
+            style: fontName.style,
+            count: 0
+        };
+    }
+    failedFontsByKey[key].count++;
 }

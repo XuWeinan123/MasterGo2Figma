@@ -52,8 +52,15 @@
     /* App Header */
     .app-header {
       padding: 24px 20px 8px 20px;
-      display: flex;
-      flex-direction: column;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: start;
+      gap: 4px;
+    }
+
+    .app-heading {
+      min-width: 0;
+      display: grid;
       gap: 4px;
     }
 
@@ -595,6 +602,12 @@
       color: var(--secondary-foreground);
     }
 
+    .refresh-font-button {
+      grid-column: auto;
+      align-self: start;
+      white-space: nowrap;
+    }
+
     .file-name {
       grid-column: 3;
       width: 100%;
@@ -684,8 +697,11 @@
 
 <body>
   <header class="app-header">
-    <h1 class="app-title">MasterGo to Figma</h1>
-    <p class="app-subtitle muted">导入并完美还原 MasterGo 设计资产包</p>
+    <div class="app-heading">
+      <h1 class="app-title">MasterGo to Figma</h1>
+      <p class="app-subtitle muted">导入并完美还原 MasterGo 设计资产包</p>
+    </div>
+    <button class="button button-secondary refresh-font-button" id="refreshFonts" type="button" title="重新扫描当前文件并恢复缺失字体">刷新字体</button>
   </header>
   <main>
     <section class="card file-state-card hidden" id="fileState">
@@ -740,6 +756,7 @@
     const selectAllPages = document.getElementById("selectAllPages");
     const pageSummary = document.getElementById("pageSummary");
     const restore = document.getElementById("restore");
+    const refreshFonts = document.getElementById("refreshFonts");
     const bar = document.getElementById("bar");
     const status = document.getElementById("status");
     const summary = document.getElementById("summary");
@@ -786,6 +803,7 @@
     function setBusy(nextBusy) {
       isBusy = nextBusy;
       restore.disabled = nextBusy || !hasRules || pages.length === 0 || getSelectedPageIds().length === 0;
+      refreshFonts.disabled = nextBusy || !hasRules;
       zipInput.disabled = nextBusy;
       deleteZip.disabled = nextBusy;
       selectAllPages.disabled = nextBusy || pages.length === 0;
@@ -1239,6 +1257,18 @@
       }
     };
 
+    refreshFonts.onclick = () => {
+      if (isBusy) return;
+      if (!hasRules) {
+        setStatus("请先导入转换规则 JSON", "", true);
+        return;
+      }
+      setBusy(true);
+      bar.style.width = "0%";
+      setStatus("正在刷新字体...", "正在扫描当前文件里的缺失字体文本图层。", false);
+      send({ type: "refresh-fonts" });
+    };
+
     function getSelectedPageIds() {
       return [...pageList.querySelectorAll("input:checked")].map(input => input.value);
     }
@@ -1573,7 +1603,7 @@
       setStageProgress("assets", importAssetBytesDone, importAssetBytesTotal, `正在发送图片资源：${assetLabel}`);
 
       for (let offset = 0, chunkIndex = 0; offset < asset.bytes.length; offset += IMPORT_CHUNK_SIZE, chunkIndex++) {
-        const bytes = asset.bytes.subarray(offset, offset + IMPORT_CHUNK_SIZE);
+        const bytes = asset.bytes.slice(offset, offset + IMPORT_CHUNK_SIZE);
         send({
           type: "import-asset-chunk",
           transferId,
@@ -1665,6 +1695,21 @@
         if (failedMissingFontTextNodeCount) details.push(`${failedMissingFontTextNodeCount} 个文本字体仍缺失`);
         setStatus("还原完成", `${message.pageCount} 个页面，${message.layerCount} 个图层${details.length ? `，${details.join("，")}` : ""}`, false);
         resetImportProgressMode();
+        setBusy(false);
+        return;
+      }
+
+      if (message.type === "refresh-fonts-complete") {
+        const failedTextNodeCount = message.failedTextNodeCount || 0;
+        const restoredTextNodeCount = message.restoredTextNodeCount || 0;
+        const manuallyResolvedTextNodeCount = message.manuallyResolvedTextNodeCount || 0;
+        const candidateTextNodeCount = message.candidateTextNodeCount || 0;
+        bar.style.width = "100%";
+        const details = [`扫描到 ${candidateTextNodeCount} 个带缺失字体前缀的文本图层`];
+        if (manuallyResolvedTextNodeCount) details.push(`${manuallyResolvedTextNodeCount} 个已手动处理并清理前缀`);
+        if (restoredTextNodeCount) details.push(`${restoredTextNodeCount} 个已替换`);
+        if (failedTextNodeCount) details.push(`${failedTextNodeCount} 个仍缺失`);
+        setStatus("字体刷新完成", details.join("，"), false);
         setBusy(false);
         return;
       }

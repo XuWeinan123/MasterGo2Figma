@@ -19,6 +19,14 @@ export async function ensureAvailableFontsLoaded(): Promise<void> {
     }
 }
 
+export async function refreshAvailableFonts(): Promise<void> {
+    if (state.activeRestoreStats) {
+        state.activeRestoreStats.fontListLoadCount++;
+    }
+    state.documentFonts = await figma.listAvailableFontsAsync();
+    rebuildAvailableFontIndex();
+}
+
 export function rebuildAvailableFontIndex(): void {
     state.availableFontKeys = {};
     for (const font of state.documentFonts) {

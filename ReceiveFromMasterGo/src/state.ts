@@ -1,5 +1,18 @@
 import { RestorePerformanceStats, RestoreProgressState, CachedLayerConversionRules, LayerConversionRule } from "../../shared/types";
 
+export type MissingImageAssetDetail = {
+    assetName: string;
+    nodeId: string;
+    nodeName: string;
+    layerPath: string;
+    nodeType: string;
+    paintTarget: "fill" | "stroke" | "image";
+    x: number | null;
+    y: number | null;
+    width: number | null;
+    height: number | null;
+};
+
 class RestorerState {
     public documentFonts: Font[] = [];
     public restoredLayoutByNodeId: { [id: string]: any } = {};
@@ -10,6 +23,8 @@ class RestorerState {
     public activeImportAssets: { [fileName: string]: Uint8Array } = {};
     public imageHashByAssetName: { [fileName: string]: string } = {};
     public missingImageAssetNames: { [fileName: string]: boolean } = {};
+    public missingImageAssetDetailKeys: { [key: string]: boolean } = {};
+    public missingImageAssetDetails: MissingImageAssetDetail[] = [];
     public missingImageAssetCount = 0;
     public placeholderImageHash: string | null = null;
     public restoredNodeIdBySourceId: { [sourceId: string]: string } = {};
@@ -28,6 +43,8 @@ class RestorerState {
         this.activeImportAssets = {};
         this.imageHashByAssetName = {};
         this.missingImageAssetNames = {};
+        this.missingImageAssetDetailKeys = {};
+        this.missingImageAssetDetails = [];
         this.missingImageAssetCount = 0;
         this.restoredNodeIdBySourceId = {};
         this.nativeGroupOffsetByNodeId = {};

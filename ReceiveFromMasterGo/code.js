@@ -52,6 +52,8 @@
       this.activeImportAssets = {};
       this.imageHashByAssetName = {};
       this.missingImageAssetNames = {};
+      this.missingImageAssetDetailKeys = {};
+      this.missingImageAssetDetails = [];
       this.missingImageAssetCount = 0;
       this.placeholderImageHash = null;
       this.restoredNodeIdBySourceId = {};
@@ -70,6 +72,8 @@
       this.activeImportAssets = {};
       this.imageHashByAssetName = {};
       this.missingImageAssetNames = {};
+      this.missingImageAssetDetailKeys = {};
+      this.missingImageAssetDetails = [];
       this.missingImageAssetCount = 0;
       this.restoredNodeIdBySourceId = {};
       this.nativeGroupOffsetByNodeId = {};
@@ -236,6 +240,15 @@ ${style}`;
       if (Object.keys(state.availableFontKeys).length === 0) {
         rebuildAvailableFontIndex();
       }
+    });
+  }
+  function refreshAvailableFonts() {
+    return __async(this, null, function* () {
+      if (state.activeRestoreStats) {
+        state.activeRestoreStats.fontListLoadCount++;
+      }
+      state.documentFonts = yield figma.listAvailableFontsAsync();
+      rebuildAvailableFontIndex();
     });
   }
   function rebuildAvailableFontIndex() {
@@ -475,10 +488,12 @@ ${style}`;
       const result = {
         scannedTextNodeCount: 0,
         candidateTextNodeCount: 0,
+        manuallyResolvedTextNodeCount: 0,
         restoredTextNodeCount: 0,
         failedTextNodeCount: 0,
         loadedFontCount: 0,
-        failedFontCount: 0
+        failedFontCount: 0,
+        missingFonts: []
       };
       const targets = [];
       yield ensureAvailableFontsLoaded();
@@ -488,6 +503,12 @@ ${style}`;
         for (const node of textNodes) {
           const parsed = parseMissingFontTextLayerName(node.name);
           if (!parsed) continue;
+          result.candidateTextNodeCount++;
+          if (textNodeUsesNonInterFont(node)) {
+            node.name = parsed.restoredName;
+            result.manuallyResolvedTextNodeCount++;
+            continue;
+          }
           const requestedFontName = { family: parsed.family, style: parsed.style };
           const resolvedFontName = resolveAvailableFontName(requestedFontName);
           targets.push({
@@ -500,13 +521,14 @@ ${style}`;
           });
         }
       }
-      result.candidateTextNodeCount = targets.length;
       if (targets.length === 0) return result;
       logMissingFontRestoreTargets(targets);
       const fontLoadState = /* @__PURE__ */ new Map();
+      const failedFontsByKey = {};
       for (const target of targets) {
         if (!target.resolvedFontName) {
           result.failedTextNodeCount++;
+          recordFailedMissingFont(failedFontsByKey, target.requestedFontName);
           continue;
         }
         if (!fontLoadState.has(target.resolvedFontKey)) {
@@ -525,6 +547,7 @@ ${style}`;
         }
         if (!fontLoadState.get(target.resolvedFontKey)) {
           result.failedTextNodeCount++;
+          recordFailedMissingFont(failedFontsByKey, target.requestedFontName);
           continue;
         }
         try {
@@ -533,14 +556,44 @@ ${style}`;
           result.restoredTextNodeCount++;
         } catch (error) {
           result.failedTextNodeCount++;
+          recordFailedMissingFont(failedFontsByKey, target.requestedFontName);
           console.warn("Unable to apply restored font:", target.node.name, {
             requested: target.requestedFontName,
             resolved: target.resolvedFontName
           }, error);
         }
       }
+      result.missingFonts = Object.keys(failedFontsByKey).map((key) => failedFontsByKey[key]).sort((a, b) => `${a.family} ${a.style}`.localeCompare(`${b.family} ${b.style}`));
       return result;
     });
+  }
+  function textNodeUsesNonInterFont(node) {
+    const fontName = node.fontName;
+    if (isNonInterFontName(fontName)) return true;
+    const textLength = node.characters.length;
+    const getRangeAllFontNames = node.getRangeAllFontNames;
+    if (textLength <= 0 || typeof getRangeAllFontNames !== "function") return false;
+    try {
+      const rangeFonts = getRangeAllFontNames.call(node, 0, textLength);
+      return Array.isArray(rangeFonts) && rangeFonts.some(isNonInterFontName);
+    } catch (_) {
+      return false;
+    }
+  }
+  function isNonInterFontName(fontName) {
+    if (!fontName || fontName === figma.mixed) return false;
+    return normalizeFontFamilyForMatch(fontName.family) !== "inter";
+  }
+  function recordFailedMissingFont(failedFontsByKey, fontName) {
+    const key = getFontKey(fontName.family, fontName.style);
+    if (!failedFontsByKey[key]) {
+      failedFontsByKey[key] = {
+        family: fontName.family,
+        style: fontName.style,
+        count: 0
+      };
+    }
+    failedFontsByKey[key].count++;
   }
 
   // ../shared/utils.ts
@@ -1404,12 +1457,12 @@ ${style}`;
     }
   }
   var MISSING_IMAGE_PLACEHOLDER_COLOR = { r: 0.82, g: 0.83, b: 0.85 };
-  function normalizeImagePaint(paint) {
+  function normalizeImagePaint(paint, context) {
     if (!paint || paint.type !== "IMAGE") return normalizePaintForFigma(paint);
     const assetName = typeof paint.imageRef === "string" ? paint.imageRef : "";
     const imageHash = tryResolveImageHash(paint);
     if (!imageHash) {
-      recordMissingImageAsset(assetName || "missing-image.png");
+      recordMissingImageAsset(assetName || "missing-image.png", context);
       const placeholder = {
         type: "SOLID",
         color: __spreadValues({}, MISSING_IMAGE_PLACEHOLDER_COLOR)
@@ -1434,13 +1487,13 @@ ${style}`;
     if (paint.scalingFactor !== void 0) result.scalingFactor = paint.scalingFactor;
     return normalizePaintForFigma(result);
   }
-  function normalizeImageFills(fills) {
+  function normalizeImageFills(fills, node, layout) {
     if (!Array.isArray(fills)) return fills;
-    return fills.map(normalizeImagePaint).filter(Boolean);
+    return fills.map((paint) => normalizeImagePaint(paint, { node, layout, paintTarget: "fill" })).filter(Boolean);
   }
-  function normalizeImageStrokes(strokes) {
+  function normalizeImageStrokes(strokes, node, layout) {
     if (!Array.isArray(strokes)) return strokes;
-    return strokes.map(normalizeImagePaint).filter(Boolean);
+    return strokes.map((paint) => normalizeImagePaint(paint, { node, layout, paintTarget: "stroke" })).filter(Boolean);
   }
   function normalizeImageFilters(filters) {
     if (!filters || typeof filters !== "object") return null;
@@ -1467,10 +1520,69 @@ ${style}`;
       return null;
     }
   }
-  function recordMissingImageAsset(assetName) {
-    if (state.missingImageAssetNames[assetName]) return;
-    state.missingImageAssetNames[assetName] = true;
-    state.missingImageAssetCount++;
+  function recordMissingImageAsset(assetName, context) {
+    if (!state.missingImageAssetNames[assetName]) {
+      state.missingImageAssetNames[assetName] = true;
+      state.missingImageAssetCount++;
+    }
+    const detail = createMissingImageAssetDetail(assetName, context);
+    if (!detail) return;
+    const key = [
+      detail.assetName,
+      detail.nodeId,
+      detail.layerPath,
+      detail.paintTarget,
+      detail.x,
+      detail.y,
+      detail.width,
+      detail.height
+    ].join("|");
+    if (state.missingImageAssetDetailKeys[key]) return;
+    state.missingImageAssetDetailKeys[key] = true;
+    state.missingImageAssetDetails.push(detail);
+  }
+  function createMissingImageAssetDetail(assetName, context) {
+    const node = context == null ? void 0 : context.node;
+    if (!node) return null;
+    const layout = (context == null ? void 0 : context.layout) || {};
+    const absoluteTransform = node.absoluteTransform || node.relativeTransform;
+    const x = toFiniteNumber(layout.x, absoluteTransform && absoluteTransform[0] && absoluteTransform[0][2]);
+    const y = toFiniteNumber(layout.y, absoluteTransform && absoluteTransform[1] && absoluteTransform[1][2]);
+    const width = toFiniteNumber(layout.width, node.width);
+    const height = toFiniteNumber(layout.height, node.height);
+    return {
+      assetName,
+      nodeId: typeof node.id === "string" ? node.id : "",
+      nodeName: typeof node.name === "string" ? node.name : "Untitled",
+      layerPath: getNodeLayerPath(node),
+      nodeType: typeof node.type === "string" ? node.type : "UNKNOWN",
+      paintTarget: (context == null ? void 0 : context.paintTarget) || "image",
+      x,
+      y,
+      width,
+      height
+    };
+  }
+  function getNodeLayerPath(node) {
+    const parts = [];
+    let current = node;
+    while (current && current.type !== "DOCUMENT") {
+      if (typeof current.name === "string" && current.name) {
+        parts.unshift(current.name);
+      } else if (typeof current.type === "string") {
+        parts.unshift(current.type);
+      }
+      current = current.parent;
+    }
+    return parts.join(" / ");
+  }
+  function toFiniteNumber(...values) {
+    for (const value of values) {
+      if (typeof value === "number" && Number.isFinite(value)) {
+        return Math.round(value * 100) / 100;
+      }
+    }
+    return null;
   }
   function normalizeEffectsForNode(node, effects) {
     if (!Array.isArray(effects)) return effects;
@@ -1747,9 +1859,9 @@ ${style}`;
         safeSet(node, "cornerSmoothing", data.corner.cornerSmoothing || 0);
       }
       if (!isGroup && data.geometry && !data.svgFallback) {
-        if (data.geometry.fills) safeSetFills(node, normalizeImageFills(data.geometry.fills));
+        if (data.geometry.fills) safeSetFills(node, normalizeImageFills(data.geometry.fills, node, data.layout));
         if (data.geometry.strokes) {
-          safeSetStrokes(node, normalizeImageStrokes(data.geometry.strokes));
+          safeSetStrokes(node, normalizeImageStrokes(data.geometry.strokes, node, data.layout));
         }
         if (data.geometry.strokeWeight !== void 0) {
           safeSet(node, "strokeWeight", data.geometry.strokeWeight);
@@ -2287,6 +2399,10 @@ ${style}`;
         yield completeImportSession(message);
         return;
       }
+      if (message.type === "refresh-fonts") {
+        yield refreshMissingFontsInDocument();
+        return;
+      }
       if (message.type !== "start-import") return;
       if (state.importInProgress) return;
       state.importInProgress = true;
@@ -2305,6 +2421,44 @@ ${style}`;
         });
       }
       state.importInProgress = false;
+    });
+  }
+  function refreshMissingFontsInDocument() {
+    return __async(this, null, function* () {
+      try {
+        yield ensureLayerRulesLoaded();
+        if (!hasValidLayerRules()) throw new Error("\u8BF7\u5148\u5BFC\u5165\u6709\u6548\u7684\u56FE\u5C42\u8F6C\u6362\u89C4\u5219 JSON");
+        yield refreshAvailableFonts();
+        const pages = figma.root.children.filter((node) => node.type === "PAGE");
+        const missingFontRestoreResult = yield restoreMissingFontTextLayers(pages);
+        logMissingFontRefreshDiagnostics(missingFontRestoreResult);
+        figma.ui.postMessage({
+          type: "refresh-fonts-complete",
+          scannedTextNodeCount: missingFontRestoreResult.scannedTextNodeCount,
+          candidateTextNodeCount: missingFontRestoreResult.candidateTextNodeCount,
+          manuallyResolvedTextNodeCount: missingFontRestoreResult.manuallyResolvedTextNodeCount,
+          restoredTextNodeCount: missingFontRestoreResult.restoredTextNodeCount,
+          failedTextNodeCount: missingFontRestoreResult.failedTextNodeCount,
+          missingFonts: missingFontRestoreResult.missingFonts
+        });
+        const details = [];
+        if (missingFontRestoreResult.manuallyResolvedTextNodeCount) {
+          details.push(`${missingFontRestoreResult.manuallyResolvedTextNodeCount} manually resolved`);
+        }
+        if (missingFontRestoreResult.restoredTextNodeCount) {
+          details.push(`${missingFontRestoreResult.restoredTextNodeCount} restored`);
+        }
+        if (missingFontRestoreResult.failedTextNodeCount) {
+          details.push(`${missingFontRestoreResult.failedTextNodeCount} still missing`);
+        }
+        figma.notify(details.length > 0 ? `Font refresh complete. ${details.join("; ")}` : "Font refresh complete.");
+      } catch (error) {
+        console.error("Refresh fonts failed:", error);
+        figma.ui.postMessage({
+          type: "error",
+          message: error instanceof Error ? error.message : "\u5237\u65B0\u5B57\u4F53\u5931\u8D25\uFF0C\u8BF7\u67E5\u770B\u63A7\u5236\u53F0"
+        });
+      }
     });
   }
   function handleImportRequest(message, action) {
@@ -2542,6 +2696,7 @@ ${style}`;
           restoredMissingFontTextNodeCount: missingFontRestoreResult.restoredTextNodeCount,
           failedMissingFontTextNodeCount: missingFontRestoreResult.failedTextNodeCount
         });
+        logMissingImportDiagnostics(missingFontRestoreResult);
         state.logRestorePerformanceSummary(session.restoredNodes, session.restoredPages.length);
         figma.notify("Restore complete!");
       } catch (error) {
@@ -2741,9 +2896,44 @@ ${style}`;
       if (missingFontRestoreResult.failedTextNodeCount > 0) {
         completeDetails.push(`Fonts still missing: ${missingFontRestoreResult.failedTextNodeCount}`);
       }
+      logMissingImportDiagnostics(missingFontRestoreResult);
       state.logRestorePerformanceSummary(restoredNodes, restoredPages.length);
       figma.notify(completeDetails.length > 0 ? `Restore complete. ${completeDetails.join("; ")}` : "Restore complete!");
     });
+  }
+  function logMissingImportDiagnostics(missingFontRestoreResult) {
+    logMissingFontRefreshDiagnostics(missingFontRestoreResult);
+    const missingImageNames = Object.keys(state.missingImageAssetNames).sort();
+    if (missingImageNames.length > 0) {
+      console.warn("[MasterGo2Figma] \u7F3A\u5931\u56FE\u7247\u8D44\u6E90\uFF08\u53BB\u91CD\uFF09", missingImageNames);
+    }
+    if (state.missingImageAssetDetails.length > 0) {
+      console.warn("[MasterGo2Figma] \u7F3A\u5931\u56FE\u7247\u5F71\u54CD\u56FE\u5C42", state.missingImageAssetDetails.map((detail) => ({
+        assetName: detail.assetName,
+        layerName: detail.nodeName,
+        layerPath: detail.layerPath,
+        nodeId: detail.nodeId,
+        nodeType: detail.nodeType,
+        paintTarget: detail.paintTarget,
+        x: detail.x,
+        y: detail.y,
+        width: detail.width,
+        height: detail.height
+      })));
+    } else if (missingImageNames.length > 0) {
+      console.warn("[MasterGo2Figma] \u7F3A\u5931\u56FE\u7247\u5F71\u54CD\u56FE\u5C42\u672A\u80FD\u5B9A\u4F4D\uFF1B\u8D44\u6E90\u53EF\u80FD\u5728\u4F20\u8F93\u9636\u6BB5\u521B\u5EFA\u5931\u8D25\u3002");
+    }
+  }
+  function logMissingFontRefreshDiagnostics(missingFontRestoreResult) {
+    if (missingFontRestoreResult.missingFonts.length > 0) {
+      console.warn("[MasterGo2Figma] \u7F3A\u5931\u5B57\u4F53\uFF08\u53BB\u91CD\uFF09", missingFontRestoreResult.missingFonts.map((font) => ({
+        family: font.family,
+        style: font.style,
+        textNodeCount: font.count
+      })));
+      return;
+    }
+    console.info("[MasterGo2Figma] \u7F3A\u5931\u5B57\u4F53\uFF08\u53BB\u91CD\uFF09", []);
   }
   function applyManifestLayoutToProps(props, _meta) {
     return props;

@@ -1,4 +1,4 @@
-import { state } from "../state";
+import { MissingImageAssetDetail, state } from "../state";
 import { safeSet, safeResize } from "../../../shared/utils";
 import { cloneTransform } from "../../../shared/matrixUtils";
 import { normalizeMasterGoStrokeCapForFigma } from "../../../shared/connectorUtils";
@@ -19,14 +19,20 @@ export const MISSING_IMAGE_PLACEHOLDER_COLOR = { r: 0.82, g: 0.83, b: 0.85 };
 // Resolve a single IMAGE paint into a Figma image paint, or a visible gray
 // placeholder SOLID when the asset is missing. Non-IMAGE paints pass through
 // unchanged. Used for both fills and strokes (Figma supports image strokes too).
-export function normalizeImagePaint(paint: any): any {
+type ImagePaintContext = {
+    node?: SceneNode;
+    layout?: any;
+    paintTarget?: "fill" | "stroke" | "image";
+};
+
+export function normalizeImagePaint(paint: any, context?: ImagePaintContext): any {
     if (!paint || paint.type !== "IMAGE") return normalizePaintForFigma(paint);
 
     const assetName = typeof paint.imageRef === "string" ? paint.imageRef : "";
     const imageHash = tryResolveImageHash(paint);
 
     if (!imageHash) {
-        recordMissingImageAsset(assetName || "missing-image.png");
+        recordMissingImageAsset(assetName || "missing-image.png", context);
         const placeholder: any = {
             type: "SOLID",
             color: { ...MISSING_IMAGE_PLACEHOLDER_COLOR }
@@ -55,16 +61,16 @@ export function normalizeImagePaint(paint: any): any {
     return normalizePaintForFigma(result);
 }
 
-export function normalizeImageFills(fills: any[]): any[] {
+export function normalizeImageFills(fills: any[], node?: SceneNode, layout?: any): any[] {
     if (!Array.isArray(fills)) return fills;
-    return fills.map(normalizeImagePaint).filter(Boolean);
+    return fills.map(paint => normalizeImagePaint(paint, { node, layout, paintTarget: "fill" })).filter(Boolean);
 }
 
 // Strokes mirror fills (image strokes are resolved the same way) but also need
 // the paint-level PASS_THROUGH → NORMAL normalization that Figma requires.
-export function normalizeImageStrokes(strokes: any[]): any[] {
+export function normalizeImageStrokes(strokes: any[], node?: SceneNode, layout?: any): any[] {
     if (!Array.isArray(strokes)) return strokes;
-    return strokes.map(normalizeImagePaint).filter(Boolean);
+    return strokes.map(paint => normalizeImagePaint(paint, { node, layout, paintTarget: "stroke" })).filter(Boolean);
 }
 
 export function normalizeImageFilters(filters: any): any {
@@ -112,10 +118,74 @@ export function getImageHashForFill(fill: any): string {
     return getPlaceholderImageHash();
 }
 
-export function recordMissingImageAsset(assetName: string) {
-    if (state.missingImageAssetNames[assetName]) return;
-    state.missingImageAssetNames[assetName] = true;
-    state.missingImageAssetCount++;
+export function recordMissingImageAsset(assetName: string, context?: ImagePaintContext) {
+    if (!state.missingImageAssetNames[assetName]) {
+        state.missingImageAssetNames[assetName] = true;
+        state.missingImageAssetCount++;
+    }
+    const detail = createMissingImageAssetDetail(assetName, context);
+    if (!detail) return;
+    const key = [
+        detail.assetName,
+        detail.nodeId,
+        detail.layerPath,
+        detail.paintTarget,
+        detail.x,
+        detail.y,
+        detail.width,
+        detail.height
+    ].join("|");
+    if (state.missingImageAssetDetailKeys[key]) return;
+    state.missingImageAssetDetailKeys[key] = true;
+    state.missingImageAssetDetails.push(detail);
+}
+
+function createMissingImageAssetDetail(assetName: string, context?: ImagePaintContext): MissingImageAssetDetail | null {
+    const node = context?.node as any;
+    if (!node) return null;
+
+    const layout = context?.layout || {};
+    const absoluteTransform = node.absoluteTransform || node.relativeTransform;
+    const x = toFiniteNumber(layout.x, absoluteTransform && absoluteTransform[0] && absoluteTransform[0][2]);
+    const y = toFiniteNumber(layout.y, absoluteTransform && absoluteTransform[1] && absoluteTransform[1][2]);
+    const width = toFiniteNumber(layout.width, node.width);
+    const height = toFiniteNumber(layout.height, node.height);
+
+    return {
+        assetName,
+        nodeId: typeof node.id === "string" ? node.id : "",
+        nodeName: typeof node.name === "string" ? node.name : "Untitled",
+        layerPath: getNodeLayerPath(node),
+        nodeType: typeof node.type === "string" ? node.type : "UNKNOWN",
+        paintTarget: context?.paintTarget || "image",
+        x,
+        y,
+        width,
+        height
+    };
+}
+
+function getNodeLayerPath(node: any): string {
+    const parts: string[] = [];
+    let current = node;
+    while (current && current.type !== "DOCUMENT") {
+        if (typeof current.name === "string" && current.name) {
+            parts.unshift(current.name);
+        } else if (typeof current.type === "string") {
+            parts.unshift(current.type);
+        }
+        current = current.parent;
+    }
+    return parts.join(" / ");
+}
+
+function toFiniteNumber(...values: any[]): number | null {
+    for (const value of values) {
+        if (typeof value === "number" && Number.isFinite(value)) {
+            return Math.round(value * 100) / 100;
+        }
+    }
+    return null;
 }
 
 export function getPlaceholderImageHash(): string {
@@ -482,9 +552,9 @@ export async function applyUniversalProperties(node: any, data: any) {
     }
 
     if (!isGroup && data.geometry && !data.svgFallback) {
-        if (data.geometry.fills) safeSetFills(node, normalizeImageFills(data.geometry.fills));
+        if (data.geometry.fills) safeSetFills(node, normalizeImageFills(data.geometry.fills, node, data.layout));
         if (data.geometry.strokes) {
-            safeSetStrokes(node, normalizeImageStrokes(data.geometry.strokes));
+            safeSetStrokes(node, normalizeImageStrokes(data.geometry.strokes, node, data.layout));
         }
 
         if (data.geometry.strokeWeight !== undefined) {

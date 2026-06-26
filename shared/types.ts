@@ -356,10 +356,12 @@ export type RestoreProgressState = {
 export type MissingFontTextRestoreResult = {
     scannedTextNodeCount: number;
     candidateTextNodeCount: number;
+    manuallyResolvedTextNodeCount: number;
     restoredTextNodeCount: number;
     failedTextNodeCount: number;
     loadedFontCount: number;
     failedFontCount: number;
+    missingFonts: Array<{ family: string; style: string; count: number }>;
 };
 
 export type MissingFontTextRestoreTarget = {
