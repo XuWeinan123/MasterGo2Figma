@@ -785,6 +785,8 @@
     let lastImportProgressLabel = "";
     let importTransferSeq = 0;
     let importRequestSeq = 0;
+    let activeImportClientTimings = null;
+    let pendingImportClientTimings = null;
     const importAckResolvers = {};
     const IMPORT_CHUNK_SIZE = 64 * 1024;
     const IMPORT_YIELD_EVERY_CHUNKS = 32;
@@ -798,6 +800,52 @@
     };
     function send(pluginMessage) {
       parent.postMessage({ pluginMessage }, "*");
+    }
+
+    function createImportClientTimings() {
+      return {
+        totalsMs: {},
+        counts: {},
+        bytes: {},
+        startedAt: Date.now()
+      };
+    }
+
+    function cloneImportClientTimings(timings) {
+      return {
+        totalsMs: { ...((timings && timings.totalsMs) || {}) },
+        counts: { ...((timings && timings.counts) || {}) },
+        bytes: { ...((timings && timings.bytes) || {}) },
+        startedAt: Date.now()
+      };
+    }
+
+    function addClientTiming(name, ms, count) {
+      const timings = activeImportClientTimings || pendingImportClientTimings;
+      if (!timings || !Number.isFinite(ms)) return;
+      timings.totalsMs[name] = (timings.totalsMs[name] || 0) + Math.max(0, Math.round(ms));
+      timings.counts[name] = (timings.counts[name] || 0) + (count === undefined ? 1 : Math.max(0, Math.round(count)));
+    }
+
+    function setClientTimingCount(name, count) {
+      const timings = activeImportClientTimings || pendingImportClientTimings;
+      if (!timings || !Number.isFinite(count)) return;
+      timings.counts[name] = Math.max(0, Math.round(count));
+    }
+
+    function addClientTimingBytes(name, bytes) {
+      const timings = activeImportClientTimings || pendingImportClientTimings;
+      if (!timings || !Number.isFinite(bytes)) return;
+      timings.bytes[name] = (timings.bytes[name] || 0) + Math.max(0, Math.round(bytes));
+    }
+
+    function postClientTimings(transferId) {
+      if (!activeImportClientTimings) return;
+      send({
+        type: "import-client-timing",
+        transferId,
+        clientTimings: activeImportClientTimings
+      });
     }
 
     function setBusy(nextBusy) {
@@ -1012,6 +1060,8 @@
 
       try {
         setBusy(true);
+        pendingImportClientTimings = createImportClientTimings();
+        activeImportClientTimings = null;
 
         // Initialize merged manifest
         const mergedManifest = {
@@ -1040,8 +1090,13 @@
 
           setProgress(0, 0, `正在解析 (${i + 1}/${files.length}): ${file.name}...`);
 
+          const fileReadStartedAt = Date.now();
           const buffer = await file.arrayBuffer();
+          addClientTiming("ui.file.arrayBufferMs", Date.now() - fileReadStartedAt);
+          addClientTimingBytes("ui.file.bytes", buffer.byteLength || 0);
+          const zipReadStartedAt = Date.now();
           let zipEntries = await readZipEntries(buffer);
+          addClientTiming("ui.zip.readEntriesMs", Date.now() - zipReadStartedAt, Object.keys(zipEntries).length);
 
           // MasterGo's native .mg export is also a zip, but instead of a v2
           // manifest it stores a binary "document" + meta.json + images/.
@@ -1065,7 +1120,9 @@
             throw new Error(`无法读取 "${file.name}" 的 manifest.json`);
           }
 
+          const manifestParseStartedAt = Date.now();
           const zipManifest = JSON.parse(decodeUtf8(manifestBytes));
+          addClientTiming("ui.manifest.parseMs", Date.now() - manifestParseStartedAt);
           if (zipManifest.schema !== "mastergo2figma.package.v2" || zipManifest.version !== 2) {
             throw new Error(`文件 "${file.name}" 不是 v2 导出包，请使用新版 SendToFigma 重新导出。`);
           }
@@ -1161,6 +1218,8 @@
       entries = {};
       packageRoot = "";
       pages = [];
+      pendingImportClientTimings = null;
+      activeImportClientTimings = null;
       zipInput.value = "";
       fileNameState.textContent = "";
       fileTitle.textContent = "选择 zip / .mg 文件";
@@ -1311,6 +1370,11 @@
 
     async function streamImportPayload(sourceManifest, selectedPages) {
       const transferId = `import_${Date.now()}_${++importTransferSeq}`;
+      activeImportClientTimings = cloneImportClientTimings(pendingImportClientTimings);
+      activeImportClientTimings.transferId = transferId;
+      activeImportClientTimings.selectedPageCount = selectedPages.length;
+      activeImportClientTimings.selectedLayerCount = selectedPages.reduce((sum, page) => sum + (page.layerCount || 0), 0);
+      const importStartedAt = Date.now();
       beginImportPrepareProgress(selectedPages, transferId);
       const totalNodes = selectedPages.reduce((sum, page) => sum + (page.layerCount || 0), 0);
       const selectedManifest = {
@@ -1331,25 +1395,34 @@
       const sentAssetPaths = {};
       const preparedPages = [];
 
+      const prepareStartedAt = Date.now();
       for (let pageIndex = 0; pageIndex < selectedPages.length; pageIndex++) {
         const page = selectedPages[pageIndex];
         setPrepareProgress(`正在准备页面：${page.name || page.id}`);
+        const pagePrepareStartedAt = Date.now();
         const pageData = buildPageImportData(page);
+        addClientTiming("ui.prepare.pageDataMs", Date.now() - pagePrepareStartedAt);
         const assetTransfers = getRequiredAssetTransfers(sourceManifest, pageData.assetKeys, sentAssetPaths);
         importAssetBytesTotal += getAssetTransferBytes(assetTransfers);
         importPageRecordsTotal += getLayerChunkRecordCount(pageData.layerChunks);
         preparedPages.push({ pageIndex, page, pageData, assetTransfers });
       }
+      addClientTiming("ui.prepare.totalMs", Date.now() - prepareStartedAt);
+      setClientTimingCount("ui.prepare.selectedPages", selectedPages.length);
+      setClientTimingCount("ui.prepare.selectedLayers", totalNodes);
       importPrepareUnitsDone = importPrepareUnitsTotal;
       setPrepareProgress("图层数据整理完成");
 
+      const sessionStartStartedAt = Date.now();
       await sendImportRequest({
         type: "import-session-start",
         transferId,
         manifest: selectedManifest,
         totalPages: selectedPages.length,
-        totalNodes
+        totalNodes,
+        clientTimings: activeImportClientTimings
       });
+      addClientTiming("ui.session.startAckMs", Date.now() - sessionStartStartedAt);
       setStatus("已建立导入会话", summary.textContent, false);
 
       if (importAssetBytesTotal > 0) {
@@ -1365,12 +1438,15 @@
         }
 
         setStageProgress("pageSend", importPageRecordsDone, importPageRecordsTotal, `正在发送页面：${pageData.page.name || pageData.page.id}`);
+        const pageStartAckStartedAt = Date.now();
         await sendImportRequest({
           type: "import-page-start",
           transferId,
           pageIndex,
           page: pageData.page
         }, 30000);
+        addClientTiming("ui.page.startAckMs", Date.now() - pageStartAckStartedAt);
+        const pageChunkPostStartedAt = Date.now();
         for (let chunkIndex = 0; chunkIndex < pageData.layerChunks.length; chunkIndex++) {
           const records = pageData.layerChunks[chunkIndex];
           send({
@@ -1384,17 +1460,22 @@
           setStageProgress("pageSend", importPageRecordsDone, importPageRecordsTotal, `正在发送页面数据：${pageData.page.name || pageData.page.id}`);
           if ((chunkIndex + 1) % IMPORT_YIELD_EVERY_CHUNKS === 0) await waitForUIRelease();
         }
+        addClientTiming("ui.page.chunkPostMs", Date.now() - pageChunkPostStartedAt);
         if (importProgressMode === "prepare") beginImportRestoreProgress(`正在还原页面：${pageData.page.name || pageData.page.id}`);
         const pageEndTimeoutMs = getImportPageEndTimeoutMs(pageData, assetTransfers);
+        const pageRestoreWaitStartedAt = Date.now();
         await sendImportRequest({
           type: "import-page-end",
           transferId,
           pageIndex,
           pageName: pageData.page.name || pageData.page.id
         }, pageEndTimeoutMs, `页面还原超时：${pageData.page.name || pageData.page.id}`);
+        addClientTiming("ui.page.restoreWaitMs", Date.now() - pageRestoreWaitStartedAt);
+        postClientTimings(transferId);
       }
 
-      send({ type: "import-session-complete", transferId });
+      addClientTiming("ui.import.untilCompletePostMs", Date.now() - importStartedAt);
+      send({ type: "import-session-complete", transferId, clientTimings: activeImportClientTimings });
     }
 
     function buildPageImportData(page) {
@@ -1426,27 +1507,13 @@
         if (!bytes) throw new Error(`缺少图层分块文件：${fullChunkPath}`);
         const chunk = JSON.parse(decodeUtf8(bytes));
 
-        if (chunk.schema === "mastergo2figma.layers.v2" && Array.isArray(chunk.records)) {
-          for (const record of chunk.records) {
-            if (record && record.id) rawRecordsById[record.id] = record;
-          }
-          advancePrepareProgress(chunk.records.length, `正在解析图层分块 ${chunkIndex + 1}/${pageIndex.layerChunks.length}：${page.name || page.id}`);
-          continue;
+        if (chunk.schema !== "mastergo2figma.layers.v2" || !Array.isArray(chunk.records)) {
+          throw new Error(`图层分块格式不正确：${chunkPath}`);
         }
-
-        if (chunk && chunk.id && chunk.props) {
-          rawRecordsById[chunk.id] = chunk;
-          advancePrepareProgress(1, `正在解析图层分块 ${chunkIndex + 1}/${pageIndex.layerChunks.length}：${page.name || page.id}`);
-          continue;
+        for (const record of chunk.records) {
+          if (record && record.id) rawRecordsById[record.id] = record;
         }
-
-        if (chunk && chunk.record && chunk.record.id) {
-          rawRecordsById[chunk.record.id] = chunk.record;
-          advancePrepareProgress(1, `正在解析图层分块 ${chunkIndex + 1}/${pageIndex.layerChunks.length}：${page.name || page.id}`);
-          continue;
-        }
-
-        throw new Error(`图层分块格式不正确：${chunkPath}`);
+        advancePrepareProgress(chunk.records.length, `正在解析图层分块 ${chunkIndex + 1}/${pageIndex.layerChunks.length}：${page.name || page.id}`);
       }
 
       const reachableIds = collectReachableLayerIds(pageIndex.rootNodeIds, rawRecordsById, prefix);
@@ -1592,6 +1659,7 @@
     }
 
     async function streamImportAsset(transferId, asset) {
+      const assetSendStartedAt = Date.now();
       await sendImportRequest({
         type: "import-asset-start",
         transferId,
@@ -1621,6 +1689,8 @@
         transferId,
         path: asset.path
       }, 60000);
+      addClientTiming("ui.asset.sendMs", Date.now() - assetSendStartedAt);
+      addClientTimingBytes("ui.asset.bytes", asset.bytes.length);
       setStageProgress("assets", importAssetBytesDone, importAssetBytesTotal, `图片资源已发送：${assetLabel}`);
     }
 

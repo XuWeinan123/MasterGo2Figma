@@ -111,6 +111,28 @@
       if (!this.activeRestoreStats) return;
       this.activeRestoreStats.restoredNodes = restoredNodes;
       this.activeRestoreStats.pageCount = pageCount;
+      const durationMs = Math.max(Date.now() - this.activeRestoreStats.startedAt, 1);
+      const nodesPerSecond = Math.round(restoredNodes / durationMs * 1e4) / 10;
+      const summary = {
+        durationMs,
+        nodesPerSecond,
+        pageCount,
+        totalNodes: this.activeRestoreStats.totalNodes,
+        restoredNodes: this.activeRestoreStats.restoredNodes,
+        textNodeCount: this.activeRestoreStats.textNodeCount,
+        fontListLoadCount: this.activeRestoreStats.fontListLoadCount,
+        fontLoadRequestCount: this.activeRestoreStats.fontLoadRequestCount,
+        fontLoadCacheHitCount: this.activeRestoreStats.fontLoadCacheHitCount,
+        fontLoadFailureCount: this.activeRestoreStats.fontLoadFailureCount,
+        deferredLayoutNodeCount: this.activeRestoreStats.deferredLayoutNodeCount,
+        deferredLayoutAppliedCount: this.activeRestoreStats.deferredLayoutAppliedCount,
+        safeSetWriteCount: this.activeRestoreStats.safeSetWriteCount,
+        safeSetSkipCount: this.activeRestoreStats.safeSetSkipCount,
+        resizeWriteCount: this.activeRestoreStats.resizeWriteCount,
+        resizeSkipCount: this.activeRestoreStats.resizeSkipCount
+      };
+      console.log("[MasterGo2Figma] Restore performance", summary);
+      console.log("[MasterGo2Figma] Restore performance JSON " + JSON.stringify(summary));
     }
   };
   var state = new RestorerState();
@@ -2391,10 +2413,6 @@ ${style}`;
         yield handleImportRequest(message, () => finishImportPage(message));
         return;
       }
-      if (message.type === "import-page") {
-        yield handleImportRequest(message, () => restoreImportSessionPage(message));
-        return;
-      }
       if (message.type === "import-session-complete") {
         yield completeImportSession(message);
         return;
@@ -2403,24 +2421,17 @@ ${style}`;
         yield refreshMissingFontsInDocument();
         return;
       }
-      if (message.type !== "start-import") return;
-      if (state.importInProgress) return;
-      state.importInProgress = true;
-      try {
-        yield ensureLayerRulesLoaded();
-        if (message.payload) {
-          yield restoreImportPayload(message.payload);
-        } else {
-          throw new Error("\u8BF7\u5148\u9009\u62E9\u6709\u6548\u7684 MasterGo2Figma zip");
-        }
-      } catch (error) {
-        console.error("Import failed:", error);
+      if (message.type === "import-client-timing") {
+        recordClientTiming(message);
+        return;
+      }
+      if (message.type === "start-import") {
         figma.ui.postMessage({
           type: "error",
-          message: error instanceof Error ? error.message : "\u5BFC\u5165\u5931\u8D25\uFF0C\u8BF7\u67E5\u770B\u63A7\u5236\u53F0"
+          message: "\u5F53\u524D\u6D4B\u8BD5\u7248\u53EA\u652F\u6301 session/chunk \u6D41\u5F0F\u5BFC\u5165"
         });
+        return;
       }
-      state.importInProgress = false;
     });
   }
   function refreshMissingFontsInDocument() {
@@ -2515,7 +2526,10 @@ ${style}`;
         restoredNodes: 0,
         postProcessedNodes: 0,
         restoredPages: [],
-        previousCurrentPage: figma.currentPage
+        previousCurrentPage: figma.currentPage,
+        timings: {},
+        timingCounts: {},
+        clientTimings: message.clientTimings || null
       };
       figma.ui.postMessage({
         type: "progress",
@@ -2548,13 +2562,18 @@ ${style}`;
     if (bytes) pending.chunks.push(bytes);
   }
   function finishImportAsset(message) {
-    requireImportSession(message.transferId);
+    const session = requireImportSession(message.transferId);
     const path = String(message.path || "");
     const pending = pendingImportAssets[path];
     if (!pending) throw new Error(`\u56FE\u7247\u8D44\u6E90\u4F20\u8F93\u4E0D\u5B58\u5728\uFF1A${path}`);
+    const concatStartedAt = Date.now();
     const bytes = concatBytes(pending.chunks, pending.size);
+    addImportTiming(session, "asset.concatBytesMs", Date.now() - concatStartedAt);
     try {
+      const imageStartedAt = Date.now();
       const image = figma.createImage(bytes);
+      addImportTiming(session, "asset.createImageMs", Date.now() - imageStartedAt);
+      addImportTimingCount(session, "asset.createImageCount", 1);
       for (const key of pending.keys) state.imageHashByAssetName[key] = image.hash;
       if (pending.keys.length === 0) state.imageHashByAssetName[path] = image.hash;
     } catch (error) {
@@ -2577,6 +2596,7 @@ ${style}`;
   }
   function appendImportPageChunk(message) {
     if (!activeImportSession || activeImportSession.transferId !== message.transferId) return;
+    const startedAt = Date.now();
     const pageIndex = String(Number(message.pageIndex || 0));
     const pending = pendingImportPages[pageIndex];
     if (!pending || !Array.isArray(message.records)) return;
@@ -2586,30 +2606,22 @@ ${style}`;
         pending.recordCount++;
       }
     }
+    addImportTiming(activeImportSession, "page.receiveChunkMs", Date.now() - startedAt);
+    addImportTimingCount(activeImportSession, "page.receiveChunkCount", 1);
   }
   function finishImportPage(message) {
     return __async(this, null, function* () {
-      requireImportSession(message.transferId);
+      const session = requireImportSession(message.transferId);
       const pageIndex = Number(message.pageIndex || 0);
       const pendingKey = String(pageIndex);
       const pending = pendingImportPages[pendingKey];
       if (!pending) throw new Error(`\u9875\u9762\u4F20\u8F93\u4E0D\u5B58\u5728\uFF1A${pendingKey}`);
       try {
+        addImportTimingCount(session, "page.receivedRecordCount", pending.recordCount);
         yield restoreImportPageData(pending.page, pending.layers, pageIndex);
       } finally {
         delete pendingImportPages[pendingKey];
       }
-    });
-  }
-  function restoreImportSessionPage(message) {
-    return __async(this, null, function* () {
-      requireImportSession(message.transferId);
-      const importPage = message.page;
-      const layers = message.layers;
-      if (!importPage || !Array.isArray(importPage.rootNodeIds) || !layers || typeof layers !== "object") {
-        throw new Error("\u9875\u9762\u5BFC\u5165\u6570\u636E\u4E0D\u5B8C\u6574");
-      }
-      yield restoreImportPageData(importPage, layers, Number(message.pageIndex || 0));
     });
   }
   function restoreImportPageData(importPage, layers, pageIndex = 0) {
@@ -2628,24 +2640,35 @@ ${style}`;
         total: session.totalNodes,
         label: "\u6B63\u5728\u521B\u5EFA\u9875\u9762\uFF1A" + pageName
       });
+      const pageCreateStartedAt = Date.now();
       const restoredPage = figma.createPage();
       restoredPage.name = pageName;
       session.restoredPages.push(restoredPage);
       figma.currentPage = restoredPage;
+      addImportTiming(session, "restore.createPageMs", Date.now() - pageCreateStartedAt);
+      const nodeRestoreStartedAt = Date.now();
       for (let rootIndex = 0; rootIndex < importPage.rootNodeIds.length; rootIndex++) {
         const rootId = importPage.rootNodeIds[rootIndex];
         session.restoredNodes += yield restoreImportedNode(rootId, restoredPage, layers, session.restoredNodes, session.totalNodes);
       }
+      addImportTiming(session, "restore.nodesMs", Date.now() - nodeRestoreStartedAt);
+      addImportTimingCount(session, "restore.pageCount", 1);
       yield reportPagePostprocessProgress(session, pageIndex, pageName, postprocessStart, pageNodeCount, 0, 0, 1, "\u6B63\u5728\u5E94\u7528\u81EA\u52A8\u5E03\u5C40...");
+      const layoutStartedAt = Date.now();
       yield applyDeferredLayoutRestores((done, total, label) => {
         return reportPagePostprocessProgress(session, pageIndex, pageName, postprocessStart, pageNodeCount, 0, done, total, label);
       });
+      addImportTiming(session, "postprocess.deferredLayoutMs", Date.now() - layoutStartedAt);
+      const cleanupStartedAt = Date.now();
       yield cleanupImportedContainerShells(restoredPage, (done, total, label) => {
         return reportPagePostprocessProgress(session, pageIndex, pageName, postprocessStart, pageNodeCount, 1, done, total, label);
       });
+      addImportTiming(session, "postprocess.cleanupShellsMs", Date.now() - cleanupStartedAt);
+      const autoSpaceStartedAt = Date.now();
       yield applyDeferredSingleChildAutoSpaceAlignmentFixes(restoredPage, (done, total, label) => {
         return reportPagePostprocessProgress(session, pageIndex, pageName, postprocessStart, pageNodeCount, 2, done, total, label);
       });
+      addImportTiming(session, "postprocess.singleChildAutoSpaceMs", Date.now() - autoSpaceStartedAt);
       session.postProcessedNodes = Math.min(session.totalNodes, postprocessStart + pageNodeCount);
       yield reportPagePostprocessProgress(session, pageIndex, pageName, postprocessStart, pageNodeCount, PAGE_POSTPROCESS_STAGE_COUNT - 1, 1, 1, "\u9875\u9762\u5B8C\u6210\uFF1A" + pageName);
       yield yieldToEventLoop();
@@ -2675,16 +2698,23 @@ ${style}`;
   function completeImportSession(message) {
     return __async(this, null, function* () {
       const session = requireImportSession(message.transferId);
+      if (message.clientTimings) session.clientTimings = message.clientTimings;
       try {
         postFinalizeProgress(session, 0, 4, "\u6B63\u5728\u6062\u590D\u8FDE\u63A5\u7EBF...");
+        const connectorStartedAt = Date.now();
         applyDeferredConnectorRestores();
+        addImportTiming(session, "finalize.connectorsMs", Date.now() - connectorStartedAt);
         postFinalizeProgress(session, 1, 4, "\u6B63\u5728\u8FD8\u539F\u7F3A\u5931\u5B57\u4F53...");
+        const missingFontStartedAt = Date.now();
         const missingFontRestoreResult = yield restoreMissingFontTextLayers(session.restoredPages);
+        addImportTiming(session, "finalize.missingFontsMs", Date.now() - missingFontStartedAt);
         postFinalizeProgress(session, 2, 4, "\u6B63\u5728\u5B8C\u6210\u8FD8\u539F...");
+        const viewportStartedAt = Date.now();
         if (session.restoredPages.length > 0) {
           figma.currentPage = session.restoredPages[0];
           figma.viewport.scrollAndZoomIntoView(session.restoredPages[0].children);
         }
+        addImportTiming(session, "finalize.viewportMs", Date.now() - viewportStartedAt);
         postFinalizeProgress(session, 4, 4, "\u6B63\u5728\u5B8C\u6210\u8FD8\u539F...");
         figma.ui.postMessage({
           type: "complete",
@@ -2698,6 +2728,7 @@ ${style}`;
         });
         logMissingImportDiagnostics(missingFontRestoreResult);
         state.logRestorePerformanceSummary(session.restoredNodes, session.restoredPages.length);
+        logImportPerformanceSummary(session, missingFontRestoreResult);
         figma.notify("Restore complete!");
       } catch (error) {
         figma.currentPage = session.previousCurrentPage;
@@ -2726,6 +2757,42 @@ ${style}`;
       finalizeTotal: total,
       label
     });
+  }
+  function addImportTiming(session, phase, ms) {
+    if (!session || !Number.isFinite(ms)) return;
+    session.timings[phase] = (session.timings[phase] || 0) + Math.max(0, Math.round(ms));
+    session.timingCounts[phase] = (session.timingCounts[phase] || 0) + 1;
+  }
+  function addImportTimingCount(session, phase, count) {
+    if (!session || !Number.isFinite(count)) return;
+    session.timingCounts[phase] = (session.timingCounts[phase] || 0) + Math.max(0, Math.round(count));
+  }
+  function recordClientTiming(message) {
+    if (!activeImportSession || activeImportSession.transferId !== message.transferId) return;
+    activeImportSession.clientTimings = message.clientTimings || activeImportSession.clientTimings;
+  }
+  function logImportPerformanceSummary(session, missingFontRestoreResult) {
+    var _a;
+    const durationMs = Math.max(Date.now() - (((_a = state.activeRestoreStats) == null ? void 0 : _a.startedAt) || Date.now()), 1);
+    const nodesPerSecond = Math.round(session.restoredNodes / durationMs * 1e4) / 10;
+    const summary = {
+      transferId: session.transferId,
+      durationMs,
+      nodesPerSecond,
+      totalNodes: session.totalNodes,
+      restoredNodes: session.restoredNodes,
+      pageCount: session.restoredPages.length,
+      timingsMs: session.timings,
+      timingCounts: session.timingCounts,
+      clientTimings: session.clientTimings,
+      restoreStats: state.activeRestoreStats,
+      missingFonts: missingFontRestoreResult,
+      missingImageAssetCount: state.missingImageAssetCount,
+      fallbackConnectorCount: state.fallbackConnectorCount,
+      booleanFallbackCount: state.booleanFallbackCount
+    };
+    console.log("[MasterGo2Figma] Import performance detail", summary);
+    console.log("[MasterGo2Figma] Import performance detail JSON " + JSON.stringify(summary));
   }
   function requireImportSession(transferId) {
     if (!activeImportSession || activeImportSession.transferId !== transferId) {
@@ -2765,15 +2832,6 @@ ${style}`;
         rules: getLayerRuleStatus()
       });
     });
-  }
-  function normalizeImportAssets(assets) {
-    const result = {};
-    if (!assets || typeof assets !== "object") return result;
-    for (const fileName in assets) {
-      const bytes = normalizeBytes(assets[fileName]);
-      if (bytes) result[fileName] = bytes;
-    }
-    return result;
   }
   function normalizeBytes(value) {
     if (!value) return null;
@@ -2819,86 +2877,6 @@ ${style}`;
       progState.lastPostedAt = now;
       state.activeProgressState = progState;
       yield yieldToEventLoop();
-    });
-  }
-  function restoreImportPayload(payload) {
-    return __async(this, null, function* () {
-      yield ensureLayerRulesLoaded();
-      if (!hasValidLayerRules()) throw new Error("\u8BF7\u5148\u5BFC\u5165\u6709\u6548\u7684\u56FE\u5C42\u8F6C\u6362\u89C4\u5219 JSON");
-      if (!payload || !payload.manifest || !payload.pages || !payload.layers) {
-        throw new Error("\u5BFC\u5165\u6570\u636E\u4E0D\u5B8C\u6574");
-      }
-      if (payload.manifest.schema !== "mastergo2figma.package.v2" || payload.manifest.version !== 2) {
-        throw new Error("\u5F53\u524D\u53EA\u652F\u6301 v2 \u5BFC\u51FA\u5305\uFF0C\u8BF7\u7528\u65B0\u7248 SendToFigma \u91CD\u65B0\u5BFC\u51FA\u3002");
-      }
-      state.reset();
-      state.activeImportAssets = normalizeImportAssets(payload.assets || {});
-      let totalNodes = 0;
-      for (const page of payload.pages) totalNodes += page.layerCount || 0;
-      if (totalNodes === 0) throw new Error("\u6240\u9009\u9875\u9762\u6CA1\u6709\u53EF\u8FD8\u539F\u7684\u56FE\u5C42");
-      state.resetRestoreRuntimeStats(totalNodes, payload.pages.length);
-      const previousCurrentPage = figma.currentPage;
-      let restoredNodes = 0;
-      const restoredPages = [];
-      try {
-        figma.ui.postMessage({
-          type: "progress",
-          stage: "restore",
-          current: 0,
-          total: totalNodes,
-          label: "\u6B63\u5728\u521B\u5EFA Figma \u9875\u9762..."
-        });
-        for (let pageIndex = 0; pageIndex < payload.pages.length; pageIndex++) {
-          const importPage = payload.pages[pageIndex];
-          const restoredPage = figma.createPage();
-          restoredPage.name = createRestoredPageName(importPage.name);
-          restoredPages.push(restoredPage);
-          figma.currentPage = restoredPage;
-          for (let rootIndex = 0; rootIndex < importPage.rootNodeIds.length; rootIndex++) {
-            const rootId = importPage.rootNodeIds[rootIndex];
-            restoredNodes += yield restoreImportedNode(rootId, restoredPage, payload.layers, restoredNodes, totalNodes);
-          }
-          yield applyDeferredLayoutRestores();
-          yield cleanupImportedContainerShells(restoredPage);
-          yield applyDeferredSingleChildAutoSpaceAlignmentFixes(restoredPage);
-        }
-      } catch (error) {
-        figma.currentPage = previousCurrentPage;
-        throw error;
-      }
-      applyDeferredConnectorRestores();
-      yield maybeReportRestoreProgress(restoredNodes, totalNodes, "\u6B63\u5728\u8FD8\u539F\u7F3A\u5931\u5B57\u4F53...", true);
-      const missingFontRestoreResult = yield restoreMissingFontTextLayers(restoredPages);
-      yield maybeReportRestoreProgress(restoredNodes, totalNodes, "\u6B63\u5728\u5B8C\u6210\u8FD8\u539F...", true);
-      if (restoredPages.length > 0) {
-        figma.currentPage = restoredPages[0];
-        figma.viewport.scrollAndZoomIntoView(restoredPages[0].children);
-      }
-      figma.ui.postMessage({
-        type: "complete",
-        pageCount: restoredPages.length,
-        layerCount: restoredNodes,
-        missingImageAssetCount: state.missingImageAssetCount,
-        fallbackConnectorCount: state.fallbackConnectorCount,
-        restoredMissingFontTextNodeCount: missingFontRestoreResult.restoredTextNodeCount,
-        failedMissingFontTextNodeCount: missingFontRestoreResult.failedTextNodeCount
-      });
-      const completeDetails = [];
-      if (state.missingImageAssetCount > 0) {
-        completeDetails.push(`Missing images: ${state.missingImageAssetCount}`);
-      }
-      if (state.fallbackConnectorCount > 0) {
-        completeDetails.push(`Connectors restored as polylines: ${state.fallbackConnectorCount}`);
-      }
-      if (missingFontRestoreResult.restoredTextNodeCount > 0) {
-        completeDetails.push(`Fonts restored: ${missingFontRestoreResult.restoredTextNodeCount}`);
-      }
-      if (missingFontRestoreResult.failedTextNodeCount > 0) {
-        completeDetails.push(`Fonts still missing: ${missingFontRestoreResult.failedTextNodeCount}`);
-      }
-      logMissingImportDiagnostics(missingFontRestoreResult);
-      state.logRestorePerformanceSummary(restoredNodes, restoredPages.length);
-      figma.notify(completeDetails.length > 0 ? `Restore complete. ${completeDetails.join("; ")}` : "Restore complete!");
     });
   }
   function logMissingImportDiagnostics(missingFontRestoreResult) {
@@ -3019,11 +2997,17 @@ ${style}`;
       if (shouldPreserveVectorLayoutBoxForAutoLayout(nodeProps, parent)) {
         nodeProps = markVectorAutoLayoutBox(nodeProps);
       }
+      const createStartedAt = Date.now();
       const newNode = yield createNodeFromData(nodeProps);
+      addImportTiming(activeImportSession, "restore.createNodeMs", Date.now() - createStartedAt);
       if (!newNode) return 0;
       try {
+        const appendStartedAt = Date.now();
         if (!appendRestoredNode(parent, newNode)) return 0;
+        addImportTiming(activeImportSession, "restore.appendNodeMs", Date.now() - appendStartedAt);
+        const applyStartedAt = Date.now();
         yield applyProperties(newNode, nodeProps);
+        addImportTiming(activeImportSession, "restore.applyPropertiesMs", Date.now() - applyStartedAt);
       } catch (error) {
         console.warn("Unable to restore node, removing partial node:", (nodeProps == null ? void 0 : nodeProps.name) || layerRecord.name || nodeId, error);
         safeRemove(newNode);
@@ -3031,7 +3015,9 @@ ${style}`;
       }
       let restoredCount = 1;
       const currentCount = restoredBefore + restoredCount;
+      const progressStartedAt = Date.now();
       yield maybeReportRestoreProgress(currentCount, totalNodes, "\u6B63\u5728\u8FD8\u539F\uFF1A" + (nodeProps.name || layerRecord.name));
+      addImportTiming(activeImportSession, "restore.progressMs", Date.now() - progressStartedAt);
       const childIds = nodeProps.omitChildrenOnRestore ? [] : layerRecord.childIds || [];
       if (canContainRestoredChildren(newNode)) {
         for (const childId of childIds) {

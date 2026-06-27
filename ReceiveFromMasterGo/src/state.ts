@@ -85,6 +85,28 @@ class RestorerState {
 
         this.activeRestoreStats.restoredNodes = restoredNodes;
         this.activeRestoreStats.pageCount = pageCount;
+        const durationMs = Math.max(Date.now() - this.activeRestoreStats.startedAt, 1);
+        const nodesPerSecond = Math.round((restoredNodes / durationMs) * 10000) / 10;
+        const summary = {
+            durationMs,
+            nodesPerSecond,
+            pageCount,
+            totalNodes: this.activeRestoreStats.totalNodes,
+            restoredNodes: this.activeRestoreStats.restoredNodes,
+            textNodeCount: this.activeRestoreStats.textNodeCount,
+            fontListLoadCount: this.activeRestoreStats.fontListLoadCount,
+            fontLoadRequestCount: this.activeRestoreStats.fontLoadRequestCount,
+            fontLoadCacheHitCount: this.activeRestoreStats.fontLoadCacheHitCount,
+            fontLoadFailureCount: this.activeRestoreStats.fontLoadFailureCount,
+            deferredLayoutNodeCount: this.activeRestoreStats.deferredLayoutNodeCount,
+            deferredLayoutAppliedCount: this.activeRestoreStats.deferredLayoutAppliedCount,
+            safeSetWriteCount: this.activeRestoreStats.safeSetWriteCount,
+            safeSetSkipCount: this.activeRestoreStats.safeSetSkipCount,
+            resizeWriteCount: this.activeRestoreStats.resizeWriteCount,
+            resizeSkipCount: this.activeRestoreStats.resizeSkipCount
+        };
+        console.log("[MasterGo2Figma] Restore performance", summary);
+        console.log("[MasterGo2Figma] Restore performance JSON " + JSON.stringify(summary));
     }
 }
 

@@ -1,4 +1,4 @@
-import { ImportPayload, ImportLayerRecord, ImportManifest, ImportPageIndex, MissingFontTextRestoreResult } from "../../shared/types";
+import { ImportLayerRecord, ImportManifest, ImportPageIndex, MissingFontTextRestoreResult } from "../../shared/types";
 import { state } from "./state";
 import {
   ensureLayerRulesLoaded, hasValidLayerRules, getLayerRuleStatus
@@ -43,6 +43,9 @@ type ImportSession = {
   postProcessedNodes: number;
   restoredPages: PageNode[];
   previousCurrentPage: PageNode;
+  timings: { [phase: string]: number };
+  timingCounts: { [phase: string]: number };
+  clientTimings: any;
 };
 
 type PendingAsset = {
@@ -123,11 +126,6 @@ function showImportUI() {
       return;
     }
 
-    if (message.type === "import-page") {
-      await handleImportRequest(message, () => restoreImportSessionPage(message));
-      return;
-    }
-
     if (message.type === "import-session-complete") {
       await completeImportSession(message);
       return;
@@ -138,25 +136,18 @@ function showImportUI() {
       return;
     }
 
-    if (message.type !== "start-import") return;
-    if (state.importInProgress) return;
+    if (message.type === "import-client-timing") {
+      recordClientTiming(message);
+      return;
+    }
 
-    state.importInProgress = true;
-    try {
-      await ensureLayerRulesLoaded();
-      if (message.payload) {
-        await restoreImportPayload(message.payload as ImportPayload);
-      } else {
-        throw new Error("请先选择有效的 MasterGo2Figma zip");
-      }
-    } catch (error) {
-      console.error("Import failed:", error);
+    if (message.type === "start-import") {
       figma.ui.postMessage({
         type: "error",
-        message: error instanceof Error ? error.message : "导入失败，请查看控制台"
+        message: "当前测试版只支持 session/chunk 流式导入"
       });
+      return;
     }
-    state.importInProgress = false;
   };
 }
 
@@ -252,7 +243,10 @@ async function startImportSession(message: any) {
     restoredNodes: 0,
     postProcessedNodes: 0,
     restoredPages: [],
-    previousCurrentPage: figma.currentPage
+    previousCurrentPage: figma.currentPage,
+    timings: {},
+    timingCounts: {},
+    clientTimings: message.clientTimings || null
   };
 
   figma.ui.postMessage({
@@ -288,14 +282,19 @@ function appendImportAssetChunk(message: any) {
 }
 
 function finishImportAsset(message: any) {
-  requireImportSession(message.transferId);
+  const session = requireImportSession(message.transferId);
   const path = String(message.path || "");
   const pending = pendingImportAssets[path];
   if (!pending) throw new Error(`图片资源传输不存在：${path}`);
 
+  const concatStartedAt = Date.now();
   const bytes = concatBytes(pending.chunks, pending.size);
+  addImportTiming(session, "asset.concatBytesMs", Date.now() - concatStartedAt);
   try {
+    const imageStartedAt = Date.now();
     const image = figma.createImage(bytes);
+    addImportTiming(session, "asset.createImageMs", Date.now() - imageStartedAt);
+    addImportTimingCount(session, "asset.createImageCount", 1);
     for (const key of pending.keys) state.imageHashByAssetName[key] = image.hash;
     if (pending.keys.length === 0) state.imageHashByAssetName[path] = image.hash;
   } catch (error) {
@@ -321,6 +320,7 @@ function startImportPage(message: any) {
 
 function appendImportPageChunk(message: any) {
   if (!activeImportSession || activeImportSession.transferId !== message.transferId) return;
+  const startedAt = Date.now();
   const pageIndex = String(Number(message.pageIndex || 0));
   const pending = pendingImportPages[pageIndex];
   if (!pending || !Array.isArray(message.records)) return;
@@ -330,29 +330,22 @@ function appendImportPageChunk(message: any) {
       pending.recordCount++;
     }
   }
+  addImportTiming(activeImportSession, "page.receiveChunkMs", Date.now() - startedAt);
+  addImportTimingCount(activeImportSession, "page.receiveChunkCount", 1);
 }
 
 async function finishImportPage(message: any) {
-  requireImportSession(message.transferId);
+  const session = requireImportSession(message.transferId);
   const pageIndex = Number(message.pageIndex || 0);
   const pendingKey = String(pageIndex);
   const pending = pendingImportPages[pendingKey];
   if (!pending) throw new Error(`页面传输不存在：${pendingKey}`);
   try {
+    addImportTimingCount(session, "page.receivedRecordCount", pending.recordCount);
     await restoreImportPageData(pending.page, pending.layers, pageIndex);
   } finally {
     delete pendingImportPages[pendingKey];
   }
-}
-
-async function restoreImportSessionPage(message: any) {
-  requireImportSession(message.transferId);
-  const importPage = message.page as ImportPageIndex;
-  const layers = message.layers as { [id: string]: ImportLayerRecord };
-  if (!importPage || !Array.isArray(importPage.rootNodeIds) || !layers || typeof layers !== "object") {
-    throw new Error("页面导入数据不完整");
-  }
-  await restoreImportPageData(importPage, layers, Number(message.pageIndex || 0));
 }
 
 async function restoreImportPageData(importPage: ImportPageIndex, layers: { [id: string]: ImportLayerRecord }, pageIndex = 0) {
@@ -371,26 +364,37 @@ async function restoreImportPageData(importPage: ImportPageIndex, layers: { [id:
     label: "正在创建页面：" + pageName
   });
 
+  const pageCreateStartedAt = Date.now();
   const restoredPage = figma.createPage();
   restoredPage.name = pageName;
   session.restoredPages.push(restoredPage);
   figma.currentPage = restoredPage;
+  addImportTiming(session, "restore.createPageMs", Date.now() - pageCreateStartedAt);
 
+  const nodeRestoreStartedAt = Date.now();
   for (let rootIndex = 0; rootIndex < importPage.rootNodeIds.length; rootIndex++) {
     const rootId = importPage.rootNodeIds[rootIndex];
     session.restoredNodes += await restoreImportedNode(rootId, restoredPage, layers, session.restoredNodes, session.totalNodes);
   }
+  addImportTiming(session, "restore.nodesMs", Date.now() - nodeRestoreStartedAt);
+  addImportTimingCount(session, "restore.pageCount", 1);
 
   await reportPagePostprocessProgress(session, pageIndex, pageName, postprocessStart, pageNodeCount, 0, 0, 1, "正在应用自动布局...");
+  const layoutStartedAt = Date.now();
   await applyDeferredLayoutRestores((done, total, label) => {
     return reportPagePostprocessProgress(session, pageIndex, pageName, postprocessStart, pageNodeCount, 0, done, total, label);
   });
+  addImportTiming(session, "postprocess.deferredLayoutMs", Date.now() - layoutStartedAt);
+  const cleanupStartedAt = Date.now();
   await cleanupImportedContainerShells(restoredPage, (done, total, label) => {
     return reportPagePostprocessProgress(session, pageIndex, pageName, postprocessStart, pageNodeCount, 1, done, total, label);
   });
+  addImportTiming(session, "postprocess.cleanupShellsMs", Date.now() - cleanupStartedAt);
+  const autoSpaceStartedAt = Date.now();
   await applyDeferredSingleChildAutoSpaceAlignmentFixes(restoredPage, (done, total, label) => {
     return reportPagePostprocessProgress(session, pageIndex, pageName, postprocessStart, pageNodeCount, 2, done, total, label);
   });
+  addImportTiming(session, "postprocess.singleChildAutoSpaceMs", Date.now() - autoSpaceStartedAt);
   session.postProcessedNodes = Math.min(session.totalNodes, postprocessStart + pageNodeCount);
   await reportPagePostprocessProgress(session, pageIndex, pageName, postprocessStart, pageNodeCount, PAGE_POSTPROCESS_STAGE_COUNT - 1, 1, 1, "页面完成：" + pageName);
   await yieldToEventLoop();
@@ -429,17 +433,24 @@ async function reportPagePostprocessProgress(
 
 async function completeImportSession(message: any) {
   const session = requireImportSession(message.transferId);
+  if (message.clientTimings) session.clientTimings = message.clientTimings;
   try {
     postFinalizeProgress(session, 0, 4, "正在恢复连接线...");
+    const connectorStartedAt = Date.now();
     applyDeferredConnectorRestores();
+    addImportTiming(session, "finalize.connectorsMs", Date.now() - connectorStartedAt);
     postFinalizeProgress(session, 1, 4, "正在还原缺失字体...");
+    const missingFontStartedAt = Date.now();
     const missingFontRestoreResult = await restoreMissingFontTextLayers(session.restoredPages);
+    addImportTiming(session, "finalize.missingFontsMs", Date.now() - missingFontStartedAt);
     postFinalizeProgress(session, 2, 4, "正在完成还原...");
 
+    const viewportStartedAt = Date.now();
     if (session.restoredPages.length > 0) {
       figma.currentPage = session.restoredPages[0];
       figma.viewport.scrollAndZoomIntoView(session.restoredPages[0].children as SceneNode[]);
     }
+    addImportTiming(session, "finalize.viewportMs", Date.now() - viewportStartedAt);
     postFinalizeProgress(session, 4, 4, "正在完成还原...");
 
     figma.ui.postMessage({
@@ -455,6 +466,7 @@ async function completeImportSession(message: any) {
 
     logMissingImportDiagnostics(missingFontRestoreResult);
     state.logRestorePerformanceSummary(session.restoredNodes, session.restoredPages.length);
+    logImportPerformanceSummary(session, missingFontRestoreResult);
     figma.notify("Restore complete!");
   } catch (error) {
     figma.currentPage = session.previousCurrentPage;
@@ -483,6 +495,45 @@ function postFinalizeProgress(session: ImportSession, current: number, total: nu
     finalizeTotal: total,
     label
   });
+}
+
+function addImportTiming(session: ImportSession | null, phase: string, ms: number) {
+  if (!session || !Number.isFinite(ms)) return;
+  session.timings[phase] = (session.timings[phase] || 0) + Math.max(0, Math.round(ms));
+  session.timingCounts[phase] = (session.timingCounts[phase] || 0) + 1;
+}
+
+function addImportTimingCount(session: ImportSession | null, phase: string, count: number) {
+  if (!session || !Number.isFinite(count)) return;
+  session.timingCounts[phase] = (session.timingCounts[phase] || 0) + Math.max(0, Math.round(count));
+}
+
+function recordClientTiming(message: any) {
+  if (!activeImportSession || activeImportSession.transferId !== message.transferId) return;
+  activeImportSession.clientTimings = message.clientTimings || activeImportSession.clientTimings;
+}
+
+function logImportPerformanceSummary(session: ImportSession, missingFontRestoreResult: any) {
+  const durationMs = Math.max(Date.now() - (state.activeRestoreStats?.startedAt || Date.now()), 1);
+  const nodesPerSecond = Math.round((session.restoredNodes / durationMs) * 10000) / 10;
+  const summary = {
+    transferId: session.transferId,
+    durationMs,
+    nodesPerSecond,
+    totalNodes: session.totalNodes,
+    restoredNodes: session.restoredNodes,
+    pageCount: session.restoredPages.length,
+    timingsMs: session.timings,
+    timingCounts: session.timingCounts,
+    clientTimings: session.clientTimings,
+    restoreStats: state.activeRestoreStats,
+    missingFonts: missingFontRestoreResult,
+    missingImageAssetCount: state.missingImageAssetCount,
+    fallbackConnectorCount: state.fallbackConnectorCount,
+    booleanFallbackCount: state.booleanFallbackCount
+  };
+  console.log("[MasterGo2Figma] Import performance detail", summary);
+  console.log("[MasterGo2Figma] Import performance detail JSON " + JSON.stringify(summary));
 }
 
 function requireImportSession(transferId: string): ImportSession {
@@ -526,17 +577,6 @@ async function postInitUI() {
     type: "init",
     rules: getLayerRuleStatus()
   });
-}
-
-function normalizeImportAssets(assets: { [fileName: string]: Uint8Array }): { [fileName: string]: Uint8Array } {
-  const result: { [fileName: string]: Uint8Array } = {};
-  if (!assets || typeof assets !== "object") return result;
-
-  for (const fileName in assets) {
-    const bytes = normalizeBytes(assets[fileName]);
-    if (bytes) result[fileName] = bytes;
-  }
-  return result;
 }
 
 function normalizeBytes(value: any): Uint8Array | null {
@@ -589,98 +629,6 @@ async function maybeReportRestoreProgress(current: number, total: number, label:
   progState.lastPostedAt = now;
   state.activeProgressState = progState;
   await yieldToEventLoop();
-}
-
-async function restoreImportPayload(payload: ImportPayload) {
-  await ensureLayerRulesLoaded();
-  if (!hasValidLayerRules()) throw new Error("请先导入有效的图层转换规则 JSON");
-
-  if (!payload || !payload.manifest || !payload.pages || !payload.layers) {
-    throw new Error("导入数据不完整");
-  }
-  if (payload.manifest.schema !== "mastergo2figma.package.v2" || payload.manifest.version !== 2) {
-    throw new Error("当前只支持 v2 导出包，请用新版 SendToFigma 重新导出。");
-  }
-
-  state.reset();
-  state.activeImportAssets = normalizeImportAssets(payload.assets || {});
-
-  let totalNodes = 0;
-  for (const page of payload.pages) totalNodes += page.layerCount || 0;
-  if (totalNodes === 0) throw new Error("所选页面没有可还原的图层");
-
-  state.resetRestoreRuntimeStats(totalNodes, payload.pages.length);
-
-  const previousCurrentPage = figma.currentPage;
-  let restoredNodes = 0;
-  const restoredPages: PageNode[] = [];
-
-  try {
-    figma.ui.postMessage({
-      type: "progress",
-      stage: "restore",
-      current: 0,
-      total: totalNodes,
-      label: "正在创建 Figma 页面..."
-    });
-
-    for (let pageIndex = 0; pageIndex < payload.pages.length; pageIndex++) {
-      const importPage = payload.pages[pageIndex];
-      const restoredPage = figma.createPage();
-      restoredPage.name = createRestoredPageName(importPage.name);
-      restoredPages.push(restoredPage);
-      figma.currentPage = restoredPage;
-
-      for (let rootIndex = 0; rootIndex < importPage.rootNodeIds.length; rootIndex++) {
-        const rootId = importPage.rootNodeIds[rootIndex];
-        restoredNodes += await restoreImportedNode(rootId, restoredPage, payload.layers, restoredNodes, totalNodes);
-      }
-
-      await applyDeferredLayoutRestores();
-      await cleanupImportedContainerShells(restoredPage);
-      await applyDeferredSingleChildAutoSpaceAlignmentFixes(restoredPage);
-    }
-  } catch (error) {
-    figma.currentPage = previousCurrentPage;
-    throw error;
-  }
-
-  applyDeferredConnectorRestores();
-  await maybeReportRestoreProgress(restoredNodes, totalNodes, "正在还原缺失字体...", true);
-  const missingFontRestoreResult = await restoreMissingFontTextLayers(restoredPages);
-  await maybeReportRestoreProgress(restoredNodes, totalNodes, "正在完成还原...", true);
-
-  if (restoredPages.length > 0) {
-    figma.currentPage = restoredPages[0];
-    figma.viewport.scrollAndZoomIntoView(restoredPages[0].children as SceneNode[]);
-  }
-
-  figma.ui.postMessage({
-    type: "complete",
-    pageCount: restoredPages.length,
-    layerCount: restoredNodes,
-    missingImageAssetCount: state.missingImageAssetCount,
-    fallbackConnectorCount: state.fallbackConnectorCount,
-    restoredMissingFontTextNodeCount: missingFontRestoreResult.restoredTextNodeCount,
-    failedMissingFontTextNodeCount: missingFontRestoreResult.failedTextNodeCount
-  });
-
-  const completeDetails: string[] = [];
-  if (state.missingImageAssetCount > 0) {
-    completeDetails.push(`Missing images: ${state.missingImageAssetCount}`);
-  }
-  if (state.fallbackConnectorCount > 0) {
-    completeDetails.push(`Connectors restored as polylines: ${state.fallbackConnectorCount}`);
-  }
-  if (missingFontRestoreResult.restoredTextNodeCount > 0) {
-    completeDetails.push(`Fonts restored: ${missingFontRestoreResult.restoredTextNodeCount}`);
-  }
-  if (missingFontRestoreResult.failedTextNodeCount > 0) {
-    completeDetails.push(`Fonts still missing: ${missingFontRestoreResult.failedTextNodeCount}`);
-  }
-  logMissingImportDiagnostics(missingFontRestoreResult);
-  state.logRestorePerformanceSummary(restoredNodes, restoredPages.length);
-  figma.notify(completeDetails.length > 0 ? `Restore complete. ${completeDetails.join("; ")}` : "Restore complete!");
 }
 
 function logMissingImportDiagnostics(missingFontRestoreResult: MissingFontTextRestoreResult) {
@@ -822,12 +770,18 @@ async function restoreImportedNode(
     nodeProps = markVectorAutoLayoutBox(nodeProps);
   }
 
+  const createStartedAt = Date.now();
   const newNode = await createNodeFromData(nodeProps);
+  addImportTiming(activeImportSession, "restore.createNodeMs", Date.now() - createStartedAt);
   if (!newNode) return 0;
 
   try {
+    const appendStartedAt = Date.now();
     if (!appendRestoredNode(parent, newNode)) return 0;
+    addImportTiming(activeImportSession, "restore.appendNodeMs", Date.now() - appendStartedAt);
+    const applyStartedAt = Date.now();
     await applyProperties(newNode as any, nodeProps);
+    addImportTiming(activeImportSession, "restore.applyPropertiesMs", Date.now() - applyStartedAt);
   } catch (error) {
     console.warn("Unable to restore node, removing partial node:", nodeProps?.name || layerRecord.name || nodeId, error);
     safeRemove(newNode);
@@ -836,7 +790,9 @@ async function restoreImportedNode(
 
   let restoredCount = 1;
   const currentCount = restoredBefore + restoredCount;
+  const progressStartedAt = Date.now();
   await maybeReportRestoreProgress(currentCount, totalNodes, "正在还原：" + (nodeProps.name || layerRecord.name));
+  addImportTiming(activeImportSession, "restore.progressMs", Date.now() - progressStartedAt);
 
   const childIds = nodeProps.omitChildrenOnRestore ? [] : (layerRecord.childIds || []);
   if (canContainRestoredChildren(newNode)) {
