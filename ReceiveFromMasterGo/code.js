@@ -2668,6 +2668,8 @@ ${style}`;
       addImportTiming(session, "postprocess.singleChildAutoSpaceMs", Date.now() - autoSpaceStartedAt);
       session.postProcessedNodes = Math.min(session.totalNodes, postprocessStart + pageNodeCount);
       yield reportPagePostprocessProgress(session, pageIndex, pageName, postprocessStart, pageNodeCount, PAGE_POSTPROCESS_STAGE_COUNT - 1, 1, 1, "\u9875\u9762\u5B8C\u6210\uFF1A" + pageName);
+      state.restoredLayoutByNodeId = {};
+      state.nativeGroupOffsetByNodeId = {};
       yield yieldToEventLoop();
     });
   }

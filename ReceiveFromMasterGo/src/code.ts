@@ -397,6 +397,15 @@ async function restoreImportPageData(importPage: ImportPageIndex, layers: { [id:
   addImportTiming(session, "postprocess.singleChildAutoSpaceMs", Date.now() - autoSpaceStartedAt);
   session.postProcessedNodes = Math.min(session.totalNodes, postprocessStart + pageNodeCount);
   await reportPagePostprocessProgress(session, pageIndex, pageName, postprocessStart, pageNodeCount, PAGE_POSTPROCESS_STAGE_COUNT - 1, 1, 1, "页面完成：" + pageName);
+  // Both maps are strictly page-scoped: every reader (group-offset
+  // normalization, vector layout-box checks, deferred layout passes,
+  // component-set finalize, SPACE_BETWEEN fixes) runs within this page's
+  // restore/postprocess, and Figma node ids never repeat across pages. The
+  // session-finalize steps (connectors/fonts) only use restoredNodeIdBySourceId.
+  // Releasing them per page keeps multi-page imports from pinning every
+  // page's parsed layout objects until the session ends.
+  state.restoredLayoutByNodeId = {};
+  state.nativeGroupOffsetByNodeId = {};
   await yieldToEventLoop();
 }
 
