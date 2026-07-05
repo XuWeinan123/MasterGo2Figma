@@ -1607,14 +1607,14 @@
     }
     return `[JSON-Payload: ${safeRead(() => node.name, "Untitled")} (${nodeType}, id=${nodeId})]`;
   }
-  function stringifyLayerPayload(payload, node, nodeComplexity) {
+  function stringifyLayerPayload(payload, node, getNodeComplexity) {
     try {
       return JSON.stringify(payload);
     } catch (error) {
       const fatalOom = isOutOfMemoryError(error);
       state.logDiagnostic(fatalOom ? "error" : "warn", fatalOom ? "[MasterGo2Figma] Stringify OOM" : "[MasterGo2Figma] Stringify failed, exporting fallback", {
         error: describeError(error),
-        complexity: nodeComplexity || createNodeComplexitySnapshot(node)
+        complexity: getNodeComplexity ? getNodeComplexity() : createNodeComplexitySnapshot(node)
       });
       if (fatalOom) throw error;
       const fallbackPayload = __spreadProps(__spreadValues({}, payload), {
@@ -1660,8 +1660,7 @@
         childIds: [],
         props: fallbackJson
       };
-      const nodeComplexity = createNodeComplexitySnapshot(node, [], fallbackJson);
-      const recordJson = stringifyLayerPayload(layerRecord, node, nodeComplexity);
+      const recordJson = stringifyLayerPayload(layerRecord, node, () => createNodeComplexitySnapshot(node, [], fallbackJson));
       pageIndex.layerCount++;
       state.noteExportLayerRecord();
       yield appendLayerRecord(recordJson, pageIndex, chunk, transfer);
@@ -1671,11 +1670,12 @@
   function collectSingleNodeExport(node, page, pageFolder, parentId, index, pageIndex, chunk, transfer, relation) {
     return __async(this, null, function* () {
       state.processedNodes++;
-      const nodeDebug = getNodeDebugLabel(node);
-      const pageName = safeRead(() => page.name, pageIndex.name);
       let phase = "start";
       const nodeId = safeRead(() => node.id, `node-${pageIndex.layerCount + 1}`);
       const nodeName = safeRead(() => node.name, "Untitled");
+      const nodeType = safeRead(() => node.type, "");
+      const nodeDebug = safeRead(() => !!(node && node.id), false) ? `[HostNode: ${nodeName} (${nodeType}, id=${nodeId})]` : `[JSON-Payload: ${nodeName} (${nodeType}, id=${nodeId})]`;
+      const pageName = pageIndex.name;
       let recordAppended = false;
       let childNodes = [];
       let shouldExportChildren = false;
@@ -1717,10 +1717,15 @@
           childIds,
           props: nodeJson
         };
-        let nodeComplexity = createNodeComplexitySnapshot(node, childNodes, nodeJson);
+        const exportedChildCount = childNodes.length;
+        const getNodeComplexity = () => {
+          const snapshot = createNodeComplexitySnapshot(node, void 0, nodeJson);
+          snapshot.childCount = exportedChildCount;
+          return snapshot;
+        };
         childNodes = [];
-        setNodeDebug("stringify", nodeComplexity);
-        let recordJson = stringifyLayerPayload(layerRecord, node, nodeComplexity);
+        setNodeDebug("stringify");
+        let recordJson = stringifyLayerPayload(layerRecord, node, getNodeComplexity);
         const recordBytes = recordJson.length;
         if (recordBytes >= STRINGIFY_RECORD_WARN_BYTES) {
           state.logDiagnostic("warn", "[MasterGo2Figma] Large layer record", {
@@ -1729,13 +1734,12 @@
             recordBytes,
             chunkBytes: chunk.bytes,
             chunkRecords: chunk.recordJsons.length,
-            complexity: nodeComplexity,
+            complexity: getNodeComplexity(),
             transfer: summarizeTransfer(transfer)
           });
         }
         layerRecord = null;
         nodeJson = null;
-        nodeComplexity = null;
         pageIndex.layerCount++;
         state.noteExportLayerRecord();
         setNodeDebug("append-record");
