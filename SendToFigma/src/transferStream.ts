@@ -23,6 +23,7 @@ import {
     EXPORT_SCAN_YIELD_EVERY_NODES,
     EXPORT_FILE_ACK_TIMEOUT_MS,
     EXPORT_TRANSFER_ACK_TIMEOUT_MS,
+    EXPORT_ASSET_YIELD_EVERY_ASSETS,
 } from "./exportConfig";
 
 // Feature flags and transfer-target identifiers (not tuning numbers).
@@ -533,13 +534,15 @@ export async function flushLayerChunk(
         fileSize: byteCount,
         streamedBytes: transfer.streamedBytes
     });
+    // join(",") builds the record list in one pass; the previous per-record
+    // `,${json}` template copied every record string. Do NOT emit "," as its
+    // own contentPart — each part is chunked separately for postMessage, so a
+    // 1-char part would become its own bridge message.
     const contentParts = [
-        `{"schema":"mastergo2figma.layers.v2","version":2,"pageId":${JSON.stringify(chunk.pageId)},"records":[`
+        `{"schema":"mastergo2figma.layers.v2","version":2,"pageId":${JSON.stringify(chunk.pageId)},"records":[`,
+        chunk.recordJsons.join(","),
+        "]}"
     ];
-    for (let index = 0; index < chunk.recordJsons.length; index++) {
-        contentParts.push(index > 0 ? `,${chunk.recordJsons[index]}` : chunk.recordJsons[index]);
-    }
-    contentParts.push("]}");
 
     await streamExportFileToUI(transfer, { path, contentParts });
     pageIndex.layerChunks.push(path);
@@ -738,6 +741,7 @@ export async function streamImageAssetsToTransfer(
     transfer: ExportTransferState
 ) {
     if (!ENABLE_IMAGE_EXPORT) return;
+    let streamedAssets = 0;
     for (const asset of imageAssetContext.assets) {
         await loadAndStreamImageAsset(asset, imageAssetContext, transfer);
         manifest.assets[asset.key] = {
@@ -747,9 +751,11 @@ export async function streamImageAssetsToTransfer(
             missing: asset.missing || undefined
         };
         if (asset.bytes && !asset.missing) manifest.stats.imageAssetCount++;
-        // 显式断开强引用并给予主线程喘息机会
+        // 显式断开强引用；大图在 streamExportFileToUI 内部已按 chunk yield，
+        // 这里按批次 yield 即可，避免小图场景每个资源空转一次 setTimeout(0)。
         asset.bytes = null;
-        await yieldToHost();
+        streamedAssets++;
+        if (streamedAssets % EXPORT_ASSET_YIELD_EVERY_ASSETS === 0) await yieldToHost();
     }
     manifest.stats.missingImageAssetCount = imageAssetContext.missingImageAssetCount;
 }

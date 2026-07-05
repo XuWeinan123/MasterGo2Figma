@@ -106,9 +106,17 @@ export function createFallbackNodeJson(node: SceneNode, sourceType?: string) {
     };
 }
 
+// INVARIANT: every serializer strategy clones host-derived objects at read
+// time — constraints/exportSettings in getUniversalProperty (all trans*
+// functions build on it) and createFallbackNodeJson, arcData in
+// transEllipseNode, fontName/letterSpacing/lineHeight/styledTextSegments in
+// transTextNode. The former sanitizeExportNodeJson pass re-cloned those same
+// fields via a second JSON round-trip per node (large for text-heavy pages)
+// without changing the output, so it was removed. Keep this invariant when
+// adding new serializers: clone host values where they are read.
 export function analyseNodes(node: SceneNode, sourceType?: string): any {
     try {
-        return sanitizeExportNodeJson(analyseNodesUnsafe(node, sourceType));
+        return analyseNodesUnsafe(node, sourceType);
     } catch (error) {
         if (isOutOfMemoryError(error)) {
             state.logDiagnostic("error", "[MasterGo2Figma] Analyse node OOM", {
@@ -124,7 +132,7 @@ export function analyseNodes(node: SceneNode, sourceType?: string): any {
             error: describeError(error),
             debugState: state.exportDebugState
         });
-        return sanitizeExportNodeJson(createFallbackNodeJson(node, sourceType));
+        return createFallbackNodeJson(node, sourceType);
     }
 }
 
@@ -153,19 +161,6 @@ export function analyseNodesUnsafe(node: SceneNode, sourceType?: string): any {
         nodeJson.shellPlaceholder = true;
     }
 
-    return nodeJson;
-}
-
-export function sanitizeExportNodeJson(nodeJson: any) {
-    if (!nodeJson || typeof nodeJson !== "object") return nodeJson;
-
-    if (nodeJson.constraints !== undefined) nodeJson.constraints = cloneJsonCompatible(nodeJson.constraints, undefined);
-    if (nodeJson.exportSettings !== undefined) nodeJson.exportSettings = cloneJsonCompatible(nodeJson.exportSettings, []);
-    if (nodeJson.arcData !== undefined) nodeJson.arcData = cloneJsonCompatible(nodeJson.arcData, undefined);
-    if (nodeJson.fontName !== undefined) nodeJson.fontName = cloneJsonCompatible(nodeJson.fontName, nodeJson.fontName);
-    if (nodeJson.letterSpacing !== undefined) nodeJson.letterSpacing = cloneJsonCompatible(nodeJson.letterSpacing, nodeJson.letterSpacing);
-    if (nodeJson.lineHeight !== undefined) nodeJson.lineHeight = cloneJsonCompatible(nodeJson.lineHeight, nodeJson.lineHeight);
-    if (nodeJson.styledTextSegments !== undefined) nodeJson.styledTextSegments = cloneJsonCompatible(nodeJson.styledTextSegments, nodeJson.styledTextSegments);
     return nodeJson;
 }
 

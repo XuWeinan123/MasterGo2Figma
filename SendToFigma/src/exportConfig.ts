@@ -24,6 +24,9 @@ export const EXPORT_TRANSFER_YIELD_EVERY_CHUNKS = 32;
 /** Yield to the host after streaming this many files, giving the bridge room to drain. */
 export const EXPORT_FILE_YIELD_EVERY_FILES = 25;
 
+/** Yield to the host after streaming this many image assets. Large assets already yield per-chunk inside streamExportFileToUI; a per-asset setTimeout(0) added seconds of pure idle on exports with many small images. */
+export const EXPORT_ASSET_YIELD_EVERY_ASSETS = 8;
+
 /** Max layer records accumulated before a layer-chunk file is flushed. */
 export const LAYER_CHUNK_MAX_RECORDS = 16;
 

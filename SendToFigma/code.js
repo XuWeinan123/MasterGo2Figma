@@ -1333,6 +1333,7 @@
   var EXPORT_TEXT_CHUNK_CHAR_LIMIT = 16 * 1024;
   var EXPORT_TRANSFER_YIELD_EVERY_CHUNKS = 32;
   var EXPORT_FILE_YIELD_EVERY_FILES = 25;
+  var EXPORT_ASSET_YIELD_EVERY_ASSETS = 8;
   var LAYER_CHUNK_MAX_RECORDS = 16;
   var LAYER_CHUNK_MAX_BYTES = 64 * 1024;
   var PAGE_SEGMENT_TARGET_LAYERS = 8e3;
@@ -1427,7 +1428,7 @@
   }
   function analyseNodes(node, sourceType) {
     try {
-      return sanitizeExportNodeJson(analyseNodesUnsafe(node, sourceType));
+      return analyseNodesUnsafe(node, sourceType);
     } catch (error) {
       if (isOutOfMemoryError(error)) {
         state.logDiagnostic("error", "[MasterGo2Figma] Analyse node OOM", {
@@ -1443,7 +1444,7 @@
         error: describeError(error),
         debugState: state.exportDebugState
       });
-      return sanitizeExportNodeJson(createFallbackNodeJson(node, sourceType));
+      return createFallbackNodeJson(node, sourceType);
     }
   }
   function analyseNodesUnsafe(node, sourceType) {
@@ -1468,17 +1469,6 @@
     if (rule.visualFrameSource && nodeJson && typeof nodeJson === "object") {
       nodeJson.shellPlaceholder = true;
     }
-    return nodeJson;
-  }
-  function sanitizeExportNodeJson(nodeJson) {
-    if (!nodeJson || typeof nodeJson !== "object") return nodeJson;
-    if (nodeJson.constraints !== void 0) nodeJson.constraints = cloneJsonCompatible(nodeJson.constraints, void 0);
-    if (nodeJson.exportSettings !== void 0) nodeJson.exportSettings = cloneJsonCompatible(nodeJson.exportSettings, []);
-    if (nodeJson.arcData !== void 0) nodeJson.arcData = cloneJsonCompatible(nodeJson.arcData, void 0);
-    if (nodeJson.fontName !== void 0) nodeJson.fontName = cloneJsonCompatible(nodeJson.fontName, nodeJson.fontName);
-    if (nodeJson.letterSpacing !== void 0) nodeJson.letterSpacing = cloneJsonCompatible(nodeJson.letterSpacing, nodeJson.letterSpacing);
-    if (nodeJson.lineHeight !== void 0) nodeJson.lineHeight = cloneJsonCompatible(nodeJson.lineHeight, nodeJson.lineHeight);
-    if (nodeJson.styledTextSegments !== void 0) nodeJson.styledTextSegments = cloneJsonCompatible(nodeJson.styledTextSegments, nodeJson.styledTextSegments);
     return nodeJson;
   }
   function countExportableSubtreeNodes(node) {
@@ -2324,12 +2314,10 @@
         streamedBytes: transfer.streamedBytes
       });
       const contentParts = [
-        `{"schema":"mastergo2figma.layers.v2","version":2,"pageId":${JSON.stringify(chunk.pageId)},"records":[`
+        `{"schema":"mastergo2figma.layers.v2","version":2,"pageId":${JSON.stringify(chunk.pageId)},"records":[`,
+        chunk.recordJsons.join(","),
+        "]}"
       ];
-      for (let index = 0; index < chunk.recordJsons.length; index++) {
-        contentParts.push(index > 0 ? `,${chunk.recordJsons[index]}` : chunk.recordJsons[index]);
-      }
-      contentParts.push("]}");
       yield streamExportFileToUI(transfer, { path, contentParts });
       pageIndex.layerChunks.push(path);
       chunk.recordJsons = [];
@@ -2487,6 +2475,7 @@
   function streamImageAssetsToTransfer(imageAssetContext, manifest, transfer) {
     return __async(this, null, function* () {
       if (!ENABLE_IMAGE_EXPORT) return;
+      let streamedAssets = 0;
       for (const asset of imageAssetContext.assets) {
         yield loadAndStreamImageAsset(asset, imageAssetContext, transfer);
         manifest.assets[asset.key] = {
@@ -2497,7 +2486,8 @@
         };
         if (asset.bytes && !asset.missing) manifest.stats.imageAssetCount++;
         asset.bytes = null;
-        yield yieldToHost();
+        streamedAssets++;
+        if (streamedAssets % EXPORT_ASSET_YIELD_EVERY_ASSETS === 0) yield yieldToHost();
       }
       manifest.stats.missingImageAssetCount = imageAssetContext.missingImageAssetCount;
     });
