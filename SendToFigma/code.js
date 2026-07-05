@@ -1972,8 +1972,18 @@
       };
     });
   }
+  function drainPendingExportFileAck(transfer) {
+    return __async(this, null, function* () {
+      const pending = transfer.pendingFileAck;
+      if (!pending) return;
+      transfer.pendingFileAck = null;
+      yield pending.promise;
+      state.noteExportFileTransfer({ path: pending.path }, pending.size, pending.totalChunks);
+    });
+  }
   function streamExportFileToUI(transfer, file) {
     return __async(this, null, function* () {
+      yield drainPendingExportFileAck(transfer);
       const index = transfer.fileIndex++;
       const canSendTextAsBytes = file.bytes === void 0 && SEND_TEXT_CHUNKS_AS_BYTES && typeof TextEncoder !== "undefined";
       const kind = file.bytes !== void 0 || canSendTextAsBytes ? "bytes" : "content";
@@ -2076,10 +2086,11 @@
           streamedBytes: transfer.streamedBytes
         });
         const fileAckPromise = waitForExportFileAck(transfer, index, file.path);
+        fileAckPromise.catch(() => {
+        });
         state.postUI(__spreadValues({ type: "export-file-end", transferId: transfer.transferId, index }, getExportTransferMessageMeta(transfer)));
         fileEnded = true;
-        yield fileAckPromise;
-        state.noteExportFileTransfer(file, size, totalChunks);
+        transfer.pendingFileAck = { promise: fileAckPromise, index, path: file.path, size, totalChunks };
         if (index % EXPORT_FILE_YIELD_EVERY_FILES === 0) yield yieldToHost();
       } catch (error) {
         state.logDiagnostic("error", "[MasterGo2Figma] Transfer file failed", {
@@ -2257,7 +2268,8 @@
       postedChunks: 0,
       streamedBytes: 0,
       target,
-      relayUrl: target === EXPORT_TARGET_LOCAL_RELAY && options ? options.relayUrl : void 0
+      relayUrl: target === EXPORT_TARGET_LOCAL_RELAY && options ? options.relayUrl : void 0,
+      pendingFileAck: null
     };
   }
   function summarizeTransfer2(transfer) {
@@ -2554,6 +2566,7 @@
         aggregateManifest.stats.imageAssetCount += manifest.stats.imageAssetCount;
         aggregateManifest.stats.missingImageAssetCount += manifest.stats.missingImageAssetCount;
         const isFinal = pageIndex === pageCount - 1 && rootIndex >= nodes.length;
+        yield drainPendingExportFileAck(transfer);
         const ackPromise = waitForExportTransferAck(transfer);
         completeExportTransfer(transfer, manifest, isFinal, isFinal ? aggregateManifest.stats : manifest.stats);
         releaseExportPackageMemory(manifest, imageAssetContext);
@@ -2624,6 +2637,7 @@
           });
         }));
         state.postProgressUI({ type: "progress", phase: "complete", current: state.processedNodes, total: state.processedNodes, label: "JSON \u5DF2\u751F\u6210\uFF0C\u6B63\u5728\u51C6\u5907\u4E0B\u8F7D..." });
+        yield drainPendingExportFileAck(transfer);
         const ackPromise = waitForExportTransferAck(transfer);
         completeExportTransfer(transfer, manifest);
         yield state.timeExportPhase("ackMs", () => __async(null, null, function* () {

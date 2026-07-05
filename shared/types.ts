@@ -141,6 +141,16 @@ export type ExportTransferState = {
     streamedBytes: number;
     target: ExportTransferTarget;
     relayUrl?: string;
+    // Single-slot pipeline for per-file UI acks: the previous file's ack is
+    // awaited right before the next file starts (or before transfer complete)
+    // instead of stalling serialization for a full round-trip on every file.
+    pendingFileAck?: {
+        promise: Promise<ExportFileAck>;
+        index: number;
+        path: string;
+        size: number;
+        totalChunks: number;
+    } | null;
 };
 
 export type ExportTransferAck = {

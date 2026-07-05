@@ -119,7 +119,20 @@ export function waitForExportFileAck(transfer: ExportTransferState, index: numbe
     });
 }
 
+// Await the previous file's UI ack (single-slot pipeline). Called before the
+// next file starts and before the transfer completes, so at most one file ack
+// is ever outstanding. A failed/timed-out ack throws the same uiTransferError
+// as the old await-per-file flow — just surfaced one file later.
+export async function drainPendingExportFileAck(transfer: ExportTransferState) {
+    const pending = transfer.pendingFileAck;
+    if (!pending) return;
+    transfer.pendingFileAck = null;
+    await pending.promise;
+    state.noteExportFileTransfer({ path: pending.path }, pending.size, pending.totalChunks);
+}
+
 export async function streamExportFileToUI(transfer: ExportTransferState, file: ExportFile) {
+    await drainPendingExportFileAck(transfer);
     const index = transfer.fileIndex++;
     const canSendTextAsBytes = file.bytes === undefined && SEND_TEXT_CHUNKS_AS_BYTES && typeof TextEncoder !== "undefined";
     const kind: ExportTransferFileKind = file.bytes !== undefined || canSendTextAsBytes ? "bytes" : "content";
@@ -235,10 +248,16 @@ export async function streamExportFileToUI(transfer: ExportTransferState, file: 
             streamedBytes: transfer.streamedBytes
         });
         const fileAckPromise = waitForExportFileAck(transfer, index, file.path);
+        // Mark the promise handled so a rejection (timeout / UI failure) that
+        // fires before the next drain never becomes an unhandled rejection;
+        // drainPendingExportFileAck awaits the original promise and rethrows.
+        fileAckPromise.catch(() => {});
         state.postUI({ type: "export-file-end", transferId: transfer.transferId, index, ...getExportTransferMessageMeta(transfer) });
         fileEnded = true;
-        await fileAckPromise;
-        state.noteExportFileTransfer(file, size, totalChunks);
+        // Do not await here: stash the ack and keep serializing the next file.
+        // Only file.path/size are kept (not the file object), so the streamed
+        // bytes stay collectible while the ack is in flight.
+        transfer.pendingFileAck = { promise: fileAckPromise, index, path: file.path, size, totalChunks };
         if (index % EXPORT_FILE_YIELD_EVERY_FILES === 0) await yieldToHost();
     } catch (error) {
         state.logDiagnostic("error", "[MasterGo2Figma] Transfer file failed", {
@@ -464,7 +483,8 @@ export function createExportTransfer(manifest: ExportManifest, filename?: string
         postedChunks: 0,
         streamedBytes: 0,
         target,
-        relayUrl: target === EXPORT_TARGET_LOCAL_RELAY && options ? options.relayUrl : undefined
+        relayUrl: target === EXPORT_TARGET_LOCAL_RELAY && options ? options.relayUrl : undefined,
+        pendingFileAck: null
     };
 }
 
@@ -832,6 +852,8 @@ export async function streamPageRootSegmentsToPackages(
         aggregateManifest.stats.missingImageAssetCount += manifest.stats.missingImageAssetCount;
 
         const isFinal = pageIndex === pageCount - 1 && rootIndex >= nodes.length;
+        // Surface the last file's ack failure before declaring this package complete.
+        await drainPendingExportFileAck(transfer);
         const ackPromise = waitForExportTransferAck(transfer);
         completeExportTransfer(transfer, manifest, isFinal, isFinal ? aggregateManifest.stats : manifest.stats);
         releaseExportPackageMemory(manifest, imageAssetContext);
@@ -908,6 +930,8 @@ export async function streamJsonExportPackage(options: ExportOptions): Promise<E
         });
 
         state.postProgressUI({ type: "progress", phase: "complete", current: state.processedNodes, total: state.processedNodes, label: "JSON 已生成，正在准备下载..." });
+        // Surface the last file's ack failure before declaring the transfer complete.
+        await drainPendingExportFileAck(transfer);
         const ackPromise = waitForExportTransferAck(transfer);
         completeExportTransfer(transfer, manifest);
         await state.timeExportPhase("ackMs", async () => await ackPromise);
