@@ -101,13 +101,18 @@ export async function cleanupImportedContainerShells(root: BaseNode, progress?: 
 
 function collectCleanupNodes(root: BaseNode): BaseNode[] {
     const nodes: BaseNode[] = [];
+    // This DFS never descends into INSTANCE nodes, so a traversed node can only
+    // be "inside an instance" if the root itself is — check that once instead
+    // of walking the ancestor chain for every node (was O(n·depth) bridge reads).
+    const rootInsideInstance = isInsideInstance(root);
     const stack: BaseNode[] = [root];
     while (stack.length > 0) {
         const node = stack.pop() as BaseNode;
         if (!("children" in node)) continue;
-        if (isSceneNode(node) && (node.type === "INSTANCE" || isInsideInstance(node))) continue;
+        if (isSceneNode(node) && (node.type === "INSTANCE" || rootInsideInstance)) continue;
         nodes.push(node);
-        const children = [...(node as any).children] as BaseNode[];
+        // node.children already returns a fresh snapshot array; no spread copy needed.
+        const children = (node as any).children as BaseNode[];
         for (let index = children.length - 1; index >= 0; index--) {
             stack.push(children[index]);
         }
@@ -118,7 +123,9 @@ function collectCleanupNodes(root: BaseNode): BaseNode[] {
 function cleanupImportedContainerShell(root: BaseNode) {
     if (!isSceneNode(root) || !isShellContainer(root)) return;
 
-    const shellChildren = [...(root as any).children] as SceneNode[];
+    // children is a fresh snapshot per access, and we return right after the
+    // single removal below, so iterating it directly is safe.
+    const shellChildren = (root as any).children as SceneNode[];
     for (const child of shellChildren) {
         if (child.type === "RECTANGLE" && isShellPlaceholderNode(child)) {
             clearMaskFlag(child);

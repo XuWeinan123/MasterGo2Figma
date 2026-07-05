@@ -31,6 +31,10 @@ class RestorerState {
     public nativeGroupOffsetByNodeId: { [nodeId: string]: { x: number; y: number } } = {};
     public deferredConnectorRestores: Array<{ node: ConnectorNode; data: any }> = [];
     public deferredLayoutRestores: Array<{ node: SceneNode; layout: any; isGroup: boolean }> = [];
+    // Nodes whose restored layout uses SPACE_BETWEEN on the primary axis,
+    // recorded at deferLayoutRestore time and drained per page — replaces the
+    // full-page tree walk in applyDeferredSingleChildAutoSpaceAlignmentFixes.
+    public singleChildAutoSpaceCandidates: SceneNode[] = [];
     public fontLoadPromises: { [key: string]: Promise<void> } = {};
     public availableFontKeys: { [key: string]: boolean } = {};
     public fallbackConnectorCount = 0;
@@ -50,6 +54,7 @@ class RestorerState {
         this.nativeGroupOffsetByNodeId = {};
         this.deferredConnectorRestores = [];
         this.deferredLayoutRestores = [];
+        this.singleChildAutoSpaceCandidates = [];
         this.fallbackConnectorCount = 0;
         this.booleanFallbackCount = 0;
         this.connectorFallbackLogged = false;

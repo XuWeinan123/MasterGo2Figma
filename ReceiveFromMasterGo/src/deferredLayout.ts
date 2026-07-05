@@ -11,6 +11,9 @@ type PostprocessProgressCallback = (done: number, total: number, label: string) 
 export function deferLayoutRestore(node: any, layout: any, isGroup: boolean) {
     if (!node || !layout || !isSceneNode(node)) return;
     state.deferredLayoutRestores.push({ node, layout, isGroup });
+    if (isAutoSpaceAlongPrimaryAxis(layout)) {
+        state.singleChildAutoSpaceCandidates.push(node);
+    }
     if (state.activeRestoreStats) {
         state.activeRestoreStats.deferredLayoutNodeCount++;
     }
@@ -230,36 +233,28 @@ export function applySingleChildAutoSpaceAlignmentFix(node: any, layout: any) {
     safeSet(node, "primaryAxisAlignItems", "MIN");
 }
 
-export async function applyDeferredSingleChildAutoSpaceAlignmentFixes(root: BaseNode, progress?: PostprocessProgressCallback) {
-    const nodes = collectDescendants(root);
-    const total = Math.max(1, nodes.length);
+// Processes only the SPACE_BETWEEN candidates recorded during this page's
+// restore (deferLayoutRestore) instead of walking the entire restored page
+// tree — the walk cost one children-snapshot per container plus a
+// restoredLayoutByNodeId lookup per node, all through the plugin API bridge.
+// The layout is re-read from restoredLayoutByNodeId at apply time and
+// applySingleChildAutoSpaceAlignmentFix re-checks the SPACE_BETWEEN condition,
+// so removed/overwritten nodes behave exactly as the tree walk did.
+export async function applyDeferredSingleChildAutoSpaceAlignmentFixes(progress?: PostprocessProgressCallback) {
+    const candidates = state.singleChildAutoSpaceCandidates;
+    state.singleChildAutoSpaceCandidates = [];
+    const total = Math.max(1, candidates.length);
     let done = 0;
     let lastYieldAt = Date.now();
 
-    for (let index = nodes.length - 1; index >= 0; index--) {
-        const node = nodes[index];
-        if (isSceneNode(node)) {
+    for (const node of candidates) {
+        if (!isRemovedNode(node) && isSceneNode(node)) {
             const layout = state.restoredLayoutByNodeId[node.id];
             if (layout && hasAutoLayout(node)) applySingleChildAutoSpaceAlignmentFix(node, layout);
         }
         done++;
         lastYieldAt = await maybeYieldPostprocess(done, total, "正在修正自动布局对齐...", lastYieldAt, progress);
     }
-}
-
-function collectDescendants(root: BaseNode): BaseNode[] {
-    const nodes: BaseNode[] = [];
-    const stack: BaseNode[] = [root];
-    while (stack.length > 0) {
-        const node = stack.pop() as BaseNode;
-        nodes.push(node);
-        if (!("children" in node)) continue;
-        const children = [...(node as any).children] as BaseNode[];
-        for (let index = children.length - 1; index >= 0; index--) {
-            stack.push(children[index]);
-        }
-    }
-    return nodes;
 }
 
 async function maybeYieldPostprocess(
@@ -286,9 +281,13 @@ function isAutoSpaceAlongPrimaryAxis(layout: any): boolean {
 export function getRestorableChildCount(node: any): number {
     if (!("children" in node)) return 0;
 
-    return [...node.children].filter((child: BaseNode) => {
-        return !child.name.startsWith(INTERNAL_PROPS_PREFIX) && !child.name.startsWith(SIBLING_PROPS_PREFIX);
-    }).length;
+    // node.children already returns a fresh snapshot array; counting directly
+    // avoids the extra spread copy and intermediate filtered array.
+    let count = 0;
+    for (const child of node.children as BaseNode[]) {
+        if (!child.name.startsWith(INTERNAL_PROPS_PREFIX) && !child.name.startsWith(SIBLING_PROPS_PREFIX)) count++;
+    }
+    return count;
 }
 
 export function hasAutoLayout(node: any): boolean {

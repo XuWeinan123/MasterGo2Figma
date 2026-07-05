@@ -391,7 +391,7 @@ async function restoreImportPageData(importPage: ImportPageIndex, layers: { [id:
   });
   addImportTiming(session, "postprocess.cleanupShellsMs", Date.now() - cleanupStartedAt);
   const autoSpaceStartedAt = Date.now();
-  await applyDeferredSingleChildAutoSpaceAlignmentFixes(restoredPage, (done, total, label) => {
+  await applyDeferredSingleChildAutoSpaceAlignmentFixes((done, total, label) => {
     return reportPagePostprocessProgress(session, pageIndex, pageName, postprocessStart, pageNodeCount, 2, done, total, label);
   });
   addImportTiming(session, "postprocess.singleChildAutoSpaceMs", Date.now() - autoSpaceStartedAt);

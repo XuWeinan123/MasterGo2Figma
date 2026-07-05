@@ -60,6 +60,10 @@
       this.nativeGroupOffsetByNodeId = {};
       this.deferredConnectorRestores = [];
       this.deferredLayoutRestores = [];
+      // Nodes whose restored layout uses SPACE_BETWEEN on the primary axis,
+      // recorded at deferLayoutRestore time and drained per page — replaces the
+      // full-page tree walk in applyDeferredSingleChildAutoSpaceAlignmentFixes.
+      this.singleChildAutoSpaceCandidates = [];
       this.fontLoadPromises = {};
       this.availableFontKeys = {};
       this.fallbackConnectorCount = 0;
@@ -79,6 +83,7 @@
       this.nativeGroupOffsetByNodeId = {};
       this.deferredConnectorRestores = [];
       this.deferredLayoutRestores = [];
+      this.singleChildAutoSpaceCandidates = [];
       this.fallbackConnectorCount = 0;
       this.booleanFallbackCount = 0;
       this.connectorFallbackLogged = false;
@@ -877,6 +882,9 @@ ${style}`;
   function deferLayoutRestore(node, layout, isGroup) {
     if (!node || !layout || !isSceneNode(node)) return;
     state.deferredLayoutRestores.push({ node, layout, isGroup });
+    if (isAutoSpaceAlongPrimaryAxis(layout)) {
+      state.singleChildAutoSpaceCandidates.push(node);
+    }
     if (state.activeRestoreStats) {
       state.activeRestoreStats.deferredLayoutNodeCount++;
     }
@@ -1062,15 +1070,15 @@ ${style}`;
     if (getRestorableChildCount(node) !== 1) return;
     safeSet(node, "primaryAxisAlignItems", "MIN");
   }
-  function applyDeferredSingleChildAutoSpaceAlignmentFixes(root, progress) {
+  function applyDeferredSingleChildAutoSpaceAlignmentFixes(progress) {
     return __async(this, null, function* () {
-      const nodes = collectDescendants(root);
-      const total = Math.max(1, nodes.length);
+      const candidates = state.singleChildAutoSpaceCandidates;
+      state.singleChildAutoSpaceCandidates = [];
+      const total = Math.max(1, candidates.length);
       let done = 0;
       let lastYieldAt = Date.now();
-      for (let index = nodes.length - 1; index >= 0; index--) {
-        const node = nodes[index];
-        if (isSceneNode(node)) {
+      for (const node of candidates) {
+        if (!isRemovedNode(node) && isSceneNode(node)) {
           const layout = state.restoredLayoutByNodeId[node.id];
           if (layout && hasAutoLayout(node)) applySingleChildAutoSpaceAlignmentFix(node, layout);
         }
@@ -1078,20 +1086,6 @@ ${style}`;
         lastYieldAt = yield maybeYieldPostprocess(done, total, "\u6B63\u5728\u4FEE\u6B63\u81EA\u52A8\u5E03\u5C40\u5BF9\u9F50...", lastYieldAt, progress);
       }
     });
-  }
-  function collectDescendants(root) {
-    const nodes = [];
-    const stack = [root];
-    while (stack.length > 0) {
-      const node = stack.pop();
-      nodes.push(node);
-      if (!("children" in node)) continue;
-      const children = [...node.children];
-      for (let index = children.length - 1; index >= 0; index--) {
-        stack.push(children[index]);
-      }
-    }
-    return nodes;
   }
   function maybeYieldPostprocess(done, total, label, lastYieldAt, progress) {
     return __async(this, null, function* () {
@@ -1109,9 +1103,11 @@ ${style}`;
   }
   function getRestorableChildCount(node) {
     if (!("children" in node)) return 0;
-    return [...node.children].filter((child) => {
-      return !child.name.startsWith(INTERNAL_PROPS_PREFIX) && !child.name.startsWith(SIBLING_PROPS_PREFIX);
-    }).length;
+    let count = 0;
+    for (const child of node.children) {
+      if (!child.name.startsWith(INTERNAL_PROPS_PREFIX) && !child.name.startsWith(SIBLING_PROPS_PREFIX)) count++;
+    }
+    return count;
   }
   function hasAutoLayout(node) {
     return "layoutMode" in node && node.layoutMode !== "NONE";
@@ -1342,13 +1338,14 @@ ${style}`;
   }
   function collectCleanupNodes(root) {
     const nodes = [];
+    const rootInsideInstance = isInsideInstance(root);
     const stack = [root];
     while (stack.length > 0) {
       const node = stack.pop();
       if (!("children" in node)) continue;
-      if (isSceneNode(node) && (node.type === "INSTANCE" || isInsideInstance(node))) continue;
+      if (isSceneNode(node) && (node.type === "INSTANCE" || rootInsideInstance)) continue;
       nodes.push(node);
-      const children = [...node.children];
+      const children = node.children;
       for (let index = children.length - 1; index >= 0; index--) {
         stack.push(children[index]);
       }
@@ -1357,7 +1354,7 @@ ${style}`;
   }
   function cleanupImportedContainerShell(root) {
     if (!isSceneNode(root) || !isShellContainer(root)) return;
-    const shellChildren = [...root.children];
+    const shellChildren = root.children;
     for (const child of shellChildren) {
       if (child.type === "RECTANGLE" && isShellPlaceholderNode(child)) {
         clearMaskFlag(child);
@@ -2677,7 +2674,7 @@ ${style}`;
       });
       addImportTiming(session, "postprocess.cleanupShellsMs", Date.now() - cleanupStartedAt);
       const autoSpaceStartedAt = Date.now();
-      yield applyDeferredSingleChildAutoSpaceAlignmentFixes(restoredPage, (done, total, label) => {
+      yield applyDeferredSingleChildAutoSpaceAlignmentFixes((done, total, label) => {
         return reportPagePostprocessProgress(session, pageIndex, pageName, postprocessStart, pageNodeCount, 2, done, total, label);
       });
       addImportTiming(session, "postprocess.singleChildAutoSpaceMs", Date.now() - autoSpaceStartedAt);
