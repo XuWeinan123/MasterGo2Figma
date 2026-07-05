@@ -1332,39 +1332,41 @@
       return [...pageList.querySelectorAll("input:checked")].map(input => input.value);
     }
 
-    function prefixImageRefs(obj, prefix) {
+    // Single recursive pass over a record's props doing what used to be three
+    // separate full-tree walks (prefixImageRefs + prefixConnectorEndpointNodeIds
+    // + collectImageRefs). The three mutations touch independent fields, so
+    // applying them in one visit per node yields identical results; imageRefs
+    // are collected after prefixing, matching the previous walk order.
+    function prepareImportProps(obj, prefix, assetKeys) {
       if (!obj || typeof obj !== "object") return;
       if (Array.isArray(obj)) {
         for (let i = 0; i < obj.length; i++) {
-          prefixImageRefs(obj[i], prefix);
+          prepareImportProps(obj[i], prefix, assetKeys);
         }
-      } else {
-        if (obj.type === "IMAGE" && typeof obj.imageRef === "string") {
-          obj.imageRef = prefix + obj.imageRef;
-        }
-        for (const key in obj) {
-          if (Object.prototype.hasOwnProperty.call(obj, key)) {
-            prefixImageRefs(obj[key], prefix);
-          }
+        return;
+      }
+      if (obj.type === "IMAGE" && typeof obj.imageRef === "string") {
+        obj.imageRef = prefix + obj.imageRef;
+        assetKeys[obj.imageRef] = true;
+      }
+      if (typeof obj.endpointNodeId === "string") {
+        obj.endpointNodeId = prefix + obj.endpointNodeId;
+      }
+      for (const key in obj) {
+        if (Object.prototype.hasOwnProperty.call(obj, key)) {
+          prepareImportProps(obj[key], prefix, assetKeys);
         }
       }
     }
 
-    function prefixConnectorEndpointNodeIds(obj, prefix) {
-      if (!obj || typeof obj !== "object") return;
-      if (Array.isArray(obj)) {
-        for (let i = 0; i < obj.length; i++) {
-          prefixConnectorEndpointNodeIds(obj[i], prefix);
-        }
-      } else {
-        if (typeof obj.endpointNodeId === "string") {
-          obj.endpointNodeId = prefix + obj.endpointNodeId;
-        }
-        for (const key in obj) {
-          if (Object.prototype.hasOwnProperty.call(obj, key)) {
-            prefixConnectorEndpointNodeIds(obj[key], prefix);
-          }
-        }
+    function prepareRecordForImport(record, prefix, assetKeys) {
+      record.id = `${prefix}${record.id}`;
+      if (record.parentId) record.parentId = `${prefix}${record.parentId}`;
+      if (Array.isArray(record.childIds)) {
+        record.childIds = record.childIds.map(cid => `${prefix}${cid}`);
+      }
+      if (record.props) {
+        prepareImportProps(record.props, prefix, assetKeys);
       }
     }
 
@@ -1479,7 +1481,6 @@
     }
 
     function buildPageImportData(page) {
-      const layers = {};
       const assetKeys = {};
       if (!page.pageFile) throw new Error(`页面缺少索引文件：${page.name || page.id}`);
       const pageBytes = getPackageEntry(page.pageFile);
@@ -1499,7 +1500,12 @@
         pageIndex.rootNodeIds = pageIndex.rootNodeIds.map(rid => `${prefix}${rid}`);
       }
 
+      // Records are parsed fresh from the zip bytes on every restore run, so
+      // each record object has a single owner here and is prefixed in place —
+      // the previous defensive deep clone (cloneJson) doubled memory and cost
+      // a full stringify+parse of the whole page for nothing.
       const rawRecordsById = {};
+      const sourceChunkRecords = [];
       for (let chunkIndex = 0; chunkIndex < pageIndex.layerChunks.length; chunkIndex++) {
         const chunkPath = pageIndex.layerChunks[chunkIndex];
         const fullChunkPath = `zip_${zipIndex}/${zipPackageRoot}${chunkPath}`;
@@ -1510,6 +1516,7 @@
         if (chunk.schema !== "mastergo2figma.layers.v2" || !Array.isArray(chunk.records)) {
           throw new Error(`图层分块格式不正确：${chunkPath}`);
         }
+        sourceChunkRecords.push(chunk.records);
         for (const record of chunk.records) {
           if (record && record.id) rawRecordsById[record.id] = record;
         }
@@ -1517,27 +1524,34 @@
       }
 
       const reachableIds = collectReachableLayerIds(pageIndex.rootNodeIds, rawRecordsById, prefix);
+      const reachableCount = reachableIds.length;
+      const reachableSet = {};
+      for (const id of reachableIds) reachableSet[id] = true;
+
+      // Emit message chunks following the source layer-chunk grouping: the
+      // export side already bounds each chunk to <=16 records / ~64 KiB, so no
+      // per-record JSON.stringify size probing is needed. Only the winning
+      // occurrence of a duplicated id (last one in rawRecordsById) is emitted,
+      // matching the previous by-id dedup. Grouping/order of import-page-chunk
+      // messages is not part of the contract — the plugin accumulates records
+      // into a dict and restores from rootNodeIds/childIds.
+      const layerChunks = [];
+      let organizedCount = 0;
       let lastOrganizedCount = 0;
-      for (let index = 0; index < reachableIds.length; index++) {
-        const rawId = reachableIds[index];
-        const record = rawRecordsById[rawId];
-        const nextRecord = cloneJson(record);
-        nextRecord.id = `${prefix}${nextRecord.id}`;
-        if (nextRecord.parentId) nextRecord.parentId = `${prefix}${nextRecord.parentId}`;
-        if (Array.isArray(nextRecord.childIds)) {
-          nextRecord.childIds = nextRecord.childIds.map(cid => `${prefix}${cid}`);
+      for (const records of sourceChunkRecords) {
+        const emitted = [];
+        for (const record of records) {
+          if (!record || !record.id) continue;
+          if (!reachableSet[record.id] || rawRecordsById[record.id] !== record) continue;
+          prepareRecordForImport(record, prefix, assetKeys);
+          emitted.push(record);
+          organizedCount++;
+          if (organizedCount % 100 === 0 || organizedCount === reachableCount) {
+            advancePrepareProgress(organizedCount - lastOrganizedCount, `正在整理图层 ${organizedCount}/${reachableCount}：${page.name || page.id}`);
+            lastOrganizedCount = organizedCount;
+          }
         }
-        if (nextRecord.props) {
-          prefixImageRefs(nextRecord.props, prefix);
-          prefixConnectorEndpointNodeIds(nextRecord.props, prefix);
-          collectImageRefs(nextRecord.props, assetKeys);
-        }
-        layers[nextRecord.id] = nextRecord;
-        if ((index + 1) % 100 === 0 || index + 1 === reachableIds.length) {
-          const organizedCount = index + 1;
-          advancePrepareProgress(organizedCount - lastOrganizedCount, `正在整理图层 ${organizedCount}/${reachableIds.length}：${page.name || page.id}`);
-          lastOrganizedCount = organizedCount;
-        }
+        if (emitted.length > 0) layerChunks.push(emitted);
       }
 
       if (Array.isArray(pageIndex.layerChunks)) {
@@ -1546,31 +1560,9 @@
 
       return {
         page: pageIndex,
-        layerChunks: chunkLayerRecords(layers),
+        layerChunks,
         assetKeys
       };
-    }
-
-    function chunkLayerRecords(layers) {
-      const chunks = [];
-      let records = [];
-      let bytes = 0;
-      function flush() {
-        if (records.length === 0) return;
-        chunks.push(records);
-        records = [];
-        bytes = 0;
-      }
-      for (const id in layers) {
-        const record = layers[id];
-        const recordBytes = JSON.stringify(record).length;
-        if (records.length > 0 && (records.length >= 16 || bytes + recordBytes > 64 * 1024)) flush();
-        records.push(record);
-        bytes += recordBytes + (records.length > 1 ? 1 : 0);
-        if (records.length >= 16 || bytes >= 64 * 1024) flush();
-      }
-      flush();
-      return chunks;
     }
 
     function collectReachableLayerIds(rootNodeIds, recordsById, prefix) {
@@ -1596,24 +1588,6 @@
 
     function stripPrefix(value, prefix) {
       return typeof value === "string" && value.indexOf(prefix) === 0 ? value.slice(prefix.length) : value;
-    }
-
-    function cloneJson(value) {
-      return JSON.parse(JSON.stringify(value));
-    }
-
-    function collectImageRefs(obj, assetKeys) {
-      if (!obj || typeof obj !== "object") return;
-      if (Array.isArray(obj)) {
-        for (let i = 0; i < obj.length; i++) collectImageRefs(obj[i], assetKeys);
-        return;
-      }
-      if (obj.type === "IMAGE" && typeof obj.imageRef === "string") {
-        assetKeys[obj.imageRef] = true;
-      }
-      for (const key in obj) {
-        if (Object.prototype.hasOwnProperty.call(obj, key)) collectImageRefs(obj[key], assetKeys);
-      }
     }
 
     function getRequiredAssetTransfers(sourceManifest, assetKeys, sentAssetPaths) {
