@@ -1370,6 +1370,27 @@
       }
     }
 
+    // Cheap pre-flight over all selected pages (page index files exist, parse
+    // and pass schema checks, every layer-chunk entry exists) so a broken
+    // package still fails BEFORE import-session-start — same failure timing as
+    // the old prepare-everything-first flow, without holding all pages' data.
+    function verifyPageEntriesExist(selectedPages) {
+      for (const page of selectedPages) {
+        if (!page.pageFile) throw new Error(`页面缺少索引文件：${page.name || page.id}`);
+        const pageBytes = getPackageEntry(page.pageFile);
+        if (!pageBytes) throw new Error(`缺少页面索引文件：${page.pageFile}`);
+        const pageIndex = JSON.parse(decodeUtf8(pageBytes));
+        if (pageIndex.schema !== "mastergo2figma.page.v2" || pageIndex.version !== 2) {
+          throw new Error(`页面索引格式不正确：${page.pageFile}`);
+        }
+        if (!Array.isArray(pageIndex.layerChunks)) throw new Error(`页面缺少图层分块索引：${page.pageFile}`);
+        for (const chunkPath of pageIndex.layerChunks) {
+          const fullChunkPath = `zip_${page.zipIndex}/${page.zipPackageRoot}${chunkPath}`;
+          if (!getPackageEntry(fullChunkPath)) throw new Error(`缺少图层分块文件：${fullChunkPath}`);
+        }
+      }
+    }
+
     async function streamImportPayload(sourceManifest, selectedPages) {
       const transferId = `import_${Date.now()}_${++importTransferSeq}`;
       activeImportClientTimings = cloneImportClientTimings(pendingImportClientTimings);
@@ -1394,26 +1415,11 @@
           layerCount: totalNodes
         }
       };
-      const sentAssetPaths = {};
-      const preparedPages = [];
 
-      const prepareStartedAt = Date.now();
-      for (let pageIndex = 0; pageIndex < selectedPages.length; pageIndex++) {
-        const page = selectedPages[pageIndex];
-        setPrepareProgress(`正在准备页面：${page.name || page.id}`);
-        const pagePrepareStartedAt = Date.now();
-        const pageData = buildPageImportData(page);
-        addClientTiming("ui.prepare.pageDataMs", Date.now() - pagePrepareStartedAt);
-        const assetTransfers = getRequiredAssetTransfers(sourceManifest, pageData.assetKeys, sentAssetPaths);
-        importAssetBytesTotal += getAssetTransferBytes(assetTransfers);
-        importPageRecordsTotal += getLayerChunkRecordCount(pageData.layerChunks);
-        preparedPages.push({ pageIndex, page, pageData, assetTransfers });
-      }
-      addClientTiming("ui.prepare.totalMs", Date.now() - prepareStartedAt);
+      setPrepareProgress("正在校验导入包完整性...");
+      verifyPageEntriesExist(selectedPages);
       setClientTimingCount("ui.prepare.selectedPages", selectedPages.length);
       setClientTimingCount("ui.prepare.selectedLayers", totalNodes);
-      importPrepareUnitsDone = importPrepareUnitsTotal;
-      setPrepareProgress("图层数据整理完成");
 
       const sessionStartStartedAt = Date.now();
       await sendImportRequest({
@@ -1427,14 +1433,27 @@
       addClientTiming("ui.session.startAckMs", Date.now() - sessionStartStartedAt);
       setStatus("已建立导入会话", summary.textContent, false);
 
-      if (importAssetBytesTotal > 0) {
-        setStageProgress("assets", importAssetBytesDone, importAssetBytesTotal, "正在发送图片资源...");
-      } else {
-        setStageProgress("assets", 1, 1, "没有需要发送的图片资源");
-      }
+      // Pages are prepared lazily, one at a time, right before they are sent:
+      // the UI's memory peak drops from "records of ALL selected pages at
+      // once" to a single page. The on-the-wire message order is unchanged
+      // (session-start; then per page: assets → page-start → chunks →
+      // page-end). Only progress-label pacing differs, and the progress bar
+      // is monotonic by construction (setDisplayedProgress clamps).
+      const sentAssetPaths = {};
+      for (let pageIndex = 0; pageIndex < selectedPages.length; pageIndex++) {
+        const page = selectedPages[pageIndex];
+        setPrepareProgress(`正在准备页面：${page.name || page.id}`);
+        const pagePrepareStartedAt = Date.now();
+        const pageData = buildPageImportData(page);
+        addClientTiming("ui.prepare.pageDataMs", Date.now() - pagePrepareStartedAt);
+        addClientTiming("ui.prepare.totalMs", Date.now() - pagePrepareStartedAt);
+        const assetTransfers = getRequiredAssetTransfers(sourceManifest, pageData.assetKeys, sentAssetPaths);
+        importAssetBytesTotal += getAssetTransferBytes(assetTransfers);
+        importPageRecordsTotal += getLayerChunkRecordCount(pageData.layerChunks);
 
-      for (const prepared of preparedPages) {
-        const { pageIndex, pageData, assetTransfers } = prepared;
+        if (assetTransfers.length > 0) {
+          setStageProgress("assets", importAssetBytesDone, importAssetBytesTotal, "正在发送图片资源...");
+        }
         for (const asset of assetTransfers) {
           await streamImportAsset(transferId, asset);
         }
