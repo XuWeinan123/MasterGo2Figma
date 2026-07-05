@@ -10,8 +10,13 @@
 /** Byte size of each binary chunk posted to the UI (images, byte-encoded text). 64 KiB trades postMessage round-trips against per-message memory. */
 export const EXPORT_TRANSFER_CHUNK_SIZE = 64 * 1024;
 
-/** Max characters per chunk when text is sent as a string instead of bytes. 4 KiB keeps each postMessage small. */
-export const EXPORT_TEXT_CHUNK_CHAR_LIMIT = 4 * 1024;
+/**
+ * Max characters per text chunk (layer JSON, manifest). UTF-8 encodes CJK at up
+ * to 3 bytes/char, so 16K chars stays within ~48 KiB per message — the same
+ * envelope as the proven 64 KiB binary chunks. Larger chunks mean 4-12x fewer
+ * postMessage bridge round-trips (and relay-mode HTTP POSTs) per export.
+ */
+export const EXPORT_TEXT_CHUNK_CHAR_LIMIT = 16 * 1024;
 
 /** Yield to the host event loop after this many posted chunks so the plugin UI stays responsive during big transfers. */
 export const EXPORT_TRANSFER_YIELD_EVERY_CHUNKS = 32;
