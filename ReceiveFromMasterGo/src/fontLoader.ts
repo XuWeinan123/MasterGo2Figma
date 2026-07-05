@@ -4,6 +4,17 @@ export function getFontKey(family: string, style: string): string {
     return `${family}\n${style}`;
 }
 
+// figma.listAvailableFontsAsync() returns thousands of family×style entries.
+// resolveAvailableFontName() falls back to a full scan whenever the requested
+// font is not installed — which is the common case for MasterGo imports (CJK
+// fonts) and used to happen once per text node. Both caches below are derived
+// purely from state.documentFonts, and rebuildAvailableFontIndex() is the only
+// writer of the font index, so they are rebuilt/invalidated together and a
+// cached result is always identical to a fresh scan.
+type NormalizedFontEntry = { fontName: FontName; family: string; style: string };
+let normalizedFontEntries: NormalizedFontEntry[] = [];
+let fontResolutionCache: { [requestedKey: string]: FontName | null } = {};
+
 export async function ensureAvailableFontsLoaded(): Promise<void> {
     if (state.documentFonts.length === 0) {
         if (state.activeRestoreStats) {
@@ -29,8 +40,16 @@ export async function refreshAvailableFonts(): Promise<void> {
 
 export function rebuildAvailableFontIndex(): void {
     state.availableFontKeys = {};
+    normalizedFontEntries = [];
+    fontResolutionCache = {};
     for (const font of state.documentFonts) {
-        state.availableFontKeys[getFontKey(font.fontName.family, font.fontName.style)] = true;
+        const fontName = font.fontName;
+        state.availableFontKeys[getFontKey(fontName.family, fontName.style)] = true;
+        normalizedFontEntries.push({
+            fontName,
+            family: normalizeFontFamilyForMatch(fontName.family),
+            style: normalizeFontStyleForMatch(fontName.style)
+        });
     }
 }
 
@@ -60,43 +79,60 @@ export async function loadFontCached(fontName: FontName): Promise<void> {
 }
 
 export function resolveAvailableFontName(requested: FontName): FontName | null {
-    if (state.availableFontKeys[getFontKey(requested.family, requested.style)]) {
+    const requestedKey = getFontKey(requested.family, requested.style);
+    if (state.availableFontKeys[requestedKey]) {
         return requested;
     }
 
+    const cached = fontResolutionCache[requestedKey];
+    if (cached !== undefined) return cached;
+
+    const requestedFamily = normalizeFontFamilyForMatch(requested.family);
+    const requestedStyle = normalizeFontStyleForMatch(requested.style);
     let bestMatch: { fontName: FontName; score: number } | null = null;
-    for (const font of state.documentFonts) {
-        const fontName = font.fontName;
-        const familyScore = getFontFamilyMatchScore(requested.family, fontName.family);
+    for (const entry of normalizedFontEntries) {
+        const familyScore = getNormalizedFamilyMatchScore(requestedFamily, entry.family);
         if (familyScore <= 0) continue;
 
-        const styleScore = getFontStyleMatchScore(requested.style, fontName.style);
+        const styleScore = getNormalizedStyleMatchScore(requestedStyle, entry.style);
         if (styleScore <= 0) continue;
 
         const score = familyScore + styleScore;
         if (!bestMatch || score > bestMatch.score) {
-            bestMatch = { fontName, score };
+            bestMatch = { fontName: entry.fontName, score };
         }
     }
 
-    return bestMatch ? bestMatch.fontName : null;
+    const result = bestMatch ? bestMatch.fontName : null;
+    fontResolutionCache[requestedKey] = result;
+    return result;
 }
 
-export function getFontFamilyMatchScore(requestedFamily: string, availableFamily: string): number {
-    const requested = normalizeFontFamilyForMatch(requestedFamily);
-    const available = normalizeFontFamilyForMatch(availableFamily);
+function getNormalizedFamilyMatchScore(requested: string, available: string): number {
     if (!requested || !available) return 0;
     if (requested === available) return 100;
     if (available.indexOf(requested) === 0 || requested.indexOf(available) === 0) return 80;
     return 0;
 }
 
-export function getFontStyleMatchScore(requestedStyle: string, availableStyle: string): number {
-    const requested = normalizeFontStyleForMatch(requestedStyle);
-    const available = normalizeFontStyleForMatch(availableStyle);
+function getNormalizedStyleMatchScore(requested: string, available: string): number {
     if (!requested || !available) return 0;
     if (requested === available) return 50;
     return 0;
+}
+
+export function getFontFamilyMatchScore(requestedFamily: string, availableFamily: string): number {
+    return getNormalizedFamilyMatchScore(
+        normalizeFontFamilyForMatch(requestedFamily),
+        normalizeFontFamilyForMatch(availableFamily)
+    );
+}
+
+export function getFontStyleMatchScore(requestedStyle: string, availableStyle: string): number {
+    return getNormalizedStyleMatchScore(
+        normalizeFontStyleForMatch(requestedStyle),
+        normalizeFontStyleForMatch(availableStyle)
+    );
 }
 
 export function normalizeFontFamilyForMatch(value: string): string {
@@ -106,38 +142,38 @@ export function normalizeFontFamilyForMatch(value: string): string {
         .replace(/[^a-z0-9]/g, "");
 }
 
+const FONT_STYLE_ALIASES: { [style: string]: string } = {
+    normal: "regular",
+    book: "regular",
+    roman: "regular",
+    regular: "regular",
+    400: "regular",
+    medium: "medium",
+    500: "medium",
+    semibold: "semibold",
+    demibold: "semibold",
+    600: "semibold",
+    bold: "bold",
+    700: "bold",
+    heavy: "heavy",
+    black: "black",
+    900: "black",
+    light: "light",
+    300: "light",
+    extralight: "extralight",
+    ultralight: "extralight",
+    200: "extralight",
+    thin: "thin",
+    100: "thin"
+};
+
 export function normalizeFontStyleForMatch(value: string): string {
     const normalized = String(value || "")
         .toLowerCase()
         .replace(/[\s_-]+/g, "")
         .replace(/[^a-z0-9]/g, "");
 
-    const aliases: { [style: string]: string } = {
-        normal: "regular",
-        book: "regular",
-        roman: "regular",
-        regular: "regular",
-        400: "regular",
-        medium: "medium",
-        500: "medium",
-        semibold: "semibold",
-        demibold: "semibold",
-        600: "semibold",
-        bold: "bold",
-        700: "bold",
-        heavy: "heavy",
-        black: "black",
-        900: "black",
-        light: "light",
-        300: "light",
-        extralight: "extralight",
-        ultralight: "extralight",
-        200: "extralight",
-        thin: "thin",
-        100: "thin"
-    };
-
-    return aliases[normalized] || normalized;
+    return FONT_STYLE_ALIASES[normalized] || normalized;
 }
 
 export function getNearbyAvailableFontsForLog(requested: FontName): FontName[] {

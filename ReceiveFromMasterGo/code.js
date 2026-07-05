@@ -249,6 +249,8 @@
     return `${family}
 ${style}`;
   }
+  var normalizedFontEntries = [];
+  var fontResolutionCache = {};
   function ensureAvailableFontsLoaded() {
     return __async(this, null, function* () {
       if (state.documentFonts.length === 0) {
@@ -275,8 +277,16 @@ ${style}`;
   }
   function rebuildAvailableFontIndex() {
     state.availableFontKeys = {};
+    normalizedFontEntries = [];
+    fontResolutionCache = {};
     for (const font of state.documentFonts) {
-      state.availableFontKeys[getFontKey(font.fontName.family, font.fontName.style)] = true;
+      const fontName = font.fontName;
+      state.availableFontKeys[getFontKey(fontName.family, fontName.style)] = true;
+      normalizedFontEntries.push({
+        fontName,
+        family: normalizeFontFamilyForMatch(fontName.family),
+        style: normalizeFontStyleForMatch(fontName.style)
+      });
     }
   }
   function loadFontCached(fontName) {
@@ -305,34 +315,36 @@ ${style}`;
     });
   }
   function resolveAvailableFontName(requested) {
-    if (state.availableFontKeys[getFontKey(requested.family, requested.style)]) {
+    const requestedKey = getFontKey(requested.family, requested.style);
+    if (state.availableFontKeys[requestedKey]) {
       return requested;
     }
+    const cached = fontResolutionCache[requestedKey];
+    if (cached !== void 0) return cached;
+    const requestedFamily = normalizeFontFamilyForMatch(requested.family);
+    const requestedStyle = normalizeFontStyleForMatch(requested.style);
     let bestMatch = null;
-    for (const font of state.documentFonts) {
-      const fontName = font.fontName;
-      const familyScore = getFontFamilyMatchScore(requested.family, fontName.family);
+    for (const entry of normalizedFontEntries) {
+      const familyScore = getNormalizedFamilyMatchScore(requestedFamily, entry.family);
       if (familyScore <= 0) continue;
-      const styleScore = getFontStyleMatchScore(requested.style, fontName.style);
+      const styleScore = getNormalizedStyleMatchScore(requestedStyle, entry.style);
       if (styleScore <= 0) continue;
       const score = familyScore + styleScore;
       if (!bestMatch || score > bestMatch.score) {
-        bestMatch = { fontName, score };
+        bestMatch = { fontName: entry.fontName, score };
       }
     }
-    return bestMatch ? bestMatch.fontName : null;
+    const result = bestMatch ? bestMatch.fontName : null;
+    fontResolutionCache[requestedKey] = result;
+    return result;
   }
-  function getFontFamilyMatchScore(requestedFamily, availableFamily) {
-    const requested = normalizeFontFamilyForMatch(requestedFamily);
-    const available = normalizeFontFamilyForMatch(availableFamily);
+  function getNormalizedFamilyMatchScore(requested, available) {
     if (!requested || !available) return 0;
     if (requested === available) return 100;
     if (available.indexOf(requested) === 0 || requested.indexOf(available) === 0) return 80;
     return 0;
   }
-  function getFontStyleMatchScore(requestedStyle, availableStyle) {
-    const requested = normalizeFontStyleForMatch(requestedStyle);
-    const available = normalizeFontStyleForMatch(availableStyle);
+  function getNormalizedStyleMatchScore(requested, available) {
     if (!requested || !available) return 0;
     if (requested === available) return 50;
     return 0;
@@ -340,33 +352,33 @@ ${style}`;
   function normalizeFontFamilyForMatch(value) {
     return String(value || "").toLowerCase().replace(/[\s_-]+/g, "").replace(/[^a-z0-9]/g, "");
   }
+  var FONT_STYLE_ALIASES = {
+    normal: "regular",
+    book: "regular",
+    roman: "regular",
+    regular: "regular",
+    400: "regular",
+    medium: "medium",
+    500: "medium",
+    semibold: "semibold",
+    demibold: "semibold",
+    600: "semibold",
+    bold: "bold",
+    700: "bold",
+    heavy: "heavy",
+    black: "black",
+    900: "black",
+    light: "light",
+    300: "light",
+    extralight: "extralight",
+    ultralight: "extralight",
+    200: "extralight",
+    thin: "thin",
+    100: "thin"
+  };
   function normalizeFontStyleForMatch(value) {
     const normalized = String(value || "").toLowerCase().replace(/[\s_-]+/g, "").replace(/[^a-z0-9]/g, "");
-    const aliases = {
-      normal: "regular",
-      book: "regular",
-      roman: "regular",
-      regular: "regular",
-      400: "regular",
-      medium: "medium",
-      500: "medium",
-      semibold: "semibold",
-      demibold: "semibold",
-      600: "semibold",
-      bold: "bold",
-      700: "bold",
-      heavy: "heavy",
-      black: "black",
-      900: "black",
-      light: "light",
-      300: "light",
-      extralight: "extralight",
-      ultralight: "extralight",
-      200: "extralight",
-      thin: "thin",
-      100: "thin"
-    };
-    return aliases[normalized] || normalized;
+    return FONT_STYLE_ALIASES[normalized] || normalized;
   }
   function getNearbyAvailableFontsForLog(requested) {
     const requestedFamily = normalizeFontFamilyForMatch(requested.family);
