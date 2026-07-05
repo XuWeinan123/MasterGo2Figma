@@ -72,18 +72,9 @@ export function normalizeVectorNetworkForFigma(vectorNetwork: any): any {
         });
     }
 
-    if (Array.isArray(vectorNetwork.segments)) {
-        result.segments = vectorNetwork.segments.map((segment: any) => {
-            if (!segment || typeof segment !== "object") return segment;
-            const next: any = {};
-            for (const key in segment) {
-                if (Object.prototype.hasOwnProperty.call(segment, key)) {
-                    next[key] = segment[key];
-                }
-            }
-            return next;
-        });
-    }
+    // segments need no normalization — the previous per-segment shallow copy
+    // changed nothing (input is plain parsed JSON, and the vectorNetwork setter
+    // copies internally), so the reference from the top-level copy is kept.
 
     if (Array.isArray(vectorNetwork.regions)) {
         result.regions = vectorNetwork.regions.map((region: any) => {

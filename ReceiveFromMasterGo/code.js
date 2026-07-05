@@ -1229,18 +1229,6 @@ ${style}`;
         return next;
       });
     }
-    if (Array.isArray(vectorNetwork.segments)) {
-      result.segments = vectorNetwork.segments.map((segment) => {
-        if (!segment || typeof segment !== "object") return segment;
-        const next = {};
-        for (const key in segment) {
-          if (Object.prototype.hasOwnProperty.call(segment, key)) {
-            next[key] = segment[key];
-          }
-        }
-        return next;
-      });
-    }
     if (Array.isArray(vectorNetwork.regions)) {
       result.regions = vectorNetwork.regions.map((region) => {
         if (!region || typeof region !== "object") return region;
