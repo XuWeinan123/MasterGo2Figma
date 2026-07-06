@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
@@ -112,7 +113,25 @@ function loadPackageRecords(entries) {
       }
     }
   }
-  return { manifest, records: Array.from(recordsById.values()) };
+  return { manifest, records: Array.from(recordsById.values()), resolveImageRef: makeImageRefResolver(manifest, entries) };
+}
+
+// imageRef naming is exporter-specific (SendToFigma numbers assets `image-001`,
+// the native decoder keeps MasterGo's content-hash filenames). Canonicalize an
+// imageRef to the SHA-1 of the referenced asset bytes so paints compare by
+// image CONTENT, not by name.
+function makeImageRefResolver(manifest, entries) {
+  const assets = (manifest && manifest.assets) || {};
+  const cache = new Map();
+  return function resolveImageRef(ref) {
+    if (!ref || typeof ref !== "string") return ref;
+    if (cache.has(ref)) return cache.get(ref);
+    const asset = assets[ref] || assets[ref.replace(/\.[^.]+$/, "")] || assets[ref + ".png"];
+    const bytes = asset && asset.path ? entries[asset.path] : null;
+    const canonical = bytes ? "sha1:" + crypto.createHash("sha1").update(bytes).digest("hex") : ref;
+    cache.set(ref, canonical);
+    return canonical;
+  };
 }
 
 function summarizePaints(records, key) {
@@ -141,12 +160,13 @@ function normalizeComparableEffects(effects) {
   });
 }
 
-function normalizeComparablePaints(paints) {
+function normalizeComparablePaints(paints, resolveImageRef) {
   if (!Array.isArray(paints)) return [];
   return paints.map(paint => {
     if (!paint || typeof paint !== "object") return paint;
     const copy = JSON.parse(JSON.stringify(paint));
     if (copy.blendMode === "NORMAL") copy.blendMode = "PASS_THROUGH";
+    if (copy.type === "IMAGE" && resolveImageRef) copy.imageRef = resolveImageRef(copy.imageRef);
     normalizeTinyNumbers(copy);
     return copy;
   });
@@ -179,6 +199,39 @@ function stableJson(value) {
   return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
 }
 
+// Recursive full-props diff with a small numeric tolerance. This is the
+// strict parity net: any prop the field-specific checks below don't cover
+// (strokeAlign/strokeCap/strokeJoin, textAutoResize, isMask, clipsContent,
+// constraints, auto-layout fields, dashPattern, arcData, …) is caught here.
+function deepDiffProps(pathStr, a, e, out, id, name) {
+  if (a === undefined && e === undefined) return;
+  const ta = a === null ? "null" : Array.isArray(a) ? "array" : typeof a;
+  const te = e === null ? "null" : Array.isArray(e) ? "array" : typeof e;
+  if (a === undefined || e === undefined || ta !== te) {
+    out.push([id, pathStr, a, e, name]);
+    return;
+  }
+  if (ta === "number") {
+    const close = Math.abs(a - e) <= Math.max(0.015, Math.abs(e) * 1e-4) || (Math.abs(a) < 1e-8 && Math.abs(e) < 1e-8);
+    if (!close) out.push([id, pathStr, a, e, name]);
+    return;
+  }
+  if (ta === "array") {
+    if (a.length !== e.length) {
+      out.push([id, pathStr + ".length", a.length, e.length, name]);
+      return;
+    }
+    for (let i = 0; i < e.length; i++) deepDiffProps(pathStr + "[" + i + "]", a[i], e[i], out, id, name);
+    return;
+  }
+  if (ta === "object") {
+    const keys = new Set([...Object.keys(a), ...Object.keys(e)]);
+    for (const key of keys) deepDiffProps(pathStr + "." + key, a[key], e[key], out, id, name);
+    return;
+  }
+  if (a !== e) out.push([id, pathStr, a, e, name]);
+}
+
 function compareRecords(actual, expected) {
   const actualById = new Map(actual.records.map(record => [record.id, record]));
   const expectedById = new Map(expected.records.map(record => [record.id, record]));
@@ -195,12 +248,14 @@ function compareRecords(actual, expected) {
   const fontMismatches = [];
   const vectorNetworkMismatches = [];
   const paintMismatches = [];
+  const deepPropMismatches = [];
 
   for (const expectedRecord of expected.records) {
     const actualRecord = actualById.get(expectedRecord.id);
     if (!actualRecord) continue;
     const expectedProps = expectedRecord.props || {};
     const actualProps = actualRecord.props || {};
+    deepDiffProps("", actualProps, expectedProps, deepPropMismatches, expectedRecord.id, expectedRecord.name);
     if (actualProps.type !== expectedProps.type) {
       typeMismatches.push([expectedRecord.id, actualProps.type, expectedProps.type, expectedRecord.name]);
     }
@@ -248,8 +303,8 @@ function compareRecords(actual, expected) {
     const actualGeometry = actualProps.geometry || {};
     const expectedGeometry = expectedProps.geometry || {};
     for (const paintKey of ["fills", "strokes"]) {
-      const actualPaints = normalizeComparablePaints(actualGeometry[paintKey]);
-      const expectedPaints = normalizeComparablePaints(expectedGeometry[paintKey]);
+      const actualPaints = normalizeComparablePaints(actualGeometry[paintKey], actual.resolveImageRef);
+      const expectedPaints = normalizeComparablePaints(expectedGeometry[paintKey], expected.resolveImageRef);
       if (stableJson(actualPaints) !== stableJson(expectedPaints)) {
         paintMismatches.push([expectedRecord.id, paintKey, actualPaints, expectedPaints, expectedRecord.name]);
         break;
@@ -285,7 +340,8 @@ function compareRecords(actual, expected) {
     textMismatches,
     fontMismatches,
     vectorNetworkMismatches,
-    paintMismatches
+    paintMismatches,
+    deepPropMismatches
   };
 }
 
@@ -311,6 +367,7 @@ function compareRecords(actual, expected) {
   console.log("Font mismatches:", diff.fontMismatches.length);
   console.log("Paint mismatches:", diff.paintMismatches.length);
   console.log("Vector network presence mismatches:", diff.vectorNetworkMismatches.length);
+  console.log("Deep prop mismatches:", diff.deepPropMismatches.length);
   console.log("Actual fill types:", summarizePaints(actual.records, "fills"));
   console.log("Actual stroke types:", summarizePaints(actual.records, "strokes"));
   console.log("Geometry mismatch sample:", diff.geometryMismatches.slice(0, 10));
@@ -322,8 +379,9 @@ function compareRecords(actual, expected) {
   console.log("Font mismatch sample:", diff.fontMismatches.slice(0, 10));
   console.log("Paint mismatch sample:", diff.paintMismatches.slice(0, 10));
   console.log("Vector network mismatch sample:", diff.vectorNetworkMismatches.slice(0, 10));
+  console.log("Deep prop mismatch sample:", diff.deepPropMismatches.slice(0, 20));
 
-  if (diff.missing.length || diff.extra.length || diff.typeMismatches.length || diff.parentMismatches.length || diff.indexMismatches.length || diff.childOrderMismatches.length || diff.transformMismatches.length || diff.effectMismatches.length || diff.paintMismatches.length) {
+  if (diff.missing.length || diff.extra.length || diff.typeMismatches.length || diff.parentMismatches.length || diff.indexMismatches.length || diff.childOrderMismatches.length || diff.transformMismatches.length || diff.effectMismatches.length || diff.paintMismatches.length || diff.deepPropMismatches.length) {
     console.log("Missing sample:", diff.missing.slice(0, 10).map(record => [record.id, record.name]));
     console.log("Extra sample:", diff.extra.slice(0, 10).map(record => [record.id, record.name]));
     console.log("Type mismatch sample:", diff.typeMismatches.slice(0, 10));

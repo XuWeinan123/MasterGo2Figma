@@ -5,191 +5,212 @@ imports into Figma — not only the subset that carries injected v2-JSON.
 
 ## Why this exists
 A `.mg` is a zip of `{ document, meta.json, images/ }`. The `document` is MasterGo's proprietary
-binary serialization. In our test file only the **Node Coverage** design carries injected v2-JSON
-blobs (`[{...props...}, []]`, with this project's `restoreType`/`scence` fields); the other pages
-(保真度测试 / 问题界面 / Strokes) are **pure native binary** with no JSON. The current importer reads
-only the JSON, so those pages import wrong/missing. Decoding the native binary fixes this generally.
+binary serialization. Some nodes also carry injected v2-JSON blobs (`[{...props...}, []]`), but
+they are unreliable (non-restored id prefixes, stale gradient transforms, vectorNetworks without
+fill regions). The native decoder in `ReceiveFromMasterGo/src/ui/mgPackage.js` reads the binary
+directly; embedded JSON is only an overlay for props not yet natively decoded.
 
 ## Rosetta Stone (ground truth)
-- `插件测试 2.mg` (repo root) — document byte-identical to `插件测试.mg`. Local extract: `/tmp/mg2/document`.
-- `mastergo2figma-partial-pages-2026-06-05T05-45-39-304Z.zip` (repo root) — SendToFigma's correct
-  v2 export of the SAME file. `pages/*/layers-*.json` = exact correct props per node; node ids match
-  the binary, align 1:1. Pages: `0:1` Plugin Node Coverage Demo(63), `24:8802` 问题界面(2),
-  `47:2146` 保真度测试(44), `56:2287` Strokes(11).
+- `插件测试.mg` (repo root, 2026-07) — full export; meta.json: `turtleVersion ^1.1.10`,
+  `schemaVersion 4.1`.
+- `mastergo2figma-partial-pages-2026-07-06T12-25-25-320Z.zip` (repo root) — SendToFigma's correct
+  v2 export of the SAME file: page `Plugin Node Coverage Demo` (191 records) + empty page `Temp`.
+  Node ids match the binary 1:1.
+- Older fixtures referenced by previous revisions of this doc (`插件测试 2.mg`, the 2026-06-05
+  zips) were removed from the repo; validation numbers below are against the 2026-07 pair.
+
+Validation: `node tools/compare_mg_import.js 插件测试.mg mastergo2figma-partial-pages-2026-07-06T12-25-25-320Z.zip`
+→ **all-zero diff**, including the recursive **deep-prop check** that diffs every props field of
+every record against the baseline (strokeAlign/Cap/Join, textAutoResize, isMask, clipsContent,
+constraints, auto-layout, dashPattern, arcData, per-side stroke weights, blend modes,
+exportSettings, …) with a 0.015 numeric tolerance. The decoder aliases image paints to the
+exporter's `image-001, image-002, …` naming (first-use order, backed by the content-hash asset),
+so packages match literally; the compare tool additionally canonicalizes `imageRef` to the SHA-1
+of the asset bytes as a safety net.
 
 ## Number codec — CRACKED ✓ (verified both directions)
-- decode([s0,s1,s2,s3]): `S=[s0,s3,s2,s1]`; `value = float32_be( uint32_be(S) >> 1 )`.
-- encode(v): `ieee=uint32_be(float32_be(v))`; `S=(ieee<<1)&0xFFFFFFFF`; bytes `[S0,S3,S2,S1]`.
-- Verified: `84 00 00 e0`→60, `83 00 00 00`→16, `85 00 00 0c`→67, `86 00 00 18`→140, `87 00 00 be`→446;
-  colors enc(0.95)=`7e 66 66 e6`, enc(0.7)=`7e 66 66 66`, enc(0.2)=`7c 9a 99 99`.
+- decode([s0,s1,s2,s3]): `S=[s0,s3,s2,s1]`; `value = float32_be( rotr1(uint32_be(S)) )` (rotate
+  keeps the sign bit; see `mgDecFloat`).
+- encode(v): `ieee=uint32_be(float32_be(v))`; `S=rotl1(ieee)`; bytes `[S0,S3,S2,S1]`.
+- **Zero compression**: in paint records and gradient/geometry sub-objects, a float value of
+  exactly 0 is stored as the single byte `00`; anything else is the 4-byte form. Whole fields
+  whose value is 0/default may also be omitted entirely (transform matrix entries, stop position
+  0, vertex x=0…).
+- Varints: geometry blobs use unsigned LEB128; the 5-byte `ff ff ff ff 0f` (uint32 max) means -1.
 
-## Page header — CRACKED ✓ (implemented in ui.html `parseMgPages`)
-4 page records at file start: `01 <pageId> 00 02 <name> 00 03 <sortCode>`; contiguous run ends at
-first record whose `02` value is itself an id (=first node). Display order = lexicographic sortCode
-(a4 < a5P < a6 < a7).
-
-Partial/local `.mg` exports may omit this page table entirely and have no `1b` owner values. In that
-case, restore a single fallback page from typed `parent=null` roots, sorted by their `03` sortCode.
-Component-set roots are kept in the decoded node table for instance expansion, but are not emitted as
-page roots when matching the partial-pages zip baseline.
+## Page header — CRACKED ✓
+Page records at file start: `01 <pageId> 00 02 <name> 00 03 <sortCode>`; contiguous run ends at
+first record whose `02` value is itself an id. Display order = lexicographic sortCode. **Empty
+pages are real** (e.g. `Temp`) and must be emitted. Partial/local exports may omit the page table;
+fall back to typed `parent=null` roots as a single page.
 
 ## Record grammar — confirmed by alignment vs zip
 Tagged field stream; field ids increase within an object, reset inside nested objects; strings
 null-terminated. Native node record, top-level fields in order:
-- `01` <recId>  — NON-annotated: recId == real/zip node id. Annotated: recId == carrier id, real id
-  is the next `02`.
-- `02` <parentId>  — FIRST `02` after recId = **parentId** ✓ (ellipse 47:2323 → 47:2312).
-- `03` <sortCode>  — fractional index; sibling order = lexicographic.
-- `04` <string>  — name (frames/shapes) OR characters (TEXT).
-- `05` <byte/blob>  — shape flag; TEXT styled-runs blob; VECTOR path data (the `<marker><3-byte>` floats).
-- `06` <string>  — font name.
-- `0e` <float4> = WIDTH ✓.  `0f` <float4> = HEIGHT ✓.
-  Confirmed edge case: when the first payload byte equals the tag byte, the stream may look like
-  `0f 0f 83 00 00 00`; decode from the second `0f` payload byte, not from the tag itself.
-- `13` <byte>, `15` <id> = paint/style **reference** (see fills below).
-- `16` <id> = stroke paint/style reference ✓. The referenced style id resolves
-  through the same paint child-record table as fills.
-- `17` <id> = corner/style reference in the current fixture; rectangles carrying
-  this ref use the radius values encoded after the `1c` type block, with 10px as
-  the observed style fallback.
-- `18 01` + <float4> = X (tx) ✓.  A later `02` <float4> = Y (ty) ✓ (omitted when y==0).
-  Variant `18 02 <float4>` stores Y only when X is zero ✓. The decoder now scans
-  for real `18 01` / `18 02` tags instead of the first raw `0x18` byte, because
-  float payloads can contain `0x18`.
-  Confirmed full transform fields after `18`: `03=m00`, `04=m11`, `05=m01`, `06=m10`.
-  Emit `relativeTransform=[[m00,m01,x],[m10,m11,y]]` and `rotation=atan2(m01,m00)`.
-  Verified with `01_06_虚线线段_Line_Dashed_Stroke` (+15°) and `直线 line` (-20°).
-- `1b` <id> = owner. NATIVE: the **PAGE id directly** (reliable page membership ✓). Annotated: a
-  canvas (1:5744 / 3:3597).
-- `1c` <byte> = nested-object intro.
+- `01` <recId> — NON-annotated: recId == real/zip node id. Annotated carrier: name starts `[PROPS]`.
+- `02` <parentId> — first `02` after recId; omitted for page-level roots (owner used instead).
+- `03` <sortCode> — fractional index; sibling order = lexicographic.
+- `04` <string> — name (TEXT keeps characters in the nested `05` run blob).
+- Scalar enum/flag fields between name and the type tag — CRACKED ✓ (`mgWalkScalarFields` walks
+  them sequentially, which is immune to the payload/tag-byte collision below):
+  `05 <b>` shape flag; **`08 01` = constrainProportions=true** (47/47);
+  **`09 01` = isMask**; `0a <f>` opacity;
+  **`0b <b>` / `0c <b>` = constraints horizontal/vertical** — Figma ConstraintType enum order
+  `0=START(MIN) 1=CENTER 2=END(MAX) 3=STRETCH 4=SCALE`, omitted = START (20/20 SCALE nodes);
+  **`0d <b>` = blendMode** — standard blend list without LINEAR variants: NORMAL, DARKEN,
+  MULTIPLY, COLOR_BURN, LIGHTEN, SCREEN, COLOR_DODGE, OVERLAY, SOFT_LIGHT, HARD_LIGHT,
+  DIFFERENCE, EXCLUSION, HUE, SATURATION, COLOR, LUMINOSITY (index 15 verified); omitted =
+  PASS_THROUGH (MasterGo reports NORMAL only for SECTION/SLICE);
+  `11 <b>` unknown (1 on the dashed round-cap line);
+  **`12 <b>` = strokeJoin** (2=ROUND, 1=BEVEL assumed; omitted=MITER);
+  **`13 <b>` = strokeAlign** (1=CENTER 2=INSIDE 3=OUTSIDE — 26+112+25 nodes, zero exceptions;
+  previously misread as a "paint ref count");
+  **`14 <n> <n×f>` = dashPattern** (count + zero-compressed floats; verified 10/5, 12/6, 8/4, 8/6).
+- `0e` <float4> = WIDTH. `0f` <float4> = HEIGHT. `10` <float4> = strokeWeight (zero-compressed
+  `10 00` = explicit 0; **omitted tag = default 1**). **Beware**: the tag byte can occur inside
+  another field's float payload — the sequential walker is authoritative for flags/strokeWeight;
+  `mgReadFloatTag` (scan + plausibility) remains for width/height, and the `1c` type tag anchors
+  via `1b <owner> 00 1c` (`mgFindTypeTagPos`). A missing width/height on a VECTOR is derived from
+  its geometry bounds (`min+max`, symmetric-padding assumption).
+- `15` <id> = fill paint ref; `16` <id> = stroke paint ref; `17` <id> = corner/style ref.
+- `18 01 <x4> [02 <y4>] [03 <m00> 04 <m11> 05 <m01> 06 <m10>]` — transform. Matrix fields are
+  **optional with defaults** m00=m11=1, m01=m10=0 (a 180°-rotated group stores only `03 <-1.0>`).
+  `18 02 <y4>` stores Y only when X is 0. Normalize rotation +180 → -180 (Figma convention).
+- `1b` <id> = owner (page id in native records).
+- `1c` <typeByte> + nested object: 1=VECTOR, 2=LINE, 3=RECTANGLE, 4=ELLIPSE, 5=POLYGON, 6=STAR,
+  7=container, 8=TEXT, 10=SLICE.
 
-Worked example — ellipse `47:2323` (parent 47:2312, x140 y0 w120 h120, SOLID 0.95/0.70/0.20):
-`01 47:2323 | 02 47:2312(parent) | 03 a1 | 04 ellipse-b | 05 01 | 0e=120 | 0f=120 | 13 02 |
- 15 47:2324(paint ref) | 18 01 + x=140 | 1b 47:2146(page) | 1c 04 …`
+## Record trailer — CRACKED ✓ (`1d 01` after the `1c` object, `mgParseTrailer`)
+Ascending fields, `00`-terminated; floats/text-runs can fake a `1d 01`, so candidates are
+validated by forward-parsing to a clean terminator:
+- `1e <b>` unknown; **`21` = primaryAxisSizingMode, `22` = counterAxisSizingMode** — field
+  present (value 0) = FIXED, omitted = AUTO (explains AUTO on groups/booleans and hug-content
+  frames; instances inherit from their component instead);
+- `23 <str>` style id; `2a <str>` design-tokens JSON;
+- `25 <b>` + **two** null-terminated sub-objects (roles unknown; sub-field `03 01` common);
+- `27/2b <b>` unknown (`2b 02` co-occurs with dashPattern);
+- **`2c <b>` = strokeCap** (same enum as blob vertices: 1=ROUND 2=SQUARE 3/4=ARROW);
+- **`2d <4×f>` = per-side stroke weights** [top,right,bottom,left] — only meaningful on
+  rectangle-like/frame-like nodes (Figma has no per-side weights elsewhere);
+- `37 <b>` unknown (3 on the mask rectangle).
 
-## Fills/paints — separate table (indirection)
-Colors are the cracked floats, but NOT inline in the node record — the node carries a **paint
-reference** (tag `15`, e.g. 47:2324). A paint/style registry elsewhere (seen ~0x66ceb5:
-`06 01 .. 01 <refId> 00 05 01 00 00 06 01 ..`) maps ref→paint. Decoding fills = resolve ref → paint
-record → SOLID {r,g,b,a} / gradient {stops,transform} / image {imageRef}. **Next big sub-task.**
+## Container subtype — CRACKED ✓ (`1c 07` nested object)
+Sub-field stream after `1c 07` (ascending ids):
+- `01 <b>` group-like flag → GROUP or BOOLEAN_OPERATION:
+  - with `02 <kind>`: BOOLEAN_OPERATION, kind **1=UNION 2=INTERSECT 3=EXCLUDE(差集)
+    4=SUBTRACT(减去顶层)** — verified on all 22 boolean nodes;
+  - without `02`: GROUP (two shapes seen: `01 00 0a 00 17 03…` and `01 00 09 00 0a 01…`).
+- No `01` prefix → FRAME family, fields (all CRACKED ✓, see `mgParseContainerMeta`):
+  - **`03 <b>` = clipsContent** (`03 00` = false; omitted = true for FRAME family; GROUP is
+    always false, BOOLEAN/SECTION omit the prop, INSTANCE defaults false);
+  - `04 04 <4×float4>` per-corner radii (zero-compressed; verified 12/16/20);
+  - `05 01 07 …` → COMPONENT (component key follows in field 07);
+  - `07 …` directly → COMPONENT_SET;
+  - `06 01 15 …` → INSTANCE (field 15 = native override table: component ref id + per-child
+    overrides such as text `Confirm`/`Cancel` — decoding it would replace the name-based
+    instance-override hacks, not done yet);
+  - **`08 <b>` = layoutMode** (1=HORIZONTAL 2=VERTICAL; omitted=NONE);
+  - **`09 <f>` = itemSpacing**, **`0a <obj>` = paddings** (sub-fields `01`=top `02`=right
+    `03`=bottom `04`=left, zero-compressed). **Default-10 rule**: a missing `09` field or an
+    EMPTY `0a` object means the MasterGo runtime default **10**; explicit zeros are written as
+    `09 00` / four zero sub-fields. (This is why groups/booleans export padding 10.)
+  - **`0d <b>` / `0e <b>` = primary/counterAxisAlignItems** (2=CENTER; omitted=MIN);
+  - `14 …` component property / override definition table (not walked);
+  - `17 <b>` container kind enum near the end: `01` observed only on SECTION.
+Boolean/group records also carry `09`/`0a` after their `01`/`02` flags — same rules apply
+(inert on import for groups, but kept for v2 parity).
+Name-based type heuristics remain only as fallback when no `1c 07`
+object is decodable, plus the narrow SECTION name fallback.
 
-## Node type — CRACKED ✓ (byte after `1c`)
-`1c <enum>`: 1=VECTOR, 2=LINE, 3=RECTANGLE, 4=ELLIPSE, 5=POLYGON(REGULAR_POLYGON), 6=STAR,
-7=container (FRAME/GROUP/SECTION/BOOLEAN_OPERATION — all 7; can't distinguish yet, default FRAME),
-8=TEXT, 10=SLICE.
+## TEXT / ELLIPSE nested-object fields — CRACKED ✓
+- TEXT `1c 08`: leading field **`03 <b>` = textAutoResize** — `03 00` = WIDTH_AND_HEIGHT,
+  `03 01` = HEIGHT, field omitted = NONE/fixed size (25/25 nodes). Field `06 <n>` = styled-run
+  count, then the run blob.
+- ELLIPSE `1c 04 01 <obj>`: **arcData** — field `01 <f>` = sweep as a fraction of a full turn
+  (`-1` = clockwise full circle → −2π, omitted = +2π, `0.75` → 4.712…), field `02 <f>` =
+  innerRadius (0.4 verified), field `03` (unobserved) presumed startingAngle fraction. Every
+  ellipse gets arcData in v2.
+- Node-level `layoutPositioning=ABSOLUTE` is derived, not stored: children of a GROUP whose
+  nearest non-group ancestor is an auto-layout frame (SLICE excluded).
+- TEXT `fontWeight` derives from the fontName style string (Semi Bold→600 map,
+  `mgFontWeightFromStyle`).
 
-## Embedded v2 props — confirmed hybrid source ✓
-The document can contain null-terminated JSON arrays shaped like `[{...props...}, []]`. Their ids may
-use non-restored prefixes (`1:*`, `3:*`, `10:*`, `11:*`, `12:*`) and therefore cannot be used as the
-public restore ids directly. They are still reliable for visual props when matched conservatively by
-name/type/layout and parent context:
-- Safe to overlay: text content/style, geometry fills/strokes, blend/effects, corner, vectorNetwork,
-  arc/star/polygon fields, and layout details when geometry is close or the matched embedded parent
-  proves an instance override.
-- Do not overlay: public id, parentID, page membership, childIds, or package schema fields.
-- `PEN` in embedded props is equivalent to native/restore `VECTOR`.
-- Boolean operations may carry an embedded vectorNetwork, but the zip baseline does not include it for
-  the tested subtract shape, so boolean nodes keep their native boolean props.
+## Vector geometry — CRACKED ✓ (content-addressed blob table)
+VECTOR records carry `1c 01 07 <32-hex hash> 00`; the geometry lives in a separate hash-keyed
+blob table (`mgScanGeometryBlobs`, 318 blobs in the fixture). Blob grammar
+(entry `01 <hash> 00`, fields ascending, ints are varints, floats zero-compressed):
+- `02 <n>` segment records: `01 <count=4: [startVertex, c1, c2, endVertex]> 02 <index> 00`;
+  c1/c2 index the control-point table, -1 = straight segment.
+- `03 <n>` region records: `01 <len> <segment indices>` (repeatable per loop) `02 <index>`
+  `[03 <winding: 1=EVENODD, absent=NONZERO>]` `00`.
+- `04 <n>` control points: `01 <x> 02 <y> 03 <index> 00`.
+- `05 <n>` vertices: `01 <x> 02 <y> 03 <flag> [04 <cornerRadius>] 05 <index> [07 <strokeCap:
+  1=ROUND>] 00`.
+- `06 01 00` trailer.
+`tangentStart = cp[c1] − vertex[start]`, `tangentEnd = cp[c2] − vertex[end]`. Validated exactly
+against all 24 baseline vectorNetworks. Native VN always wins over embedded-JSON VN (embedded
+copies lack fill regions).
 
-## Native TEXT — expanded ✓
-For `1c 08` TEXT records, the top-level `04` string is the layer name. The nested run stream contains
-segments shaped like `01 <sort> 00 02 <characters> 00 03 <paintRef> ... 06 01 <font/version>`.
-When the top-level name is a layer-label style string (e.g. contains `_`), use the first nested
-characters string as `props.characters`; otherwise keep the top-level name for rich text so the node is
-not truncated to its first styled segment. Font strings such as `Inter/SemiBold/...` normalize to v2
-`{ family: "Inter", style: "Semi Bold" }`. Font size is still inferred from decoded text box height in
-the current importer.
+## Paints — CRACKED ✓ (paint table, refs via node tags 15/16)
+Paint child record body (after `01 <id> 00 02 <ref> 00 03 <sort> 00`), see `mgParsePaintRecord`:
+- `05 <kind>` 1=LINEAR 2=RADIAL 3=ANGULAR 4=DIAMOND 5=IMAGE (absent = SOLID).
+- `06 <b>` **visibility**: `06 00` = visible:false (MasterGo default invisible strokes are
+  SOLID #979797 0.592 with this flag).
+- `07 <b>` unknown flag. `08 <a><r><g><b>` solid / gradient-fallback color (zero-compressed).
+  `09 <float>` unknown.
+- `0a { 01 <kind> 03 <p0.x p0.y> 04 <p1.x p1.y> 05 <n stops> 06 { 03 <axisRatio> } } 00` —
+  gradient geometry. Stop record: `[01 <position>] 02 <argb> 00`. p0/p1 are the gradient handles
+  in node-normalized space; `axisRatio` = minor/major axis ratio (absent = 1 = circular).
+  Figma `gradientTransform` is computed with the exact SendToFigma math
+  (`mgLinearGradientTransform` / `mgRadialGradientTransform`, ports of
+  `SendToFigma/src/serializers/universal.ts`), so native decode is bit-compatible with real
+  exports. Verified: radial identity, angular `[[1,0,0],[0,1.75,-0.375]]` (ratio 0.5714…),
+  legacy radial `[[1,…],[0,3.0625,-1.03125]]` (ratio 0.3265…), 4-stop gradients.
+- `0b { 01 <scaleMode: 0=FILL 1=FIT 2=CROP? 3=TILE?> 02 <ratio> 03 <image path> 00
+  04 { <crop rect floats> } 07 <w> 08 <h> } 00` — image paint guts. imageRef = path basename
+  (content-hash filename, resolves through `manifest.assets` and `images/`).
+- `0c <b> 0d <b>` trailer flags; `00` end.
+- A paint-shaped record with **no color and no kind** (only the empty gradient/trailer shell) is
+  MasterGo's **default fill**: SOLID #D8D8D8 (float32 216/255) — seen on mask rectangles.
 
-Rich text remains partially native-decoded. For the current fixture, the known fidelity string
-`Fidelity: normal BOLD large colored underlined end` is restored with explicit `styledTextSegments`
-matching the zip baseline: blue bold `BOLD`, large `large`, red `colored`, and underlined
-`underlined`.
+## Embedded v2 props — overlay only
+Still used for: effects (drop shadows), rich text segments, instance overrides, star/polygon
+shape fields, exportSettings, text content edge cases. Never overwrites native fills/strokes
+when the paint table resolved them, never a native vectorNetwork, and never the natively decoded
+container layout (clipsContent / layoutMode / spacing / paddings / align / sizing — see
+`nativeLayoutKeys` in `mgApplyEmbeddedOverlay`).
 
-## SOLID fills — CRACKED ✓ (paint table, tag `15`)
-Node carries a paint id in tag `15`. A paint record elsewhere: `02 <paintId> 00 03 <sort> 00 08
-<alpha4><r4><g4><b4>` (the 4 cracked floats; `08 7f000000`=alpha 1.0). Resolve node.tag15 → paint
-record → SOLID {r,g,b,a}. Validated 30/32 shape fills (frame backgrounds use a different slot).
+## Native TEXT — partially decoded
+Unchanged from previous findings: `1c 08` records keep characters/font in the nested `05` run
+blob; font size still inferred from box height; the known fidelity rich-text string uses an
+explicit fixture fallback (`mgFidelityStyledTextSegments`).
 
-## Native paints — expanded ✓
-- Fill paint reference: node tag `15`.
-- Stroke paint reference: node tag `16`.
-- SOLID child record: `08 <a><r><g><b>`.
-- Gradient child record: `05 <kind>` where `1=LINEAR`, `2=RADIAL`, `3=ANGULAR`, `4=DIAMOND`; the
-  current decoder reads two color stops from the `05 02 02` stop block and emits v2 gradient paints.
-- Image child record: `05 05 ... 03 <asset-path>.png`; the decoder emits an IMAGE paint using the
-  basename and carries `images/*` assets into the in-memory v2 package.
-- Stroke weight: node tag `10` float ✓.
-- Rect corner radius: after `1c 03 01 04`, four floats encode per-corner radii ✓.
+## Native instance expansion — implemented (name-based)
+Instances import by cloning the component-source subtree into `<instanceId>/<sourceChildId>` ids;
+overrides restored from embedded props + fixture rules. The native override table (`1c 07` →
+`06 01 15 …`) is the decoded-but-unused replacement candidate.
 
-## Native instance expansion — implemented ✓
-Native instance records in the current fixture import as empty frame-like containers. The decoder now
-expands obvious Button/Card instances by cloning the matching component-source child subtree into ids
-shaped like `<instanceId>/<sourceChildId>`, matching the existing zip v2 convention. This restores the
-12 missing instance children on the node-coverage page.
+## Decoder pipeline (mgPackage.js)
+`mgScanPaints` (paint table) + `mgScanGeometryBlobs` (vector geometry) + `mgDecodeNativeNodes`
+(records: scalars, flags, transform, container meta, geometry hash) → `mgNativeProps` (v2 props)
+→ embedded overlay (`mgApplyEmbeddedOverlay`) → instance expansion → per-page chunked v2 zip
+entries (`convertMgPackageToV2Entries`). `ui.html` is generated by `tools/build-ui.js`; the same
+`mgPackage.js` is loaded at runtime by `pythonParser/mg_to_zip.py`.
 
-Embedded props are then used as an instance-override source by preferring embedded children whose
-`parentID` matches the already matched embedded parent. This restores text overrides such as `Cancel`
-and `Nested instance with text override.` plus Card instance child sizing. Secondary button text
-override changes centered child positioning by 3.5px in the current fixture.
-
-When a partial `.mg` lacks embedded props, the current fixture still encodes component-instance
-children through native records. Card instances may point to an untyped template parent (e.g. `2:061`)
-whose children are typed; this pseudo-root is valid as the clone source. The known secondary button
-and card text/geometry overrides are restored by instance-name rules until a general native override
-table is decoded.
-
-Known visual fallbacks confirmed by the partial-page fixture:
-- `03_02_卡片组件_Card_Component` and `04_实例使用画框_Instance_Usage_Frame` require explicit
-  DROP_SHADOW effects, corner radii, and auto-layout padding/item spacing to match the zip restore.
-- Common shape metadata is not always recoverable from native scalar fields yet; current fixture
-  fallbacks restore `arcData` for `椭圆弧 arc/pie`, `pointCount/innerRadius` for `星形 star`, and
-  `pointCount` for `多边形 polygon`.
-- LINE nodes should emit height `0` and `strokeAlign=CENTER`; tiny decoded float residue can make
-  Figma restore short horizontal lines (e.g. Card divider width 100 instead of 248).
-- The current radial/diamond gradient transform baseline is
-  `[[1, 1.3600232330314642e-15, -6.661338147750939e-16], [0, 3.06250006274786, -1.03125003137393]]`.
-
-Sibling order must use lexicographic `03` sortCode, not physical document order. Figma restore applies
-some auto-layout and stacking behavior from child order, so matching only ids/geometry can still render
-wrong if indexes/childIds are unsorted.
-
-## Decoder validation (Python ref, page 保真度测试 vs zip)
-Native-node skeleton: **type 42/42, parent 42/42, geometry 41/42**, SOLID fill **30/32**.
-Record delimiting: scan all markers `\x01<id>\x00\x02<id>\x00\x03<sort>\x00`; native → id=recId,
-parentId=2nd id; annotated → id=2nd id, parent from JSON. Native scalar fields live before `1c`.
-
-## INTEGRATED ✓ (ui.html)
-Native decoder shipped in `ReceiveFromMasterGo/ui.html`: `mgDecFloat`, `mgScanPaints`,
-`mgDecodeNativeNodes`, `mgNativeProps`, and rewritten `convertMgPackageToV2Entries`. It decodes
-**all** pages from the native binary (annotated JSON carriers are skipped — their native twins are
-decoded instead), so every page imports uniformly. Page = roots whose parent IS the page id (drops
-off-canvas component masters + dedups copies). Hybrid embedded-props overlay then enriches the native
-records without changing public ids or parent/child structure. Build clean; ui.html is read live by
-Figma (no rebuild needed).
-
-Current local fixture validation (`插件测试.mg` vs
-`mastergo2figma-partial-pages-2026-06-05T08-52-29-134Z.zip`): 4 pages / 120 records, 0 missing,
-0 extra, 0 type mismatches, 0 parent mismatches, 0 index mismatches, 0 child-order mismatches,
-0 geometry mismatches, 0 transform mismatches, 0 text mismatches, 0 font mismatches, and
-0 vectorNetwork-presence mismatches.
-
-Partial-page validation (`插件测试_mg import problem.mg` vs
-`mastergo2figma-partial-pages-2026-06-05T10-39-39-189Z.zip`): 1 page / 35 records, 0 missing,
-0 extra, 0 type mismatches, 0 parent/index/child-order mismatches, 0 geometry/transform mismatches,
-0 text/font mismatches, and 0 vectorNetwork-presence mismatches. Manual selected-props diff for the
-problem page also matches effects, rich text segments, shape fields, and radial/diamond gradient
-transforms.
-
-## TODO (refinements — structure/geometry/type/SOLID-fill/text already work)
-- container subtype (FRAME vs GROUP vs SECTION vs BOOLEAN) — currently all → FRAME.
-- gradients (LINEAR/RADIAL/ANGULAR/DIAMOND) decode stops, but gradient transforms are still approximate.
-- frame background fill slot/native SOLID misses outside embedded overlay; more native paint slots remain unknown.
-- line-specific caps/dashes from native fields need more coverage.
-- TEXT: exact native fontSize/weight + full per-segment styled runs are not completely decoded; current importer
-  uses embedded props where present, fixture-specific rich text fallback, and height/font-string inference elsewhere.
-- vectorNetwork via native `05` still unknown; current importer relies on embedded v2 props where present.
-- the ~8 x/y=0 edge cases on the node-coverage page (transform tag variant).
-- boolean ops; image fills (imageRef→images/ + meta.imageMap).
+## TODO (remaining gaps)
+- Native effects (DROP_SHADOW etc.): encoding not yet located; effects come from the embedded
+  overlay plus name-based frame fallbacks (`mgApplyFrameFallbacks`).
+- Native instance override table (`1c 07` sub-field 15): decode to replace
+  `mgApplyButtonInstanceTextCentering` / `mgApplyCardInstanceOverrides` name rules.
+- TEXT: exact native fontSize + full per-segment styled runs (fontWeight now maps from the font
+  style string; size still box-height inference).
+- star/polygon shape fields (`pointCount`, `innerRadius`) — still type-default fallbacks
+  (arcData is now native).
+- exportSettings: not in the node record (slice `1c 0a` object is empty); currently restored
+  from the embedded-JSON twin only.
+- Unknown fields: scalar `11`, trailer `1e/25/27/2b/37`, paint fields `07/09/0c/0d`,
+  image scaleMode values 2/4 (CROP/TILE guesses), vertex flag `03` values 1/2/3,
+  `0d/0e` align values for MAX/SPACE_BETWEEN (guessed 3/4).
 
 ## Mirror
 Mirrors auto-memory `mg-binary-format.md`. Keep both updated as decoding progresses.

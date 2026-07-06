@@ -1899,56 +1899,71 @@
       return { type: "SOLID", visible: true, opacity: a == null ? 1 : a, blendMode: "NORMAL", color: { r: r, g: g, b: b } };
     }
 
-    function mgMakeGradientPaint(kind, stopA, stopB) {
-      const typeByKind = {
-        1: "GRADIENT_LINEAR",
-        2: "GRADIENT_RADIAL",
-        3: "GRADIENT_ANGULAR",
-        4: "GRADIENT_DIAMOND"
-      };
-      const type = typeByKind[kind] || "GRADIENT_LINEAR";
-      return {
-        type: type,
-        visible: true,
-        opacity: 1,
-        blendMode: "NORMAL",
-        gradientStops: [
-          { position: 0, color: stopA },
-          { position: 1, color: stopB }
-        ],
-        gradientTransform: [[1, 0, 0], [0, 1, 0]]
-      };
-    }
+    const MG_GRADIENT_TYPE = {
+      1: "GRADIENT_LINEAR",
+      2: "GRADIENT_RADIAL",
+      3: "GRADIENT_ANGULAR",
+      4: "GRADIENT_DIAMOND"
+    };
 
-    function mgMakeImagePaint(imageRef) {
+    function mgMakeImagePaint(imageRef, scaleMode, ratio) {
       return {
         type: "IMAGE",
         visible: true,
         opacity: 1,
         blendMode: "NORMAL",
-        scaleMode: "FILL",
+        scaleMode: scaleMode || "FILL",
+        filters: { exposure: 0, contrast: 0, saturation: 0, temperature: 0, tint: 0, highlights: 0, shadows: 0, hue: 0 },
+        rotation: 0,
+        ratio: ratio == null ? 0.5 : ratio,
         imageRef: imageRef
       };
     }
 
-    function mgRgbaAt(bytes, off) {
-      return {
-        a: mgDecFloat(bytes, off),
-        r: mgDecFloat(bytes, off + 4),
-        g: mgDecFloat(bytes, off + 8),
-        b: mgDecFloat(bytes, off + 12)
-      };
+    function mgMul3(m1, m2) {
+      const res = [];
+      for (let i = 0; i < m1.length; i++) {
+        res[i] = [];
+        for (let j = 0; j < m2[0].length; j++) {
+          let sum = 0;
+          for (let k = 0; k < m2.length; k++) sum += m1[i][k] * m2[k][j];
+          res[i][j] = sum;
+        }
+      }
+      return res;
     }
 
-    function mgFindByteSequence(bytes, start, end, seq) {
-      for (let i = start; i <= end - seq.length; i++) {
-        let ok = true;
-        for (let j = 0; j < seq.length; j++) {
-          if (bytes[i + j] !== seq[j]) { ok = false; break; }
-        }
-        if (ok) return i;
-      }
-      return -1;
+    // Ports of SendToFigma's gradient-transform math (serializers/universal.ts):
+    // the baseline zips are produced with these exact formulas, so reusing them
+    // keeps native decode bit-compatible with real exports.
+    function mgLinearGradientTransform(p0, p1) {
+      const x3 = p0.x, y3 = p0.y, x4 = p1.x, y4 = p1.y;
+      const len = Math.sqrt((x4 - x3) * (x4 - x3) + (y4 - y3) * (y4 - y3));
+      if (!isFinite(len) || len <= 0) return [[1, 0, 0], [0, 1, 0]];
+      const m1 = [[1, 0, 0], [0, 1, 0.5], [0, 0, 1]];
+      const m2 = [[1 / len, 0, 0], [0, 1, 0], [0, 0, 1]];
+      const sina = (y3 - y4) / len, cosa = (x4 - x3) / len;
+      const m3 = [[cosa, -sina, 0], [sina, cosa, 0], [0, 0, 1]];
+      const m4 = [[1, 0, -x3], [0, 1, -y3], [0, 0, 1]];
+      const m = mgMul3(mgMul3(mgMul3(m2, m1), m3), m4);
+      return [m[0], m[1]];
+    }
+
+    // Radial/angular/diamond: center p0, major-axis end p1, and the minor axis
+    // as the major axis rotated 90° scaled by `ratio` (1 = circular).
+    function mgRadialGradientTransform(p0, p1, ratio) {
+      const ux = p1.x - p0.x, uy = p1.y - p0.y;
+      const r = (isFinite(ratio) && ratio > 0) ? ratio : 1;
+      const vx = -uy * r, vy = ux * r;
+      const det = ux * vy - vx * uy;
+      if (!isFinite(det) || Math.abs(det) < 1e-9) return [[0, 1, 0], [-1, 0, 1]];
+      const inv = 0.5 / det;
+      const a00 = vy * inv, a01 = -vx * inv;
+      const a10 = -uy * inv, a11 = ux * inv;
+      const t0 = 0.5 - (a00 * p0.x + a01 * p0.y);
+      const t1 = 0.5 - (a10 * p0.x + a11 * p0.y);
+      const nz = n => (n === 0 ? 0 : n);
+      return [[nz(a00), nz(a01), nz(t0)], [nz(a10), nz(a11), nz(t1)]];
     }
 
     function mgBasename(path) {
@@ -1957,19 +1972,28 @@
       return slash >= 0 ? path.slice(slash + 1) : path;
     }
 
+    function mgPlausibleScalar(v) {
+      return isFinite(v) && Math.abs(v) >= 1e-6 && Math.abs(v) < 1e6;
+    }
+
     function mgReadFloatTag(bytes, str, tag, start, end, byteBase) {
-      const p = str.indexOf(String.fromCharCode(tag), start);
-      if (p < 0 || p >= end) return 0;
-      const abs = (byteBase || 0) + p;
-      let value = mgDecFloat(bytes, abs + 1);
-      // Some scalar payloads start with the same byte as the tag, e.g.
-      // `0f 0f 83 00 00 00` for height=16. If the direct decode is implausible,
-      // try the shifted payload.
-      if ((Math.abs(value) < 1e-8 || !isFinite(value)) && abs + 5 < bytes.length && bytes[abs + 1] === tag) {
-        const shifted = mgDecFloat(bytes, abs + 2);
-        if (isFinite(shifted) && Math.abs(shifted) > 1e-8 && Math.abs(shifted) < 1e6) value = shifted;
+      // The tag byte can also occur inside another field's float payload (e.g.
+      // `0d 0f` before the real `0f` height on masked rectangles), and some
+      // payloads start with the tag byte itself (`0f 0f 83 00 00 00` for
+      // height=16). Walk every occurrence and take the first plausible decode;
+      // denormal garbage from a mid-payload hit is rejected by the 1e-6 floor.
+      let p = str.indexOf(String.fromCharCode(tag), start);
+      while (p >= 0 && p < end) {
+        const abs = (byteBase || 0) + p;
+        const value = mgDecFloat(bytes, abs + 1);
+        if (mgPlausibleScalar(value)) return value;
+        if (abs + 5 < bytes.length && bytes[abs + 1] === tag) {
+          const shifted = mgDecFloat(bytes, abs + 2);
+          if (mgPlausibleScalar(shifted)) return shifted;
+        }
+        p = str.indexOf(String.fromCharCode(tag), p + 1);
       }
-      return value;
+      return 0;
     }
 
     function mgReadCString(bytes, start, end) {
@@ -2044,30 +2068,23 @@
             result.y = mgDecFloat(bytes, off + 7);
             scan = off + 11;
           }
-          let m00 = null, m01 = null, m10 = null, m11 = null;
+          // Matrix fields 03=m00 04=m11 05=m01 06=m10 are optional: only
+          // non-default entries are stored (defaults m00=m11=1, m01=m10=0).
+          // E.g. a 180°-rotated group stores just `03 <-1.0>`.
+          let m00 = 1, m01 = 0, m10 = 0, m11 = 1, sawMatrix = false;
           for (let p = scan; p < end - 5; p += 5) {
-            if (bytes[p] === 0x03) {
-              m00 = mgDecFloat(bytes, p + 1);
-              continue;
-            }
-            if (bytes[p] === 0x04) {
-              m11 = mgDecFloat(bytes, p + 1);
-              continue;
-            }
-            if (bytes[p] === 0x05) {
-              m01 = mgDecFloat(bytes, p + 1);
-              continue;
-            }
-            if (bytes[p] === 0x06) {
-              m10 = mgDecFloat(bytes, p + 1);
-              continue;
-            }
+            if (bytes[p] === 0x03) { m00 = mgDecFloat(bytes, p + 1); sawMatrix = true; continue; }
+            if (bytes[p] === 0x04) { m11 = mgDecFloat(bytes, p + 1); sawMatrix = true; continue; }
+            if (bytes[p] === 0x05) { m01 = mgDecFloat(bytes, p + 1); sawMatrix = true; continue; }
+            if (bytes[p] === 0x06) { m10 = mgDecFloat(bytes, p + 1); sawMatrix = true; continue; }
             break;
           }
-          if (m00 != null && m01 != null && m10 != null && m11 != null &&
+          if (sawMatrix &&
               Math.abs(m00) <= 1.001 && Math.abs(m01) <= 1.001 && Math.abs(m10) <= 1.001 && Math.abs(m11) <= 1.001) {
             result.relativeTransform = [[m00, m01, result.x], [m10, m11, result.y]];
-            result.rotation = Math.atan2(m01, m00) * 180 / Math.PI;
+            let rotation = Math.atan2(m01, m00) * 180 / Math.PI;
+            if (rotation > 180 - 1e-6) rotation -= 360; // Figma reports 180° as -180
+            result.rotation = rotation;
           }
           return result;
         }
@@ -2082,54 +2099,569 @@
     // Paint/style registry. Nodes reference paint/style ids via tag 15 (fill)
     // and tag 16 (stroke). The actual paint is stored in child records whose
     // parent id is the referenced style id.
-    function mgScanPaints(bytes, str) {
-      const paints = {};
-      const ID = "[0-9]+:[0-9A-Za-z]+";
+    // Zero-compressed float: a value of exactly 0 is stored as the single byte
+    // 0x00; anything else is the usual 4-byte twisted float.
+    function mgReadZFloatAt(bytes, p) {
+      if (bytes[p] === 0x00) return { value: 0, next: p + 1 };
+      return { value: mgDecFloat(bytes, p), next: p + 4 };
+    }
 
-      // SOLID paint child: `01 <child> 00 02 <paintId> 00 03 <sort> 00 08 <a><r><g><b>`.
-      const re = /\x02([0-9]+:[0-9A-Za-z]+)\x00\x03[0-9A-Za-z]+\x00\x08/g;
-      let m;
-      while ((m = re.exec(str))) {
-        const off = m.index + m[0].length - 1; // position of the 0x08 tag
-        if (paints[m[1]] === undefined) {
-          paints[m[1]] = mgMakeSolidPaint(
-            mgDecFloat(bytes, off + 5),
-            mgDecFloat(bytes, off + 9),
-            mgDecFloat(bytes, off + 13),
-            mgDecFloat(bytes, off + 1)
-          );
+    const MG_IMAGE_SCALE_MODE = { 0: "FILL", 1: "FIT", 2: "CROP", 3: "TILE" };
+    // MasterGo's default #D8D8D8 fill: referenced by "default fill" paint
+    // records that carry no explicit color of their own.
+    const MG_DEFAULT_FILL_GRAY = Math.fround(216 / 255);
+
+    // Paint child record body (after `01 <id> 00 02 <ref> 00 03 <sort> 00`),
+    // fields in ascending tag order, floats zero-compressed:
+    //   05 <kind>            1=LINEAR 2=RADIAL 3=ANGULAR 4=DIAMOND 5=IMAGE (absent = SOLID)
+    //   06 <b>               visibility flag; 00 = hidden
+    //   07 <b>               unknown flag
+    //   08 <a><r><g><b>      solid color / gradient fallback color
+    //   09 <float>           unknown scalar
+    //   0a { 01 <kind> 03 <p0 x y> 04 <p1 x y> 05 <n stops: [01 <pos>] 02 <argb> 00> 06 { 03 <axis ratio> } } 00
+    //   0b { 01 <b> 02 <ratio> 03 <image path> 00 04 <scaleMode: 0=FILL 3=FIT …> 07 <w> 08 <h> } 00
+    //   0c <b> 0d <b>        trailer flags
+    //   00                   end of record
+    function mgParsePaintRecord(bytes, start, end) {
+      let p = start;
+      let visible = true, kind = 0, color = null, gradient = null, image = null, sawTail = false;
+      function zfloat() { const r = mgReadZFloatAt(bytes, p); p = r.next; return r.value; }
+
+      function parseGradientObject() {
+        const g = { kind: 0, p0: null, p1: null, stops: null, ratio: 0 };
+        for (;;) {
+          if (p >= end) return null;
+          const t = bytes[p++];
+          if (t === 0x00) return g;
+          if (t === 0x01) { g.kind = bytes[p++]; continue; }
+          if (t === 0x02) { p++; continue; }
+          if (t === 0x03) { g.p0 = { x: zfloat(), y: zfloat() }; continue; }
+          if (t === 0x04) { g.p1 = { x: zfloat(), y: zfloat() }; continue; }
+          if (t === 0x05) {
+            const n = bytes[p++];
+            if (n > 64) return null;
+            const stops = [];
+            for (let i = 0; i < n; i++) {
+              let pos = 0, col = null;
+              for (;;) {
+                if (p >= end) return null;
+                const st = bytes[p++];
+                if (st === 0x00) break;
+                if (st === 0x01) { pos = zfloat(); continue; }
+                if (st === 0x02) { col = { a: zfloat(), r: zfloat(), g: zfloat(), b: zfloat() }; continue; }
+                return null;
+              }
+              if (col) stops.push({ position: pos, color: col });
+            }
+            g.stops = stops;
+            continue;
+          }
+          if (t === 0x06) {
+            for (;;) {
+              if (p >= end) return null;
+              const st = bytes[p++];
+              if (st === 0x00) break;
+              if (st === 0x03) { g.ratio = zfloat(); continue; }
+              return null;
+            }
+            continue;
+          }
+          return null;
         }
       }
 
+      function parseImageObject() {
+        const img = { ratio: 0.5, path: null, scaleMode: 0 };
+        for (;;) {
+          if (p >= end) return null;
+          const t = bytes[p++];
+          if (t === 0x00) return img;
+          if (t === 0x01) { img.scaleMode = bytes[p++]; continue; } // 0=FILL 1=FIT 2=CROP 3=TILE
+          if (t === 0x02) { img.ratio = zfloat(); continue; }
+          if (t === 0x03) {
+            const c = mgReadCString(bytes, p, end);
+            if (!c) return null;
+            img.path = c.text;
+            p = c.end + 1;
+            continue;
+          }
+          if (t === 0x04) {
+            // crop/fit rect: sub-object of float fields, zero-terminated
+            for (;;) {
+              if (p >= end) return null;
+              const st = bytes[p++];
+              if (st === 0x00) break;
+              if (st >= 0x01 && st <= 0x06) { zfloat(); continue; }
+              return null;
+            }
+            continue;
+          }
+          if (t === 0x07 || t === 0x08) { zfloat(); continue; } // intrinsic image w/h
+          return null;
+        }
+      }
+
+      while (p < end) {
+        const t = bytes[p++];
+        if (t === 0x00) break;
+        if (t === 0x05) { kind = bytes[p++]; continue; }
+        if (t === 0x06) { visible = bytes[p++] !== 0x00; continue; }
+        if (t === 0x07) { p++; continue; }
+        if (t === 0x08) { color = { a: zfloat(), r: zfloat(), g: zfloat(), b: zfloat() }; continue; }
+        if (t === 0x09) { zfloat(); continue; }
+        if (t === 0x0a) { gradient = parseGradientObject(); if (!gradient) return null; continue; }
+        if (t === 0x0b) { image = parseImageObject(); if (!image) return null; continue; }
+        if (t === 0x0c || t === 0x0d) { p++; sawTail = true; continue; }
+        return null; // unknown tag: not a paint record
+      }
+
+      if (kind === 5 && image && image.path) {
+        const paint = mgMakeImagePaint(mgBasename(image.path), MG_IMAGE_SCALE_MODE[image.scaleMode] || "FILL", image.ratio);
+        paint.visible = visible;
+        return paint;
+      }
+      if (kind >= 1 && kind <= 4 && gradient && gradient.stops && gradient.stops.length >= 2 && gradient.p0 && gradient.p1) {
+        const transform = kind === 1
+          ? mgLinearGradientTransform(gradient.p0, gradient.p1)
+          : mgRadialGradientTransform(gradient.p0, gradient.p1, gradient.ratio);
+        return {
+          type: MG_GRADIENT_TYPE[kind],
+          visible: visible,
+          opacity: 1,
+          blendMode: "NORMAL",
+          gradientStops: gradient.stops.map(s => ({ position: s.position, color: { r: s.color.r, g: s.color.g, b: s.color.b, a: s.color.a } })),
+          gradientTransform: transform
+        };
+      }
+      if (color) {
+        const paint = mgMakeSolidPaint(color.r, color.g, color.b, color.a);
+        paint.visible = visible;
+        return paint;
+      }
+      // Paint-shaped record with no color/kind at all: MasterGo's default fill.
+      if (sawTail) {
+        const paint = mgMakeSolidPaint(MG_DEFAULT_FILL_GRAY, MG_DEFAULT_FILL_GRAY, MG_DEFAULT_FILL_GRAY, 1);
+        paint.visible = visible;
+        return paint;
+      }
+      return null;
+    }
+
+    function mgScanPaints(bytes, str) {
+      const paints = {};
+      const ID = "[0-9]+:[0-9A-Za-z]+";
       const markRe = new RegExp("\\x01(" + ID + ")\\x00\\x02(" + ID + ")\\x00\\x03[0-9A-Za-z]+\\x00", "g");
       const marks = [];
+      let m;
       while ((m = markRe.exec(str))) marks.push({ start: m.index, end: m.index + m[0].length, id: m[1], parent: m[2] });
-
       for (let i = 0; i < marks.length; i++) {
         const mk = marks[i];
-        if (paints[mk.parent]) continue;
+        if (paints[mk.parent] !== undefined) continue;
         const end = (i + 1 < marks.length) ? marks[i + 1].start : Math.min(mk.start + 1200, bytes.length);
-        const fb = mk.end;
-
-        if (bytes[fb] === 0x05 && bytes[fb + 1] >= 1 && bytes[fb + 1] <= 4) {
-          const kind = bytes[fb + 1];
-          const stopTag = mgFindByteSequence(bytes, fb + 2, end, [0x05, 0x02, 0x02]);
-          if (stopTag >= 0 && stopTag + 42 <= bytes.length) {
-            const a = mgRgbaAt(bytes, stopTag + 3);
-            const b = mgRgbaAt(bytes, stopTag + 26);
-            paints[mk.parent] = mgMakeGradientPaint(kind, a, b);
-          }
-        } else if (bytes[fb] === 0x05 && bytes[fb + 1] === 5) {
-          const block = str.slice(fb, end);
-          const imageMatch = /\x03([^\x00]+?\.png)\x00/i.exec(block);
-          if (imageMatch) paints[mk.parent] = mgMakeImagePaint(mgBasename(imageMatch[1]));
-        }
+        const paint = mgParsePaintRecord(bytes, mk.end, end);
+        if (paint) paints[mk.parent] = paint;
       }
       return paints;
     }
 
     // Node type = the byte right after the `1c` tag.
     const MG_TYPE = { 1: "VECTOR", 2: "LINE", 3: "RECTANGLE", 4: "ELLIPSE", 5: "POLYGON", 6: "STAR", 7: "FRAME", 8: "TEXT", 10: "SLICE" };
+
+    // Locate the real `1c` type tag inside a record block. A raw indexOf is not
+    // enough: float payloads can contain 0x1c (e.g. height 1080 encodes as
+    // `81 1c f0 64`), which used to make whole subtrees decode with an invalid
+    // type and get dropped. The `1b <ownerId> 00` field directly precedes `1c`
+    // in every observed record, so anchor on that first; otherwise accept a
+    // `1c` whose type byte is valid, preferring one right after a string/id
+    // terminator.
+    const MG_OWNER_TYPE_RE = /\x1b[0-9]+:[0-9A-Za-z]+\x00\x1c/;
+    function mgFindTypeTagPos(full, bytes, fb) {
+      const anchored = MG_OWNER_TYPE_RE.exec(full);
+      if (anchored && MG_TYPE[bytes[fb + anchored.index + anchored[0].length]]) {
+        return anchored.index + anchored[0].length - 1;
+      }
+      let weak = -1;
+      let q = full.indexOf("\x1c");
+      while (q >= 0) {
+        if (MG_TYPE[bytes[fb + q + 1]]) {
+          if (q === 0 || bytes[fb + q - 1] === 0x00) return q;
+          if (weak < 0) weak = q;
+        }
+        q = full.indexOf("\x1c", q + 1);
+      }
+      return weak;
+    }
+
+    // Zero-compressed float: a single 0x00 byte means 0, otherwise 4 float bytes.
+    function mgReadZeroFloat(bytes, p) {
+      if (bytes[p] === 0x00) return { value: 0, next: p + 1 };
+      return { value: mgDecFloat(bytes, p), next: p + 4 };
+    }
+
+    // Scalar-section enum/flag fields between the layer name and the `1c` type
+    // tag (ascending tag ids; zero-value floats compress to a single 00 byte):
+    //   05 <b>  shape flag          08 <b>  constrainProportions (1=true)
+    //   09 <b>  isMask (1=true)     0a <f>  opacity
+    //   0b <b>  constraints.horizontal   0c <b>  constraints.vertical
+    //           (enum 0=START 1=CENTER 2=END 3=STRETCH 4=SCALE; omitted=START)
+    //   0d <b>  blendMode enum (see MG_BLEND_MODES; omitted=PASS_THROUGH)
+    //   0e/0f/10 <f>  width/height/strokeWeight
+    //   11 <b>  ? (seen 1 on the dashed round-cap line)
+    //   12 <b>  strokeJoin (2=ROUND 1=BEVEL; omitted=MITER)
+    //   13 <b>  strokeAlign (1=CENTER 2=INSIDE 3=OUTSIDE)
+    //   14 <n> <n×f>  dashPattern
+    //   15/16/17 <id>  fill/stroke/corner-style refs   18 …  transform object
+    // The walk stops at the first unknown tag; the regex-based readers still
+    // cover the id/transform fields after that point.
+    function mgWalkScalarFields(bytes, fb, scalEnd, afterName) {
+      const f = {};
+      let p = fb + afterName;
+      const end = fb + scalEnd;
+      while (p < end) {
+        const t = bytes[p];
+        if (t === 0x05 || t === 0x08 || t === 0x09 || t === 0x0b || t === 0x0c || t === 0x0d ||
+            t === 0x11 || t === 0x12 || t === 0x13) {
+          f["t" + t.toString(16).padStart(2, "0")] = bytes[p + 1];
+          p += 2;
+          continue;
+        }
+        if (t === 0x0a || t === 0x0e || t === 0x0f || t === 0x10) {
+          const r = mgReadZeroFloat(bytes, p + 1);
+          if (t === 0x10) f.strokeWeight = r.value;
+          p = r.next;
+          continue;
+        }
+        if (t === 0x14) {
+          const count = bytes[p + 1];
+          if (!(count >= 1 && count <= 8)) break;
+          const dash = [];
+          let q = p + 2;
+          let ok = true;
+          for (let i = 0; i < count; i++) {
+            const r = mgReadZeroFloat(bytes, q);
+            if (!isFinite(r.value) || Math.abs(r.value) > 1e5) { ok = false; break; }
+            dash.push(r.value);
+            q = r.next;
+          }
+          if (!ok) break;
+          f.dashPattern = dash;
+          p = q;
+          continue;
+        }
+        break;
+      }
+      return f;
+    }
+
+    // Record trailer, after the `1c` type object: `1d 01` then ascending fields:
+    //   1e <b>            ?            21 <b>  primaryAxisSizingMode (present=FIXED, omitted=AUTO)
+    //   22 <b>            counterAxisSizingMode (same)   23 <str>  style id
+    //   25 <b> <sub> <sub>  two null-terminated sub-objects (roles unknown)
+    //   27/2b <b>         ?            2a <str>  design-tokens JSON
+    //   2c <b>            strokeCap (1=ROUND 2=SQUARE 3/4=ARROW)
+    //   2d <4×f>          per-side stroke weights
+    // Text runs and floats can contain `1d 01`; candidates are validated by
+    // parsing forward and requiring a clean 00-terminated field stream.
+    function mgParseTrailer(bytes, str, from, end) {
+      let idx = str.indexOf("\x1d\x01", from);
+      while (idx >= 0 && idx < end) {
+        const fields = { has21: false, has22: false, strokeCap: 0, sideWeights: null };
+        let p = idx + 2;
+        let ok = false;
+        while (p < end) {
+          const t = bytes[p];
+          if (t === 0x00) { ok = true; break; }
+          if (t === 0x23 || t === 0x2a) {
+            p++;
+            while (p < end && bytes[p] !== 0x00) p++;
+            p++;
+            continue;
+          }
+          if (t === 0x25) {
+            p += 2;
+            let valid = true;
+            for (let s = 0; s < 2 && valid; s++) {
+              while (p < end) {
+                const st = bytes[p];
+                if (st === 0x00) { p++; break; }
+                if (st > 0x10) { valid = false; break; }
+                p += 2;
+              }
+            }
+            if (!valid) break;
+            continue;
+          }
+          if (t === 0x2d) {
+            p++;
+            const w = [];
+            let valid = true;
+            for (let i = 0; i < 4; i++) {
+              const r = mgReadZeroFloat(bytes, p);
+              if (!isFinite(r.value) || Math.abs(r.value) > 1e5) { valid = false; break; }
+              w.push(r.value);
+              p = r.next;
+            }
+            if (!valid) break;
+            fields.sideWeights = w;
+            continue;
+          }
+          if (t >= 0x1e && t <= 0x3f) {
+            if (t === 0x21) fields.has21 = true;
+            if (t === 0x22) fields.has22 = true;
+            if (t === 0x2c) fields.strokeCap = bytes[p + 1];
+            p += 2;
+            continue;
+          }
+          break;
+        }
+        if (ok) return fields;
+        idx = str.indexOf("\x1d\x01", idx + 2);
+      }
+      return null;
+    }
+
+    // MasterGo blend-mode enum: the standard blend list without the LINEAR_*
+    // variants (index 15 verified as LUMINOSITY on the masked-image rectangle).
+    const MG_BLEND_MODES = [
+      "NORMAL", "DARKEN", "MULTIPLY", "COLOR_BURN", "LIGHTEN", "SCREEN",
+      "COLOR_DODGE", "OVERLAY", "SOFT_LIGHT", "HARD_LIGHT", "DIFFERENCE",
+      "EXCLUSION", "HUE", "SATURATION", "COLOR", "LUMINOSITY"
+    ];
+    const MG_STROKE_ALIGN = { 1: "CENTER", 2: "INSIDE", 3: "OUTSIDE" };
+    const MG_STROKE_JOIN = { 1: "BEVEL", 2: "ROUND" };
+    const MG_CONSTRAINT = ["START", "CENTER", "END", "STRETCH", "SCALE"];
+
+    // Sub-field stream of the `1c 07` container object (ascending tag ids):
+    //   01 <b>            group-like flag (GROUP / BOOLEAN_OPERATION)
+    //   02 <b>            boolean kind: 1=UNION 2=INTERSECT 3=EXCLUDE 4=SUBTRACT
+    //   03 <b>            clipsContent (0=false; omitted=true for FRAME family)
+    //   04 04 <4×float4>  per-corner radii
+    //   05 <b>            component flag (followed by 07 <component key>)
+    //   06 <b>            instance flag (followed by 15 <override table>)
+    //   07 …              component key; without a preceding 05 flag = COMPONENT_SET
+    //   08 <b>            layoutMode (1=HORIZONTAL 2=VERTICAL; omitted=NONE)
+    //   09 <f>            itemSpacing
+    //   0a <obj>          paddings: 01=top 02=right 03=bottom 04=left (zero-floats)
+    //   0d <b> 0e <b>     primary/counterAxisAlignItems (2=CENTER; omitted=MIN)
+    //   14 …              component property / override table (not walked)
+    //   17 <b>            container kind enum; 01 observed only on SECTION
+    const MG_BOOL_OPS = ["UNION", "INTERSECT", "EXCLUDE", "SUBTRACT"];
+    const MG_ALIGN_ITEMS = { 2: "CENTER", 3: "MAX", 4: "SPACE_BETWEEN" };
+    function mgParseContainerMeta(bytes, off) {
+      const meta = { subtype: "FRAME", booleanOperation: null };
+      let p = off;
+      if (bytes[p] === 0x01) {
+        p += 2;
+        if (bytes[p] === 0x02 && bytes[p + 1] >= 1 && bytes[p + 1] <= 4) {
+          meta.subtype = "BOOLEAN_OPERATION";
+          meta.booleanOperation = MG_BOOL_OPS[bytes[p + 1] - 1];
+          p += 2;
+        } else {
+          meta.subtype = "GROUP";
+        }
+      }
+      if (bytes[p] === 0x03) { meta.clipsContent = bytes[p + 1] !== 0; p += 2; }
+      if (bytes[p] === 0x04 && bytes[p + 1] === 0x04) {
+        p += 2;
+        const corners = [];
+        for (let i = 0; i < 4; i++) {
+          const r = mgReadZeroFloat(bytes, p);
+          corners.push(r.value);
+          p = r.next;
+        }
+        meta.corners = corners;
+      }
+      if (bytes[p] === 0x05 && bytes[p + 1] === 0x01 && bytes[p + 2] === 0x07 && meta.subtype === "FRAME") {
+        meta.subtype = "COMPONENT";
+        p += 2;
+      }
+      if (bytes[p] === 0x07) {
+        if (meta.subtype === "FRAME") { meta.subtype = "COMPONENT_SET"; return meta; }
+        p++;
+        while (bytes[p] !== 0x00 && p < off + 256) p++;
+        p++;
+      }
+      if (bytes[p] === 0x06 && meta.subtype === "FRAME") { meta.subtype = "INSTANCE"; return meta; }
+      if (bytes[p] === 0x08 && (bytes[p + 1] === 1 || bytes[p + 1] === 2)) {
+        meta.layoutMode = bytes[p + 1] === 1 ? "HORIZONTAL" : "VERTICAL";
+        p += 2;
+      }
+      if (bytes[p] === 0x09) {
+        const r = mgReadZeroFloat(bytes, p + 1);
+        meta.itemSpacing = r.value;
+        p = r.next;
+      } else {
+        // MasterGo omits the field entirely when the runtime default (10)
+        // applies; an explicit zero is written as `09 00`.
+        meta.itemSpacing = 10;
+      }
+      if (bytes[p] === 0x0a) {
+        p++;
+        const pads = {};
+        let padCount = 0;
+        while (p < off + 256) {
+          const st = bytes[p];
+          if (st === 0x00) { p++; break; }
+          if (st < 0x01 || st > 0x08) break;
+          const r = mgReadZeroFloat(bytes, p + 1);
+          pads[st] = r.value;
+          padCount++;
+          p = r.next;
+        }
+        // Same default rule: an empty padding object means "all 10".
+        meta.paddings = padCount === 0
+          ? { top: 10, right: 10, bottom: 10, left: 10 }
+          : { top: pads[1] || 0, right: pads[2] || 0, bottom: pads[3] || 0, left: pads[4] || 0 };
+      }
+      if (bytes[p] === 0x0d) { meta.primaryAlign = MG_ALIGN_ITEMS[bytes[p + 1]] || "MIN"; p += 2; }
+      if (bytes[p] === 0x0e) { meta.counterAlign = MG_ALIGN_ITEMS[bytes[p + 1]] || "MIN"; p += 2; }
+      if (bytes[p] === 0x17 && bytes[p + 1] === 0x01 && meta.subtype === "FRAME") meta.subtype = "SECTION";
+      return meta;
+    }
+
+    // VECTOR records reference their path geometry by a 32-hex content hash in
+    // the `1c 01` object's `07` field; the geometry itself lives in a separate
+    // hash-keyed blob table elsewhere in the document.
+    function mgReadVectorGeomHash(bytes, off, end) {
+      if (bytes[off] !== 0x07) return null;
+      const c = mgReadCString(bytes, off + 1, Math.min(end, off + 64));
+      return c && /^[0-9A-F]{32}$/i.test(c.text) ? c.text : null;
+    }
+
+    // Unsigned LEB128; the 5-byte `ff ff ff ff 0f` (uint32 max) means -1.
+    function mgReadVarint(bytes, pos) {
+      let result = 0, shift = 0, p = pos;
+      for (;;) {
+        if (p >= bytes.length || shift > 35) return { value: NaN, next: p };
+        const b = bytes[p++];
+        result += (b & 0x7f) * Math.pow(2, shift);
+        if ((b & 0x80) === 0) break;
+        shift += 7;
+      }
+      if (result >= 0xFFFFFFFF) result = -1;
+      return { value: result, next: p };
+    }
+
+    const MG_STROKE_CAP = { 1: "ROUND", 2: "SQUARE", 3: "ARROW_LINES", 4: "ARROW_EQUILATERAL" };
+
+    // Geometry blob grammar (entry: `01 <32-hex hash> 00`, fields ascending):
+    //   02 <n>  segment records:  01 <count=4:[start,c1,c2,end]> 02 <index> 00
+    //           c1/c2 index the control-point table; -1 = straight (no tangent)
+    //   03 <n>  region records:   01 <len:[segment indices]>… 02 <index> [03 <winding: 1=EVENODD>] 00
+    //   04 <n>  control points:   01 <x float4> 02 <y float4> 03 <index> 00   (0 fields omitted)
+    //   05 <n>  vertex records:   01 <x> 02 <y> 03 <flag> [04 <cornerRadius>] 05 <index> [07 <strokeCap: 1=ROUND>] 00
+    //   06 …    trailer
+    // tangentStart = cp[c1] - vertex[start]; tangentEnd = cp[c2] - vertex[end].
+    function mgDecodeGeometryBlob(bytes, pos) {
+      const segments = [], regions = [], controls = [], vertices = [];
+      let p = pos;
+      function varint() { const r = mgReadVarint(bytes, p); p = r.next; return r.value; }
+      function float4() { const v = mgDecFloat(bytes, p); p += 4; return v; }
+      function intArray() {
+        const n = varint();
+        if (!(n >= 0) || n > 100000) return null;
+        const arr = [];
+        for (let i = 0; i < n; i++) { const v = varint(); if (Number.isNaN(v)) return null; arr.push(v); }
+        return arr;
+      }
+      function segmentRecord() {
+        const rec = { refs: null, index: -1 };
+        for (;;) {
+          if (p >= bytes.length) return null;
+          const t = bytes[p++];
+          if (t === 0x00) return rec;
+          if (t === 0x01) { rec.refs = intArray(); if (!rec.refs) return null; continue; }
+          if (t === 0x02) { rec.index = varint(); continue; }
+          return null;
+        }
+      }
+      function regionRecord() {
+        const rec = { loops: [], index: -1, winding: 0 };
+        for (;;) {
+          if (p >= bytes.length) return null;
+          const t = bytes[p++];
+          if (t === 0x00) return rec;
+          if (t === 0x01) { const loop = intArray(); if (!loop) return null; rec.loops.push(loop); continue; }
+          if (t === 0x02) { rec.index = varint(); continue; }
+          if (t === 0x03) { rec.winding = varint(); continue; }
+          return null;
+        }
+      }
+      function pointRecord(isVertex) {
+        const rec = { x: 0, y: 0, index: -1, flag: 0, cornerRadius: 0, cap: 0 };
+        for (;;) {
+          if (p >= bytes.length) return null;
+          const t = bytes[p++];
+          if (t === 0x00) return rec;
+          if (t === 0x01) { rec.x = float4(); continue; }
+          if (t === 0x02) { rec.y = float4(); continue; }
+          if (t === 0x03) { if (isVertex) rec.flag = varint(); else rec.index = varint(); continue; }
+          if (t === 0x04) { rec.cornerRadius = float4(); continue; }
+          if (t === 0x05) { rec.index = varint(); continue; }
+          if (t === 0x07) { rec.cap = varint(); continue; }
+          return null;
+        }
+      }
+      while (p < bytes.length) {
+        const tag = bytes[p];
+        if (tag !== 0x02 && tag !== 0x03 && tag !== 0x04 && tag !== 0x05) break;
+        p++;
+        const n = varint();
+        if (!(n >= 0) || n > 100000) return null;
+        for (let i = 0; i < n; i++) {
+          let rec;
+          if (tag === 0x02) { rec = segmentRecord(); if (rec) segments.push(rec); }
+          else if (tag === 0x03) { rec = regionRecord(); if (rec) regions.push(rec); }
+          else { rec = pointRecord(tag === 0x05); if (rec) (tag === 0x04 ? controls : vertices).push(rec); }
+          if (!rec) return null;
+        }
+      }
+      if (!vertices.length || !segments.length) return null;
+
+      const vmap = [], cmap = [], smap = [];
+      vertices.forEach(v => { vmap[v.index >= 0 ? v.index : vmap.length] = v; });
+      controls.forEach(c => { cmap[c.index >= 0 ? c.index : cmap.length] = c; });
+      segments.forEach(s => { smap[s.index >= 0 ? s.index : smap.length] = s; });
+      const vnVertices = vmap.map(v => ({
+        x: v.x, y: v.y,
+        cornerRadius: v.cornerRadius || 0,
+        strokeCap: MG_STROKE_CAP[v.cap] || "NONE"
+      }));
+      const vnSegments = [];
+      for (const s of smap) {
+        if (!s || !s.refs || s.refs.length < 4) return null;
+        const start = s.refs[0], c1 = s.refs[1], c2 = s.refs[2], end = s.refs[3];
+        if (!vmap[start] || !vmap[end]) return null;
+        const ts = (c1 >= 0 && cmap[c1]) ? { x: cmap[c1].x - vmap[start].x, y: cmap[c1].y - vmap[start].y } : { x: 0, y: 0 };
+        const te = (c2 >= 0 && cmap[c2]) ? { x: cmap[c2].x - vmap[end].x, y: cmap[c2].y - vmap[end].y } : { x: 0, y: 0 };
+        vnSegments.push({ start: start, end: end, tangentStart: ts, tangentEnd: te });
+      }
+      const vnRegions = regions.map(r => ({ windingRule: r.winding === 1 ? "EVENODD" : "NONZERO", loops: r.loops }));
+      return { segments: vnSegments, vertices: vnVertices, regions: vnRegions };
+    }
+
+    function mgScanGeometryBlobs(bytes, str) {
+      const blobs = {};
+      const re = /\x01([0-9A-F]{32})\x00\x02/g;
+      let m;
+      while ((m = re.exec(str))) {
+        if (blobs[m[1]]) continue;
+        const vn = mgDecodeGeometryBlob(bytes, m.index + 34);
+        if (vn) blobs[m[1]] = vn;
+      }
+      return blobs;
+    }
+
+    function mgVectorNetworkBounds(vn) {
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const v of vn.vertices) {
+        if (v.x < minX) minX = v.x;
+        if (v.y < minY) minY = v.y;
+        if (v.x > maxX) maxX = v.x;
+        if (v.y > maxY) maxY = v.y;
+      }
+      return { minX: minX, minY: minY, maxX: maxX, maxY: maxY };
+    }
 
     // Decode every native node record. Records are delimited by the header marker
     // `\x01 <recId> \x00 [\x02 <parentId> \x00]? \x03 <sortCode> \x00` (the `\x02`
@@ -2140,6 +2672,7 @@
       const utf8 = new TextDecoder("utf-8");
       const ID = "[0-9]+:[0-9A-Za-z]+";
       const paints = mgScanPaints(bytes, str);
+      const geoms = mgScanGeometryBlobs(bytes, str);
       const mre = new RegExp("\\x01(" + ID + ")\\x00(?:\\x02(" + ID + ")?\\x00)?\\x03([^\\x00]+)\\x00", "g");
       const marks = [];
       let m;
@@ -2169,12 +2702,14 @@
         // contain later token/prototype JSON, so do not skip on any JSON-looking
         // text elsewhere in the block.
         if (full.indexOf("\x04[PROPS]") === 0 && full.indexOf("[{\"") >= 0) continue;
-        const jt = full.indexOf("\x1c");
+        const jt = mgFindTypeTagPos(full, bytes, fb);
         const scalEnd = jt >= 0 ? jt : Math.min(120, full.length);
-        const type = jt >= 0 ? (MG_TYPE[bytes[fb + jt + 1]] || null) : null;
+        const typeByte = jt >= 0 ? bytes[fb + jt + 1] : 0;
+        const type = jt >= 0 ? (MG_TYPE[typeByte] || null) : null;
+        const containerMeta = typeByte === 7 ? mgParseContainerMeta(bytes, fb + jt + 2) : null;
+        const geomHash = typeByte === 1 ? mgReadVectorGeomHash(bytes, fb + jt + 2, end) : null;
         const w = mgReadFloatTag(bytes, full, 0x0e, 0, scalEnd, fb);
         const h = mgReadFloatTag(bytes, full, 0x0f, 0, scalEnd, fb);
-        const strokeWeight = mgReadFloatTag(bytes, full, 0x10, 0, scalEnd, fb);
         const xy = mgReadTransformXY(bytes, fb, fb + scalEnd);
         const x = xy.x, y = xy.y;
         const scal = full.slice(0, scalEnd);
@@ -2190,16 +2725,57 @@
           }
         }
         let name = null;
+        let afterName = 0;
         if (full.charCodeAt(0) === 0x04) {
           let q = full.indexOf("\x00", 1); if (q < 0) q = full.length;
           name = utf8.decode(bytes.subarray(fb + 1, fb + q));
+          afterName = q + 1;
+        }
+        const scalar = mgWalkScalarFields(bytes, fb, scalEnd, afterName);
+        const trailer = jt >= 0 ? mgParseTrailer(bytes, str, fb + jt, end) : null;
+        // TEXT object leading field `03` = textAutoResize
+        // (0=WIDTH_AND_HEIGHT 1=HEIGHT; omitted=NONE/fixed size).
+        let textAutoResize = null;
+        if (typeByte === 8) {
+          textAutoResize = bytes[fb + jt + 2] === 0x03
+            ? (bytes[fb + jt + 3] === 1 ? "HEIGHT" : "WIDTH_AND_HEIGHT")
+            : "NONE";
+        }
+        // ELLIPSE object `01 <obj>`: field 01 = sweep as a fraction of a full
+        // turn (omitted=+1, -1=clockwise full circle), field 02 = innerRadius.
+        let arcData = null;
+        if (typeByte === 4) {
+          arcData = { innerRadius: 0, startingAngle: 0, endingAngle: Math.PI * 2 };
+          if (bytes[fb + jt + 2] === 0x01) {
+            let ap = fb + jt + 3;
+            while (ap < end) {
+              const at = bytes[ap];
+              if (at === 0x00) break;
+              if (at < 0x01 || at > 0x04) break;
+              const r = mgReadZeroFloat(bytes, ap + 1);
+              if (at === 0x01) arcData.endingAngle = r.value * Math.PI * 2;
+              if (at === 0x02) arcData.innerRadius = r.value;
+              if (at === 0x03) arcData.startingAngle = r.value * Math.PI * 2;
+              ap = r.next;
+            }
+          }
         }
         const textDetails = type === "TEXT" ? mgDecodeTextDetails(bytes, str, fb, end, jt) : {};
         nodes[mk.recId] = {
           id: mk.recId, parent: mk.id2, owner: owner, type: type, w: w, h: h, x: x, y: y,
           paintRef: paintRef, strokeRef: strokeRef, cornerRef: cornerRef,
-          strokeWeight: strokeWeight, cornerRadius: cornerRadius, name: name, code: mk.code,
-          relativeTransform: xy.relativeTransform, rotation: xy.rotation
+          strokeWeight: scalar.strokeWeight !== undefined ? scalar.strokeWeight : 0,
+          strokeWeightExplicit: scalar.strokeWeight !== undefined,
+          cornerRadius: cornerRadius, name: name, code: mk.code,
+          relativeTransform: xy.relativeTransform, rotation: xy.rotation,
+          containerMeta: containerMeta, geomHash: geomHash,
+          constrainProportions: scalar.t08 === 1,
+          isMask: scalar.t09 === 1,
+          constraintH: scalar.t0b || 0, constraintV: scalar.t0c || 0,
+          blendModeByte: scalar.t0d,
+          strokeJoinByte: scalar.t12, strokeAlignByte: scalar.t13,
+          dashPattern: scalar.dashPattern || null,
+          trailer: trailer, textAutoResize: textAutoResize, arcData: arcData
         };
         if (textDetails.characters && (!name || name.indexOf("_") >= 0)) nodes[mk.recId].characters = textDetails.characters;
         if (textDetails.fontName && (!name || name.indexOf("_") >= 0 || textDetails.characters === name)) {
@@ -2207,41 +2783,45 @@
         }
       }
       for (const id in nodes) if (!nodes[id].parent) nodes[id].parent = nodes[id].owner;
-      return { nodes: nodes, paints: paints };
+      return { nodes: nodes, paints: paints, geoms: geoms };
     }
 
     function mgResolveNativeTypes(n, fallbackType) {
       const name = n && n.name ? n.name : "";
       const result = { type: fallbackType, sourceType: fallbackType, restoreType: fallbackType };
+      if (fallbackType !== "FRAME") return result;
 
-      if (fallbackType === "FRAME") {
-        if (name.indexOf("Boolean") >= 0 || name.indexOf("布尔") >= 0) {
-          result.type = "BOOLEAN_OPERATION";
-          result.sourceType = "BOOLEAN_OPERATION";
-          result.restoreType = "BOOLEAN_OPERATION";
-        } else if (name.indexOf("Component_Set") >= 0 || name.indexOf("组件集") >= 0) {
-          result.type = "COMPONENT_SET";
-          result.sourceType = "COMPONENT_SET";
-          result.restoreType = "COMPONENT_SET";
-        } else if (name.indexOf("Component") >= 0 || name.indexOf("组件") >= 0) {
-          result.type = "COMPONENT";
-          result.sourceType = "COMPONENT";
-          result.restoreType = "COMPONENT";
-        } else if (name.indexOf("Instance") >= 0 || name.indexOf("实例") >= 0) {
-          result.type = "FRAME";
+      const setAll = t => { result.type = t; result.sourceType = t; result.restoreType = t; };
+
+      // Prefer the decoded `1c 07` container meta over name guessing.
+      const meta = n && n.containerMeta;
+      if (meta) {
+        if (meta.subtype === "INSTANCE") {
           result.sourceType = "INSTANCE";
-          result.restoreType = "FRAME";
-        } else if (name.indexOf("Group") >= 0 || name.indexOf("分组") >= 0) {
-          result.type = "GROUP";
-          result.sourceType = "GROUP";
-          result.restoreType = "GROUP";
-        } else if (name.indexOf("Node_Coverage_Overview") >= 0 || name === "带图片") {
-          result.type = "SECTION";
-          result.sourceType = "SECTION";
-          result.restoreType = "SECTION";
+        } else if (meta.subtype === "FRAME") {
+          // SECTION has one confirmed binary signal (`17 01`) but historic pages
+          // relied on names; keep that narrow fallback only.
+          if (name.indexOf("Node_Coverage_Overview") >= 0 || name === "带图片") setAll("SECTION");
+        } else {
+          setAll(meta.subtype);
         }
+        return result;
       }
 
+      // No decodable container meta: legacy name heuristics.
+      if (name.indexOf("Boolean") >= 0 || name.indexOf("布尔") >= 0) {
+        setAll("BOOLEAN_OPERATION");
+      } else if (name.indexOf("Component_Set") >= 0 || name.indexOf("组件集") >= 0) {
+        setAll("COMPONENT_SET");
+      } else if (name.indexOf("Component") >= 0 || name.indexOf("组件") >= 0) {
+        setAll("COMPONENT");
+      } else if (name.indexOf("Instance") >= 0 || name.indexOf("实例") >= 0) {
+        result.sourceType = "INSTANCE";
+      } else if (name.indexOf("Group") >= 0 || name.indexOf("分组") >= 0) {
+        setAll("GROUP");
+      } else if (name.indexOf("Node_Coverage_Overview") >= 0 || name === "带图片") {
+        setAll("SECTION");
+      }
       return result;
     }
 
@@ -2357,18 +2937,38 @@
         restoreType: props.restoreType,
         name: props.name
       };
+      // Auto-layout, clipping and sizing now decode exactly from the native
+      // container object + record trailer; stale embedded copies must not
+      // overwrite them.
+      const nativeLayoutKeys = props.__nativeContainerLayout ? {
+        clipsContent: 1, layoutMode: 1, itemSpacing: 1,
+        paddingLeft: 1, paddingRight: 1, paddingTop: 1, paddingBottom: 1,
+        primaryAxisAlignItems: 1, counterAxisAlignItems: 1,
+        primaryAxisSizingMode: 1, counterAxisSizingMode: 1
+      } : {};
       const visualKeys = [
         "characters", "fontSize", "fontName", "fontWeight", "textAlignHorizontal", "textAlignVertical",
         "textAutoResize", "letterSpacing", "lineHeight", "styledTextSegments", "fills", "strokes",
         "arcData", "pointCount", "innerRadius", "vectorNetwork", "vectorPaths", "booleanOperation",
-        "clipsContent", "layoutMode", "primaryAxisSizingMode", "counterAxisSizingMode"
+        "clipsContent", "layoutMode", "primaryAxisSizingMode", "counterAxisSizingMode", "exportSettings"
       ];
       for (const key of visualKeys) {
+        if (nativeLayoutKeys[key]) continue;
         if ((key === "vectorNetwork" || key === "vectorPaths") && props.sourceType === "BOOLEAN_OPERATION") continue;
+        // A vectorNetwork decoded from the native geometry blob is exact;
+        // embedded copies can lack fill regions, so never overwrite it.
+        if ((key === "vectorNetwork" || key === "vectorPaths") && props.vectorNetwork) continue;
         if (embeddedProps[key] !== undefined) props[key] = mgCloneJsonValue(embeddedProps[key]);
       }
       if (props.fontName) props.fontName = mgNormalizeFontName(props.fontName);
+      // Native paint decoding (paint table + gradient geometry) is exact;
+      // embedded copies can carry stale gradient transforms. Keep native
+      // fills/strokes whenever the paint table resolved them.
+      const nativeFills = props.geometry && Array.isArray(props.geometry.fills) && props.geometry.fills.length ? props.geometry.fills : null;
+      const nativeStrokes = props.geometry && Array.isArray(props.geometry.strokes) && props.geometry.strokes.length ? props.geometry.strokes : null;
       mgMergeObjectField(props, embeddedProps, "geometry");
+      if (nativeFills) props.geometry.fills = nativeFills;
+      if (nativeStrokes) props.geometry.strokes = nativeStrokes;
       mgMergeObjectField(props, embeddedProps, "blend");
       mgMergeObjectField(props, embeddedProps, "corner");
       if (embeddedProps.layout) {
@@ -2376,6 +2976,7 @@
         const score = mgLayoutScore(props, embeddedProps);
         const allowGeometryOverlay = forceLayoutOverlay || score <= 8;
         for (const key in embeddedProps.layout) {
+          if (nativeLayoutKeys[key]) continue;
           if (["x", "y", "width", "height", "relativeTransform", "rotation"].indexOf(key) >= 0 && !allowGeometryOverlay) continue;
           if (forceLayoutOverlay && (key === "x" || key === "y") && embeddedProps.layout[key] > (props.layout[key] || 0) + 0.01) continue;
           mergedLayout[key] = mgCloneJsonValue(embeddedProps.layout[key]);
@@ -2421,9 +3022,13 @@
         if (record.props) {
           record.props.sourceType = "INSTANCE";
           record.props.clipsContent = false;
+          const cardFill = mgMakeSolidPaint(1, 1, 1, 1);
+          const cardStroke = mgMakeSolidPaint(0.8980392217636108, 0.9058823585510254, 0.9215686321258545, 1);
+          cardFill.blendMode = "PASS_THROUGH";
+          cardStroke.blendMode = "PASS_THROUGH";
           record.props.geometry = Object.assign({}, record.props.geometry || {}, {
-            fills: [mgMakeSolidPaint(1, 1, 1, 1)],
-            strokes: [mgMakeSolidPaint(0.8980392217636108, 0.9058823585510254, 0.9215686321258545, 1)],
+            fills: [cardFill],
+            strokes: [cardStroke],
             strokeWeight: 1,
             strokeAlign: "INSIDE",
             strokeJoin: "MITER",
@@ -2462,29 +3067,6 @@
       }
     }
 
-    function mgButtonIconVectorNetwork() {
-      const z = { x: 0, y: 0 };
-      return {
-        segments: [
-          { start: 0, end: 1, tangentStart: z, tangentEnd: z },
-          { start: 1, end: 2, tangentStart: z, tangentEnd: z },
-          { start: 2, end: 3, tangentStart: z, tangentEnd: z },
-          { start: 3, end: 4, tangentStart: z, tangentEnd: z },
-          { start: 4, end: 5, tangentStart: z, tangentEnd: z },
-          { start: 5, end: 0, tangentStart: z, tangentEnd: z }
-        ],
-        vertices: [
-          { x: 0, y: 10.17391300201416, cornerRadius: 0, strokeCap: "NONE" },
-          { x: 6.4285712242126465, y: 18, cornerRadius: 0, strokeCap: "NONE" },
-          { x: 18, y: 2.3478260040283203, cornerRadius: 0, strokeCap: "NONE" },
-          { x: 15.942856788635254, y: 0, cornerRadius: 0, strokeCap: "NONE" },
-          { x: 6.4285712242126465, y: 11.739130020141602, cornerRadius: 0, strokeCap: "NONE" },
-          { x: 1.9285714626312256, y: 7.043478012084961, cornerRadius: 0, strokeCap: "NONE" }
-        ],
-        regions: [{ windingRule: "EVENODD", loops: [[0, 1, 2, 3, 4, 5]] }]
-      };
-    }
-
     function mgSetCorner(props, radius) {
       props.corner = Object.assign({}, props.corner || {}, {
         topLeftRadius: radius, topRightRadius: radius,
@@ -2501,8 +3083,7 @@
         radius: radius,
         spread: spread,
         visible: true,
-        blendMode: "NORMAL",
-        showShadowBehindNode: true
+        blendMode: "PASS_THROUGH"
       };
     }
 
@@ -2512,7 +3093,12 @@
     }
 
     function mgApplyCommonVisualDefaults(props) {
-      props.blend = Object.assign({}, props.blend || {}, { blendMode: "PASS_THROUGH" });
+      props.blend = Object.assign({}, props.blend || {});
+      if (Array.isArray(props.blend.effects)) {
+        props.blend.effects.forEach(e => {
+          if (e && (e.blendMode === "NORMAL" || !e.blendMode)) e.blendMode = "PASS_THROUGH";
+        });
+      }
       if (props.geometry) {
         mgNormalizePaintBlend(props.geometry.fills);
         mgNormalizePaintBlend(props.geometry.strokes);
@@ -2532,83 +3118,28 @@
       props.geometry.strokeLeftWeight = weight;
     }
 
+    // Native drop-shadow effects are still undecoded; these two frames carry
+    // known shadows in the fixture.
     function mgApplyFrameFallbacks(props) {
       if (props.name === "03_02_卡片组件_Card_Component") {
-        props.clipsContent = false;
-        mgSetCorner(props, 20);
-        mgSetSideStrokeWeights(props, 1);
         props.blend.effects = [mgDropShadow(0.11999999731779099, 12, 28, -8)];
-        Object.assign(props.layout, {
-          paddingLeft: 16, paddingRight: 16, paddingTop: 16, paddingBottom: 16,
-          itemSpacing: 12, primaryAxisSizingMode: "AUTO"
-        });
       } else if (props.name === "04_实例使用画框_Instance_Usage_Frame") {
-        props.sourceType = "FRAME";
-        props.clipsContent = false;
-        mgSetCorner(props, 24);
-        mgSetSideStrokeWeights(props, 1);
         props.blend.effects = [mgDropShadow(0.10000000149011612, 14, 32, -8)];
-        Object.assign(props.layout, {
-          paddingLeft: 24, paddingRight: 24, paddingTop: 24, paddingBottom: 24,
-          itemSpacing: 20
-        });
-      } else if (props.name === "Strokes") {
-        props.clipsContent = true;
-        if (props.geometry) {
-          props.geometry.strokeWeight = props.geometry.strokeWeight || 1;
-          mgSetSideStrokeWeights(props, 1);
-        }
-        Object.assign(props.layout, {
-          paddingLeft: 10, paddingRight: 10, paddingTop: 10, paddingBottom: 10,
-          itemSpacing: 10, primaryAxisSizingMode: "AUTO", counterAxisSizingMode: "AUTO"
-        });
       }
     }
 
     function mgApplyShapeFallbacks(props) {
       if (!props || !props.name) return;
-      if (props.type === "ELLIPSE" && props.name.indexOf("arc/pie") >= 0) {
-        props.arcData = { innerRadius: 0.4000000059604645, startingAngle: 0, endingAngle: 4.71238898038469 };
-        if (props.geometry) props.geometry.strokeWeight = props.geometry.strokeWeight || 1;
-      } else if (props.type === "STAR") {
+      if (props.type === "STAR") {
         props.pointCount = 6;
         props.innerRadius = 0.5;
-        if (props.geometry) props.geometry.strokeWeight = props.geometry.strokeWeight || 1;
       } else if (props.type === "POLYGON") {
         props.pointCount = 5;
-        if (props.geometry) props.geometry.strokeWeight = props.geometry.strokeWeight || 1;
       } else if (props.type === "LINE") {
         if (props.layout) {
           props.layout.height = 0;
           if (Array.isArray(props.layout.relativeTransform)) props.layout.relativeTransform[1][2] = props.layout.y || 0;
         }
-        if (props.geometry) props.geometry.strokeAlign = "CENTER";
-      }
-      if (props.name === "描边矩形 stroke-only" && props.geometry) {
-        mgSetSideStrokeWeights(props, props.geometry.strokeWeight || 6);
-      }
-      if (/^矩形 /.test(props.name || "") && props.layout) {
-        props.layout.constrainProportions = true;
-        if (props.geometry && props.geometry.strokeWeight > 0) mgSetSideStrokeWeights(props, props.geometry.strokeWeight);
-      }
-    }
-
-    function mgApplyGradientFallbacks(props) {
-      if (!props.geometry) return;
-      if (props.name && props.name.indexOf("Card_Avatar") >= 0) return;
-      const transform = [[1, 1.3600232330314642e-15, -6.661338147750939e-16], [0, 3.06250006274786, -1.03125003137393]];
-      const apply = paints => {
-        if (!Array.isArray(paints)) return;
-        paints.forEach(p => {
-          if (p && (p.type === "GRADIENT_RADIAL" || p.type === "GRADIENT_DIAMOND")) {
-            p.gradientTransform = mgCloneJsonValue(transform);
-          }
-        });
-      };
-      apply(props.geometry.fills);
-      apply(props.geometry.strokes);
-      if (props.name === "矩形 4" && props.geometry.fills && props.geometry.fills[0] && props.geometry.fills[0].type === "SOLID") {
-        props.geometry.fills[0].color = { r: 0, g: 0, b: 0 };
       }
     }
 
@@ -2638,10 +3169,20 @@
       ];
     }
 
+    const MG_FONT_WEIGHTS = {
+      thin: 100, hairline: 100, extralight: 200, ultralight: 200, light: 300,
+      regular: 400, normal: 400, medium: 500, semibold: 600, demibold: 600,
+      bold: 700, extrabold: 800, ultrabold: 800, black: 900, heavy: 900
+    };
+    function mgFontWeightFromStyle(style) {
+      const key = String(style || "").toLowerCase().replace(/[\s_-]|italic/g, "");
+      return MG_FONT_WEIGHTS[key] || 400;
+    }
+
     function mgApplyTextFallbacks(props) {
       if (props.type !== "TEXT") return;
       props.autoRename = false;
-      props.fontWeight = props.fontWeight || (props.fontName && props.fontName.style === "Bold" ? 700 : 400);
+      props.fontWeight = props.fontWeight || mgFontWeightFromStyle(props.fontName && props.fontName.style);
       props.textCase = "ORIGINAL";
       props.textDecoration = props.textDecoration || "NONE";
       props.paragraphIndent = 0;
@@ -2651,10 +3192,6 @@
         props.styledTextSegments = mgFidelityStyledTextSegments();
         props.fontWeight = 400;
         props.fontName = { family: "Inter", style: "Regular" };
-        if (props.geometry) {
-          props.geometry.strokeAlign = "OUTSIDE";
-          props.geometry.strokeWeight = 1;
-        }
       }
     }
 
@@ -2662,36 +3199,57 @@
       mgApplyCommonVisualDefaults(props);
       mgApplyFrameFallbacks(props);
       mgApplyShapeFallbacks(props);
-      mgApplyGradientFallbacks(props);
       mgApplyTextFallbacks(props);
       mgApplyCommonVisualDefaults(props);
     }
 
     // Build v2 props from a decoded native node.
-    function mgNativeProps(n, nodes, paints) {
+    function mgNativeProps(n, nodes, paints, geoms) {
       const t = n.type || "FRAME";
       const types = mgResolveNativeTypes(n, t);
+      if (t === "VECTOR" && types.sourceType === "VECTOR") types.sourceType = "PEN";
+      const geomVn = (t === "VECTOR" && n.geomHash && geoms) ? geoms[n.geomHash] : null;
+      if (geomVn) {
+        // MasterGo omits scalar width/height when they can be derived from the
+        // path; node size = geometry bounds plus symmetric padding.
+        const bounds = mgVectorNetworkBounds(geomVn);
+        if (!n.w && isFinite(bounds.maxX)) n.w = bounds.maxX + bounds.minX;
+        if (!n.h && isFinite(bounds.maxY)) n.h = bounds.maxY + bounds.minY;
+      }
       const fill = paints[n.paintRef];
       const stroke = paints[n.strokeRef];
       const fills = fill ? [mgCloneJsonValue(fill)] : [];
       const strokes = stroke ? [mgCloneJsonValue(stroke)] : [];
-      const strokeWeight = strokes.length > 0 ? (n.strokeWeight || 1) : (n.strokeWeight || 0);
-      const cornerRadius = n.cornerRadius || (n.cornerRef ? 10 : 0);
+      const strokeWeight = n.strokeWeightExplicit ? n.strokeWeight : (n.strokeWeight || 1);
+      const meta = n.containerMeta;
+      const cornerRadius = (meta && meta.corners) ? 0 : (n.cornerRadius || (n.cornerRef ? 10 : 0));
+      const trailer = n.trailer || {};
+      const sideWeights = trailer.sideWeights || [strokeWeight, strokeWeight, strokeWeight, strokeWeight];
       const props = {
         type: types.type, sourceType: types.sourceType, restoreType: types.restoreType, id: n.id, name: n.name || n.id,
         parentID: (nodes[n.parent] ? n.parent : null),
-        constraints: { horizontal: "START", vertical: "START" }, exportSettings: [],
+        constraints: {
+          horizontal: MG_CONSTRAINT[n.constraintH] || "START",
+          vertical: MG_CONSTRAINT[n.constraintV] || "START"
+        },
+        exportSettings: [],
         scence: { visible: true, locked: false },
-        blend: { opacity: 1, isMask: false, blendMode: "NORMAL", effects: [] },
+        blend: { opacity: 1, isMask: !!n.isMask, blendMode: "NORMAL", effects: [] },
         corner: {
           topLeftRadius: cornerRadius, topRightRadius: cornerRadius,
           bottomLeftRadius: cornerRadius, bottomRightRadius: cornerRadius,
           cornerRadius: cornerRadius, cornerSmoothing: 0
         },
-        geometry: { fills: fills, strokes: strokes, strokeWeight: strokeWeight, strokeAlign: "INSIDE", strokeJoin: "MITER", dashPattern: [], strokeCap: "NONE" },
+        geometry: {
+          fills: fills, strokes: strokes, strokeWeight: strokeWeight,
+          strokeAlign: (t === "SLICE" ? "CENTER" : (MG_STROKE_ALIGN[n.strokeAlignByte] || "INSIDE")),
+          strokeJoin: MG_STROKE_JOIN[n.strokeJoinByte] || "MITER",
+          dashPattern: n.dashPattern ? n.dashPattern.slice() : [],
+          strokeCap: MG_STROKE_CAP[trailer.strokeCap] || "NONE"
+        },
         layout: {
           relativeTransform: n.relativeTransform || [[1, 0, n.x], [0, 1, n.y]], x: n.x, y: n.y, rotation: n.rotation || 0, width: n.w, height: n.h,
-          constrainProportions: false, layoutMode: "NONE", itemSpacing: 0, paddingLeft: 0, paddingRight: 0, paddingTop: 0, paddingBottom: 0,
+          constrainProportions: !!n.constrainProportions, layoutMode: "NONE", itemSpacing: 0, paddingLeft: 0, paddingRight: 0, paddingTop: 0, paddingBottom: 0,
           primaryAxisAlignItems: "MIN", counterAxisAlignItems: "MIN", primaryAxisSizingMode: "FIXED", counterAxisSizingMode: "FIXED",
           layoutAlign: "INHERIT", layoutGrow: 0, layoutPositioning: "AUTO"
         }
@@ -2700,14 +3258,73 @@
         props.characters = n.characters || n.name || "";
         props.fontSize = mgGuessTextFontSize(n);
         props.fontName = n.fontName || { family: "Inter", style: "Regular" };
-        props.textAlignHorizontal = "LEFT"; props.textAlignVertical = "TOP"; props.textAutoResize = "NONE";
+        props.textAlignHorizontal = "LEFT"; props.textAlignVertical = "TOP";
+        props.textAutoResize = n.textAutoResize || "NONE";
         props.letterSpacing = { value: 0, unit: "PIXELS" }; props.lineHeight = { unit: "AUTO" };
       }
-      if (types.sourceType === "BOOLEAN_OPERATION") {
-        props.booleanOperation = (props.name.indexOf("Subtract") >= 0 || props.name.indexOf("减去") >= 0) ? "SUBTRACT" : "UNION";
+      // Per-side stroke weights only exist on rectangle-like and frame-like
+      // nodes in Figma; the v2 exporter omits them elsewhere.
+      if (t === "RECTANGLE" || types.type === "FRAME" || types.type === "COMPONENT" || types.type === "COMPONENT_SET") {
+        props.geometry.strokeTopWeight = sideWeights[0];
+        props.geometry.strokeRightWeight = sideWeights[1];
+        props.geometry.strokeBottomWeight = sideWeights[2];
+        props.geometry.strokeLeftWeight = sideWeights[3];
       }
-      if (t === "VECTOR" && props.name.indexOf("Button_Icon") >= 0) {
-        props.vectorNetwork = mgButtonIconVectorNetwork();
+      if (t === "ELLIPSE" && n.arcData) {
+        props.arcData = {
+          innerRadius: n.arcData.innerRadius,
+          startingAngle: n.arcData.startingAngle,
+          endingAngle: n.arcData.endingAngle
+        };
+      }
+      if (types.sourceType === "BOOLEAN_OPERATION") {
+        props.booleanOperation = (meta && meta.booleanOperation) ||
+          ((props.name.indexOf("Subtract") >= 0 || props.name.indexOf("减去") >= 0) ? "SUBTRACT" : "UNION");
+      }
+      // GROUP/BOOLEAN nodes carry no constraints in Figma; the v2 exporter
+      // omits them, so omit here too.
+      if (types.type === "GROUP" || types.type === "BOOLEAN_OPERATION" || types.sourceType === "BOOLEAN_OPERATION") {
+        delete props.constraints;
+      }
+      if (meta) {
+        if (meta.corners) {
+          const c = meta.corners;
+          props.corner = {
+            topLeftRadius: c[0], topRightRadius: c[1] !== undefined ? c[1] : c[0],
+            bottomLeftRadius: c[2] !== undefined ? c[2] : c[0], bottomRightRadius: c[3] !== undefined ? c[3] : c[0],
+            cornerRadius: c[0], cornerSmoothing: 0
+          };
+        }
+        const frameFamily = types.type === "FRAME" || types.type === "COMPONENT" || types.type === "COMPONENT_SET";
+        if (types.sourceType === "BOOLEAN_OPERATION") {
+          // Figma boolean nodes have no clipsContent; the exporter omits it.
+        } else if (types.type === "GROUP") {
+          props.clipsContent = false;
+        } else if (types.sourceType === "INSTANCE") {
+          props.clipsContent = meta.clipsContent === undefined ? false : meta.clipsContent;
+        } else if (frameFamily) {
+          props.clipsContent = meta.clipsContent === undefined ? true : meta.clipsContent;
+        }
+        if (meta.layoutMode) props.layout.layoutMode = meta.layoutMode;
+        if (meta.itemSpacing !== undefined && types.type !== "SECTION") props.layout.itemSpacing = meta.itemSpacing;
+        if (meta.paddings && types.type !== "SECTION") {
+          props.layout.paddingTop = meta.paddings.top;
+          props.layout.paddingRight = meta.paddings.right;
+          props.layout.paddingBottom = meta.paddings.bottom;
+          props.layout.paddingLeft = meta.paddings.left;
+        }
+        if (meta.primaryAlign) props.layout.primaryAxisAlignItems = meta.primaryAlign;
+        if (meta.counterAlign) props.layout.counterAxisAlignItems = meta.counterAlign;
+        // Sizing modes live in the record trailer: field 21/22 present = FIXED,
+        // omitted = AUTO. Instances inherit from their component instead.
+        if (n.trailer && types.sourceType !== "INSTANCE") {
+          props.layout.primaryAxisSizingMode = trailer.has21 ? "FIXED" : "AUTO";
+          props.layout.counterAxisSizingMode = trailer.has22 ? "FIXED" : "AUTO";
+        }
+        if (types.type !== "SECTION" && types.sourceType !== "INSTANCE") props.__nativeContainerLayout = true;
+      }
+      if (geomVn) {
+        props.vectorNetwork = mgCloneJsonValue(geomVn);
       }
       mgApplyNativeVisualFallbacks(props);
       return props;
@@ -2857,7 +3474,7 @@
       const metaBytes = getEntryByName(zipEntries, "meta.json");
       if (metaBytes) { try { meta = JSON.parse(decodeUtf8(metaBytes)); } catch (e) { /* ignore */ } }
 
-      const { nodes, paints } = mgDecodeNativeNodes(documentBytes);
+      const { nodes, paints, geoms } = mgDecodeNativeNodes(documentBytes);
       const embeddedProps = mgExtractEmbeddedProps(documentBytes);
       const embeddedIndex = mgBuildEmbeddedIndex(embeddedProps);
       const embeddedOverlayUsed = {};
@@ -2923,7 +3540,9 @@
         const roots = (childIds[pg.id] || []).filter(r => nodes[r] && nodes[r].type);
         let count = 0;
         for (const r of roots) for (const id of subtreeOf(r)) { if (!reachable[id]) { reachable[id] = true; count++; } }
-        if (count > 0) pageList.push({ name: pg.name, roots: roots, count: count });
+        // Keep empty pages too: MasterGo files legitimately contain pages with
+        // no layers (e.g. a leftover "Temp" page) and the v2 baseline exports them.
+        if (count > 0 || roots.length === 0) pageList.push({ name: pg.name, roots: roots, count: count });
       }
 
       if (Object.keys(reachable).length === 0) {
@@ -2941,11 +3560,27 @@
       const nativeEmbeddedMatches = {};
       for (const id in reachable) {
         const n = nodes[id];
-        const props = mgNativeProps(n, nodes, paints);
+        const props = mgNativeProps(n, nodes, paints, geoms);
         const preferredParentId = nativeEmbeddedMatches[n.parent] ? nativeEmbeddedMatches[n.parent].id : null;
         const overlay = mgFindEmbeddedOverlay(props, embeddedIndex, embeddedOverlayUsed, preferredParentId);
         if (overlay) nativeEmbeddedMatches[id] = overlay;
         mgApplyEmbeddedOverlay(props, overlay, !!preferredParentId);
+        // Native-decoded blend fields win over stale embedded copies. The
+        // blend-mode enum comes from scalar tag 0d; MasterGo reports
+        // PASS_THROUGH for unset nodes (NORMAL only on sections/slices).
+        if (props.blend) {
+          props.blend.blendMode = (n.blendModeByte !== undefined && MG_BLEND_MODES[n.blendModeByte])
+            ? MG_BLEND_MODES[n.blendModeByte]
+            : ((props.type === "SECTION" || props.type === "SLICE") ? "NORMAL" : "PASS_THROUGH");
+          props.blend.isMask = !!n.isMask;
+          if (Array.isArray(props.blend.effects)) {
+            props.blend.effects.forEach(e => {
+              if (e && (e.blendMode === "NORMAL" || !e.blendMode)) e.blendMode = "PASS_THROUGH";
+            });
+          }
+        }
+        if (props.sourceType === "INSTANCE") props.shellPlaceholder = true;
+        delete props.__nativeContainerLayout;
         records.push({
           version: 2,
           id: id,
@@ -2957,12 +3592,51 @@
           props: props
         });
       }
+      // Children of a GROUP whose nearest non-group ancestor is an auto-layout
+      // frame report layoutPositioning=ABSOLUTE in the v2 export.
+      const recordsByIdPre = {};
+      for (const record of records) recordsByIdPre[record.id] = record;
+      for (const record of records) {
+        if (record.props && record.props.type === "SLICE") continue;
+        const parent = record.parentId ? recordsByIdPre[record.parentId] : null;
+        if (!parent || !parent.props || parent.props.type !== "GROUP") continue;
+        let anc = parent;
+        while (anc && anc.props && anc.props.type === "GROUP") {
+          anc = anc.parentId ? recordsByIdPre[anc.parentId] : null;
+        }
+        if (anc && anc.props && anc.props.layout && anc.props.layout.layoutMode && anc.props.layout.layoutMode !== "NONE") {
+          if (record.props && record.props.layout) record.props.layout.layoutPositioning = "ABSOLUTE";
+        }
+      }
       mgApplyButtonInstanceTextCentering(records);
       mgApplyCardInstanceOverrides(records);
       const encoder = new TextEncoder();
       const out = {};
       const recordsById = {};
       for (const record of records) recordsById[record.id] = record;
+
+      // The v2 exporter names image assets image-001, image-002, … in first-use
+      // order; alias the decoder's hash-based refs the same way so packages
+      // match byte-for-byte. The hash file stays the backing asset.
+      const imageAliasByRef = {};
+      function aliasPaintImages(paints) {
+        if (!Array.isArray(paints)) return;
+        for (const paint of paints) {
+          if (!paint || paint.type !== "IMAGE" || !paint.imageRef) continue;
+          if (imageAliasByRef[paint.imageRef] === undefined) {
+            const alias = "image-" + String(Object.keys(imageAliasByRef).length + 1).padStart(3, "0");
+            imageAliasByRef[paint.imageRef] = alias;
+          }
+          paint.imageRef = imageAliasByRef[paint.imageRef];
+        }
+      }
+      for (const pg of pageList) {
+        for (const record of collectPageRecords(pg)) {
+          if (!record.props || !record.props.geometry) continue;
+          aliasPaintImages(record.props.geometry.fills);
+          aliasPaintImages(record.props.geometry.strokes);
+        }
+      }
 
       function writeLayerChunks(folder, pageId, pageRecords) {
         const chunkPaths = [];
@@ -3022,6 +3696,13 @@
         assets[baseName] = { key: baseName, fileName: baseName, path: path };
         if (bareName && bareName !== baseName) {
           assets[bareName] = { key: bareName, fileName: baseName, path: path };
+        }
+      }
+      for (const ref in imageAliasByRef) {
+        const backing = assets[ref] || assets[ref.replace(/\.[^.]+$/, "")];
+        if (backing) {
+          const alias = imageAliasByRef[ref];
+          assets[alias] = { key: alias, fileName: backing.fileName, path: backing.path };
         }
       }
 
