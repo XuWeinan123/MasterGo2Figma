@@ -7,8 +7,18 @@
 ## 插件组成
 
 - `SendToFigma`：运行在 MasterGo 中，读取页面/图层并导出 MasterGo2Figma JSON 包。
-- `ReceiveFromMasterGo`：运行在 Figma 中，上传导出的 zip 并还原图层。
+- `ReceiveFromMasterGo`：运行在 Figma 中，上传导出的 zip 或 MasterGo 原生 `.mg` 文件并还原图层。
 - `tools/mastergo_relay_server.py`：本地 Python 中继服务，用于大文件流式写入本地并自动打包 zip。
+- `pythonParser/mg_to_zip.py`：独立 Python CLI，不启动任何插件即可把 `.mg` 直接转成 v2 zip（详见下文）。
+
+## 两种迁移路径
+
+1. **SendToFigma 导出 zip → ReceiveFromMasterGo 还原**（推荐，保真度最高）：MasterGo 端在插件里读取
+   实时图层树并序列化，能拿到插件 API 暴露的全部属性。
+2. **直接导入 MasterGo 原生 `.mg` 文件**：接收端插件可以直接上传 `.mg`（无需先跑发送端），内置的原生二进制
+   解码器会把它解析成 v2 图层再还原。适合手上只有 `.mg` 文件、无法运行 MasterGo 端插件的场景。当前解码器在
+   基准样例上已能做到与发送端 zip 逐字段一致；仍有少量属性依赖 `.mg` 内嵌的 JSON 兜底（见
+   [`MG_DECODER.md`](MG_DECODER.md) 的「TODO」）。
 
 ## SendToFigma 用法
 
@@ -50,15 +60,29 @@ mastergo2figma-relay-output/<transferId>.zip
 ## ReceiveFromMasterGo 用法
 
 1. 在 Figma 中安装并运行 `ReceiveFromMasterGo` 插件。
-2. 上传 `SendToFigma` 生成的 `.zip` 文件。
+2. 上传 `SendToFigma` 生成的 `.zip` 文件，或直接上传 MasterGo 导出的 `.mg` 文件。
 3. 点击开始还原。
 
-无论发送端使用 `直接生成 zip` 还是 `流传输到本地`，接收端都只需要上传最终 zip。
+无论发送端使用 `直接生成 zip` 还是 `流传输到本地`，接收端都只需要上传最终 zip。上传 `.mg` 时，插件会先
+用内置的原生解码器把它转成 v2 结构再还原，用户操作与上传 zip 完全一致。
 
-接收端支持两种 zip 结构：
+接收端支持的输入结构：
 
 - zip 根目录直接包含 `manifest.json`。
 - zip 内有一个顶层目录，顶层目录内包含 `manifest.json`。
+- MasterGo 原生 `.mg`（本身也是 zip，内含 `document` / `meta.json` / `images/`）。
+
+### 用 CLI 把 `.mg` 转成 zip（不启动插件）
+
+如果只想把 `.mg` 转成 v2 zip（例如批处理或在没有 Figma 的环境里预处理），用独立 CLI：
+
+```bash
+python3 pythonParser/mg_to_zip.py 输入.mg -o 输出.zip
+```
+
+它复用接收端同一份解码器 `ReceiveFromMasterGo/src/ui/mgPackage.js`，产出的 zip 可以直接喂给
+`ReceiveFromMasterGo`。`.mg` 二进制格式的逆向说明见 [`MG_DECODER.md`](MG_DECODER.md)，逆向过程与方法论
+见 [`MG_DECODER_JOURNAL.md`](MG_DECODER_JOURNAL.md)。
 
 ### 接收端还原阶段
 

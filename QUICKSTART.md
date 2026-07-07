@@ -109,6 +109,8 @@ ReceiveFromMasterGo/manifest.json
 ```
 
 6. 导入后，在 Actions 菜单或 `Plugins > Development` 中运行 `ReceiveFromMasterGo`。
+7. 在插件里可以上传 `SendToFigma` 导出的 `.zip`，也可以直接上传 MasterGo 导出的 `.mg` 文件——
+   后者会由内置的原生解码器先转成 v2 结构再还原，无需先跑发送端。
 
 如果 Figma 找不到插件或无法运行，重新构建接收端：
 
@@ -153,6 +155,17 @@ mastergo2figma-relay-output/<transferId>.zip
 ```
 
 保持终端窗口开启。导出结束后，可以按 `Control + C` 停止服务。
+
+## Convert `.mg` Without Any Plugin (Optional)
+
+如果手上已经有 MasterGo 原生 `.mg` 文件，想在不启动任何插件的情况下把它转成 v2 zip，用独立 CLI：
+
+```bash
+python3 pythonParser/mg_to_zip.py 输入.mg -o 输出.zip
+```
+
+产出的 zip 可以直接在 `ReceiveFromMasterGo` 里上传还原（或者也可以在插件里直接上传 `.mg`，二者等价）。
+CLI 复用接收端同一份解码器，只依赖 Python 标准库和 Node.js。
 
 ## Full Workflow
 

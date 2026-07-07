@@ -4,7 +4,7 @@
 
 本仓库用于在 MasterGo 与 Figma 之间迁移设计图层。`SendToFigma/` 是 MasterGo 端插件，负责读取页面、序列化图层并导出 MasterGo2Figma JSON zip（v2 格式）；核心代码在 `SendToFigma/src/`，打包产物为 `SendToFigma/code.js`。`ReceiveFromMasterGo/` 是 Figma 端插件，负责上传 zip 并还原为可编辑图层；核心代码在 `ReceiveFromMasterGo/src/`，UI 模板在 `ReceiveFromMasterGo/ui.template.html`，生成后的 UI 在 `ReceiveFromMasterGo/ui.html`（**不要手动改 `ui.html`**，见下文构建说明）。
 
-共享类型与工具函数放在 `shared/`（`shared/types.ts` 定义跨端类型，其余为矩阵/矢量/connector 辅助函数与图层规则配置），两端通过相对路径 `../../shared/...` 引用。本地大文件中继服务在 `tools/mastergo_relay_server.py`；`tools/compare_mg_import.js` 用于比对 `.mg` 解码结果与基准 zip；`pythonParser/mg_to_zip.py` 是独立的 Python CLI，复用 `ReceiveFromMasterGo/src/ui/mgPackage.js` 的解码逻辑，可在不启动任何插件的情况下把 `.mg` 直接转成 v2 zip。说明文档包括 `README.md`、`QUICKSTART.md`、`MG_DECODER.md`；截图与示例资源放在 `assets/`。不要手动修改第三方依赖目录或构建缓存。
+共享类型与工具函数放在 `shared/`（`shared/types.ts` 定义跨端类型，其余为矩阵/矢量/connector 辅助函数与图层规则配置），两端通过相对路径 `../../shared/...` 引用。本地大文件中继服务在 `tools/mastergo_relay_server.py`；`tools/compare_mg_import.js` 用于比对 `.mg` 解码结果与基准 zip；`pythonParser/mg_to_zip.py` 是独立的 Python CLI，复用 `ReceiveFromMasterGo/src/ui/mgPackage.js` 的解码逻辑，可在不启动任何插件的情况下把 `.mg` 直接转成 v2 zip。说明文档包括 `README.md`、`QUICKSTART.md`、`MG_DECODER.md`（`.mg` 二进制格式规格）、`MG_DECODER_JOURNAL.md`（逆向过程与方法论）、`PERFORMANCE_OPTIMIZATIONS.md`；截图与示例资源放在 `assets/`。不要手动修改第三方依赖目录或构建缓存。
 
 ## Build, Test, and Development Commands
 
@@ -34,6 +34,14 @@ Python 中继服务默认监听 `http://127.0.0.1:8765`，用于大文件流式�
 ## Testing Guidelines
 
 当前仓库没有独立测试框架或 `__tests__` 目录。提交前至少运行两个插件的 `npm run build`，并按变更方向手动验证：MasterGo 端导出 zip、Figma 端导入 zip、大文件场景使用本地中继服务。涉及原生 `.mg` 解码逻辑的改动，优先用 `node tools/compare_mg_import.js [file.mg] [baseline.zip]`（不传参时默认取仓库根目录最新的 `.mg` 和 `mastergo2figma-*.zip`）与已知基准 zip 比对，而不是仅凭肉眼检查。新增可自动化测试时，建议按模块命名为 `*.test.ts`，并优先覆盖矩阵、矢量、文本、容器和 connector 转换逻辑。
+
+### `.mg` 解码逆向经验（血泪教训，务必遵守）
+
+- **看 `Deep prop mismatches`，不要只看那一排具名计数。** `compare_mg_import.js` 里的 `deepDiffProps` 会递归比对每个节点的**全部** `props` 字段（0.015 数值容差）并计入退出码。历史上曾把具名计数全打到零就判定“完成”，结果 `strokeAlign` / `strokeCap` / `textAutoResize` / `isMask` 等一整族未被具名检查的属性全错、只有在 Figma 里肉眼才发现——基准里有、工具没显式比的字段等于没测。加新解码时如果引入了工具没覆盖的新属性，先确认 deep-diff 能看到它。
+- **逆向新字段用“已知答案交叉表”，别盲猜。** 基准 zip 给出每个节点的精确期望值：把节点按期望值分组，再把原生记录里的候选字节交叉制表，看哪个 tag 的取值与分组完全对齐。`strokeAlign` 就是这样从被误读为“paint 引用计数”的 `13` 上定位出来的。
+- **顺序步进解析，别用正则找 tag。** `.mg` 的 twisted-float 载荷里会自然出现 tag 样字节（`0x1c` 曾害得 `case 4` 整个子树丢失）。标量区/尾部/容器对象都改成从固定锚点顺序消费字段（见 `mgWalkScalarFields` / `mgParseTrailer` / `mgParseContainerMeta`）。
+- **区分“字段缺失”和“字段值为 0”。** MasterGo 大量“省略即默认”：padding/itemSpacing 字段缺失=默认 10、strokeWeight 缺失=1、sizing 字段缺失=AUTO、blendMode 缺失=PASS_THROUGH。语义完全不同，不能一律当 0。
+- 改 `mgPackage.js` 前先读 `MG_DECODER.md`（字段规格），破解手法与踩坑史见 `MG_DECODER_JOURNAL.md`；有进展时两者都要同步。
 
 ## Architecture Notes
 
