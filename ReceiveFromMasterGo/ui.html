@@ -2061,37 +2061,35 @@
       for (let off = start; off < end - 5; off++) {
         if (bytes[off] !== 0x18) continue;
         const mode = bytes[off + 1];
+        // `18 01 <x> [02 <y>]` or `18 02 <y>` (x omitted when 0); matrix fields
+        // 03=m00 04=m11 05=m01 06=m10 follow either form, defaults identity.
+        if (mode !== 0x01 && mode !== 0x02) continue;
+        let scan;
         if (mode === 0x01) {
           result.x = mgDecFloat(bytes, off + 2);
-          let scan = off + 6;
-          if (off + 6 < end && bytes[off + 6] === 0x02) {
-            result.y = mgDecFloat(bytes, off + 7);
-            scan = off + 11;
+          scan = off + 6;
+          if (scan < end && bytes[scan] === 0x02) {
+            result.y = mgDecFloat(bytes, scan + 1);
+            scan += 5;
           }
-          // Matrix fields 03=m00 04=m11 05=m01 06=m10 are optional: only
-          // non-default entries are stored (defaults m00=m11=1, m01=m10=0).
-          // E.g. a 180°-rotated group stores just `03 <-1.0>`.
-          let m00 = 1, m01 = 0, m10 = 0, m11 = 1, sawMatrix = false;
-          for (let p = scan; p < end - 5; p += 5) {
-            if (bytes[p] === 0x03) { m00 = mgDecFloat(bytes, p + 1); sawMatrix = true; continue; }
-            if (bytes[p] === 0x04) { m11 = mgDecFloat(bytes, p + 1); sawMatrix = true; continue; }
-            if (bytes[p] === 0x05) { m01 = mgDecFloat(bytes, p + 1); sawMatrix = true; continue; }
-            if (bytes[p] === 0x06) { m10 = mgDecFloat(bytes, p + 1); sawMatrix = true; continue; }
-            break;
-          }
-          if (sawMatrix &&
-              Math.abs(m00) <= 1.001 && Math.abs(m01) <= 1.001 && Math.abs(m10) <= 1.001 && Math.abs(m11) <= 1.001) {
-            result.relativeTransform = [[m00, m01, result.x], [m10, m11, result.y]];
-            let rotation = Math.atan2(m01, m00) * 180 / Math.PI;
-            if (rotation > 180 - 1e-6) rotation -= 360; // Figma reports 180° as -180
-            result.rotation = rotation;
-          }
-          return result;
-        }
-        if (mode === 0x02) {
+        } else {
           result.y = mgDecFloat(bytes, off + 2);
-          return result;
+          scan = off + 6;
         }
+        let m00 = 1, m01 = 0, m10 = 0, m11 = 1, sawMatrix = false;
+        for (let p = scan; p < end - 5; p += 5) {
+          if (bytes[p] === 0x03) { m00 = mgDecFloat(bytes, p + 1); sawMatrix = true; continue; }
+          if (bytes[p] === 0x04) { m11 = mgDecFloat(bytes, p + 1); sawMatrix = true; continue; }
+          if (bytes[p] === 0x05) { m01 = mgDecFloat(bytes, p + 1); sawMatrix = true; continue; }
+          if (bytes[p] === 0x06) { m10 = mgDecFloat(bytes, p + 1); sawMatrix = true; continue; }
+          break;
+        }
+        if (sawMatrix &&
+            Math.abs(m00) <= 1.001 && Math.abs(m01) <= 1.001 && Math.abs(m10) <= 1.001 && Math.abs(m11) <= 1.001) {
+          result.relativeTransform = [[m00, m01, result.x], [m10, m11, result.y]];
+          result.rotation = Math.atan2(m01, m00) * 180 / Math.PI;
+        }
+        return result;
       }
       return result;
     }
@@ -2106,7 +2104,7 @@
       return { value: mgDecFloat(bytes, p), next: p + 4 };
     }
 
-    const MG_IMAGE_SCALE_MODE = { 0: "FILL", 1: "FIT", 2: "CROP", 3: "TILE" };
+    const MG_IMAGE_SCALE_MODE = { 0: "FILL", 1: "FIT", 2: "TILE", 3: "CROP" };
     // MasterGo's default #D8D8D8 fill: referenced by "default fill" paint
     // records that carry no explicit color of their own.
     const MG_DEFAULT_FILL_GRAY = Math.fround(216 / 255);
@@ -2125,6 +2123,7 @@
     function mgParsePaintRecord(bytes, start, end) {
       let p = start;
       let visible = true, kind = 0, color = null, gradient = null, image = null, sawTail = false;
+      let opacity = 1;
       function zfloat() { const r = mgReadZFloatAt(bytes, p); p = r.next; return r.value; }
 
       function parseGradientObject() {
@@ -2208,7 +2207,7 @@
         if (t === 0x06) { visible = bytes[p++] !== 0x00; continue; }
         if (t === 0x07) { p++; continue; }
         if (t === 0x08) { color = { a: zfloat(), r: zfloat(), g: zfloat(), b: zfloat() }; continue; }
-        if (t === 0x09) { zfloat(); continue; }
+        if (t === 0x09) { opacity = zfloat(); continue; } // paint opacity
         if (t === 0x0a) { gradient = parseGradientObject(); if (!gradient) return null; continue; }
         if (t === 0x0b) { image = parseImageObject(); if (!image) return null; continue; }
         if (t === 0x0c || t === 0x0d) { p++; sawTail = true; continue; }
@@ -2218,16 +2217,21 @@
       if (kind === 5 && image && image.path) {
         const paint = mgMakeImagePaint(mgBasename(image.path), MG_IMAGE_SCALE_MODE[image.scaleMode] || "FILL", image.ratio);
         paint.visible = visible;
+        paint.opacity = opacity;
         return paint;
       }
-      if (kind >= 1 && kind <= 4 && gradient && gradient.stops && gradient.stops.length >= 2 && gradient.p0 && gradient.p1) {
+      if (kind >= 1 && kind <= 4 && gradient && gradient.stops && gradient.stops.length >= 2) {
+        // Share exports omit the gradient handles for the default vertical
+        // top-to-bottom orientation.
+        const p0 = gradient.p0 || { x: 0.5, y: 0 };
+        const p1 = gradient.p1 || { x: 0.5, y: 1 };
         const transform = kind === 1
-          ? mgLinearGradientTransform(gradient.p0, gradient.p1)
-          : mgRadialGradientTransform(gradient.p0, gradient.p1, gradient.ratio);
+          ? mgLinearGradientTransform(p0, p1)
+          : mgRadialGradientTransform(p0, p1, gradient.ratio);
         return {
           type: MG_GRADIENT_TYPE[kind],
           visible: visible,
-          opacity: 1,
+          opacity: opacity,
           blendMode: "NORMAL",
           gradientStops: gradient.stops.map(s => ({ position: s.position, color: { r: s.color.r, g: s.color.g, b: s.color.b, a: s.color.a } })),
           gradientTransform: transform
@@ -2236,6 +2240,7 @@
       if (color) {
         const paint = mgMakeSolidPaint(color.r, color.g, color.b, color.a);
         paint.visible = visible;
+        paint.opacity = opacity;
         return paint;
       }
       // Paint-shaped record with no color/kind at all: MasterGo's default fill.
@@ -2264,6 +2269,78 @@
       return paints;
     }
 
+    // Effect registry (share exports): nodes reference it via tag 17. Child
+    // records share the paint-table shape; fields (floats zero-compressed):
+    //   05 <kind>  1=DROP_SHADOW 2=LAYER_BLUR (3/4 unobserved)
+    //   08 <a><r><g><b>   09 <radius>   0a <offset.x, omitted=0>
+    //   0b <offset.y, omitted=0>   0c <spread?>   0d/0e <flags>
+    const MG_EFFECT_TYPE = { 1: "DROP_SHADOW", 2: "LAYER_BLUR", 3: "INNER_SHADOW", 4: "BACKGROUND_BLUR" };
+    function mgScanEffects(bytes, str) {
+      const effects = {};
+      const ID = "[0-9]+:[0-9A-Za-z]+";
+      const markRe = new RegExp("\\x01(" + ID + ")\\x00\\x02(" + ID + ")\\x00\\x03([0-9A-Za-z]+)\\x00", "g");
+      const marks = [];
+      let m;
+      while ((m = markRe.exec(str))) marks.push({ start: m.index, end: m.index + m[0].length, id: m[1], parent: m[2], code: m[3] });
+      for (let i = 0; i < marks.length; i++) {
+        const mk = marks[i];
+        const end = (i + 1 < marks.length) ? marks[i + 1].start : Math.min(mk.start + 400, bytes.length);
+        let p = mk.end;
+        if (bytes[p] !== 0x05) continue;
+        const kind = bytes[p + 1];
+        if (!MG_EFFECT_TYPE[kind]) continue;
+        p += 2;
+        let color = null, radius = 0, offX = 0, offY = 0, spread = 0;
+        let ok = true;
+        while (p < end && ok) {
+          const t = bytes[p];
+          if (t === 0x00 || t === 0x18) break;
+          if (t === 0x08) {
+            p++;
+            const a = mgReadZeroFloat(bytes, p); p = a.next;
+            const r = mgReadZeroFloat(bytes, p); p = r.next;
+            const g = mgReadZeroFloat(bytes, p); p = g.next;
+            const b = mgReadZeroFloat(bytes, p); p = b.next;
+            color = { r: r.value, g: g.value, b: b.value, a: a.value };
+            continue;
+          }
+          if (t === 0x09 || t === 0x0a || t === 0x0b || t === 0x0c) {
+            const r = mgReadZeroFloat(bytes, p + 1);
+            if (!isFinite(r.value) || Math.abs(r.value) > 1e5) { ok = false; break; }
+            if (t === 0x09) radius = r.value;
+            if (t === 0x0a) offX = r.value;
+            if (t === 0x0b) offY = r.value;
+            if (t === 0x0c) spread = r.value;
+            p = r.next;
+            continue;
+          }
+          if (t === 0x0d || t === 0x0e) { p += 2; continue; }
+          ok = false;
+        }
+        if (!ok) continue;
+        const type = MG_EFFECT_TYPE[kind];
+        const fx = (type === "LAYER_BLUR" || type === "BACKGROUND_BLUR")
+          ? { type: type, radius: radius, visible: true }
+          : {
+              type: type,
+              color: color || { r: 0, g: 0, b: 0, a: 0.25 },
+              offset: { x: offX, y: offY },
+              radius: radius,
+              spread: spread,
+              visible: true,
+              blendMode: "PASS_THROUGH"
+            };
+        if (!effects[mk.parent]) effects[mk.parent] = [];
+        effects[mk.parent].push({ code: mk.code, fx: fx });
+      }
+      const byRef = {};
+      for (const ref in effects) {
+        effects[ref].sort((a, b) => (a.code < b.code ? -1 : a.code > b.code ? 1 : 0));
+        byRef[ref] = effects[ref].map(e => e.fx);
+      }
+      return byRef;
+    }
+
     // Node type = the byte right after the `1c` tag.
     const MG_TYPE = { 1: "VECTOR", 2: "LINE", 3: "RECTANGLE", 4: "ELLIPSE", 5: "POLYGON", 6: "STAR", 7: "FRAME", 8: "TEXT", 10: "SLICE" };
 
@@ -2274,7 +2351,10 @@
     // in every observed record, so anchor on that first; otherwise accept a
     // `1c` whose type byte is valid, preferring one right after a string/id
     // terminator.
-    const MG_OWNER_TYPE_RE = /\x1b[0-9]+:[0-9A-Za-z]+\x00\x1c/;
+    const MG_OWNER_TYPE_RE = /\x1b[0-9A-Za-z:\/]{1,64}\x00\x1c/;
+    // Set per conversion by mgDecodeNativeNodes: true when the document is a
+    // share/partial export (component-master records without sort codes).
+    let mgShareModeActive = false;
     function mgFindTypeTagPos(full, bytes, fb) {
       const anchored = MG_OWNER_TYPE_RE.exec(full);
       if (anchored && MG_TYPE[bytes[fb + anchored.index + anchored[0].length]]) {
@@ -2319,7 +2399,7 @@
       const end = fb + scalEnd;
       while (p < end) {
         const t = bytes[p];
-        if (t === 0x05 || t === 0x08 || t === 0x09 || t === 0x0b || t === 0x0c || t === 0x0d ||
+        if (t === 0x05 || t === 0x07 || t === 0x08 || t === 0x09 || t === 0x0b || t === 0x0c || t === 0x0d ||
             t === 0x11 || t === 0x12 || t === 0x13) {
           f["t" + t.toString(16).padStart(2, "0")] = bytes[p + 1];
           p += 2;
@@ -2327,8 +2407,16 @@
         }
         if (t === 0x0a || t === 0x0e || t === 0x0f || t === 0x10) {
           const r = mgReadZeroFloat(bytes, p + 1);
+          if (t === 0x0a) f.opacity = r.value;
           if (t === 0x10) f.strokeWeight = r.value;
+          if (t === 0x0e) f.sawWidth = true;
           p = r.next;
+          continue;
+        }
+        if (t === 0x19) { // LEB128 varint flags
+          p++;
+          while (p < end && (bytes[p] & 0x80) !== 0) p++;
+          p++;
           continue;
         }
         if (t === 0x14) {
@@ -2405,6 +2493,13 @@
             fields.sideWeights = w;
             continue;
           }
+          if (t === 0x26) { // instance scale factor (share exports), 0-compressed float
+            const r = mgReadZeroFloat(bytes, p + 1);
+            if (!isFinite(r.value) || Math.abs(r.value) > 1e4) break;
+            fields.scaleFactor = r.value;
+            p = r.next;
+            continue;
+          }
           if (t >= 0x1e && t <= 0x3f) {
             if (t === 0x21) fields.has21 = true;
             if (t === 0x22) fields.has22 = true;
@@ -2429,7 +2524,9 @@
     ];
     const MG_STROKE_ALIGN = { 1: "CENTER", 2: "INSIDE", 3: "OUTSIDE" };
     const MG_STROKE_JOIN = { 1: "BEVEL", 2: "ROUND" };
-    const MG_CONSTRAINT = ["START", "CENTER", "END", "STRETCH", "SCALE"];
+    // Scalar tags 0b/0c: 0b = VERTICAL, 0c = HORIZONTAL (verified against
+    // asymmetric share-export samples; symmetric old fixtures could not tell).
+    const MG_CONSTRAINT = ["START", "END", "STARTANDEND", "CENTER", "SCALE"];
 
     // Sub-field stream of the `1c 07` container object (ascending tag ids):
     //   01 <b>            group-like flag (GROUP / BOOLEAN_OPERATION)
@@ -2481,7 +2578,29 @@
         while (bytes[p] !== 0x00 && p < off + 256) p++;
         p++;
       }
-      if (bytes[p] === 0x06 && meta.subtype === "FRAME") { meta.subtype = "INSTANCE"; return meta; }
+      // Share/partial exports append `04 <varint>` (version stamp?) and a
+      // `05 <b> 00` sub-object after the component key; skip both so the
+      // auto-layout fields that follow stay reachable.
+      if (meta.subtype === "COMPONENT" && bytes[p] === 0x04 && bytes[p + 1] !== 0x04) {
+        p++;
+        while ((bytes[p] & 0x80) !== 0 && p < off + 256) p++;
+        p++;
+        if (bytes[p] === 0x05) {
+          p += 2;
+          if (bytes[p] === 0x00 && (bytes[p + 1] === 0x08 || bytes[p + 1] === 0x09 || bytes[p + 1] === 0x0a || bytes[p + 1] === 0x0d || bytes[p + 1] === 0x17)) p++;
+        }
+      }
+      if (bytes[p] === 0x06 && meta.subtype === "FRAME") {
+        meta.subtype = "INSTANCE";
+        p += 2;
+        // Share exports: `0f <template-child id>` names the component-tree node
+        // this record overrides.
+        if (bytes[p] === 0x0f) {
+          const c = mgReadCString(bytes, p + 1, Math.min(off + 256, p + 96));
+          if (c) meta.instanceRef = c.text;
+        }
+        return meta;
+      }
       if (bytes[p] === 0x08 && (bytes[p + 1] === 1 || bytes[p + 1] === 2)) {
         meta.layoutMode = bytes[p + 1] === 1 ? "HORIZONTAL" : "VERTICAL";
         p += 2;
@@ -2491,9 +2610,10 @@
         meta.itemSpacing = r.value;
         p = r.next;
       } else {
-        // MasterGo omits the field entirely when the runtime default (10)
-        // applies; an explicit zero is written as `09 00`.
-        meta.itemSpacing = 10;
+        // Full editor exports omit the field when the runtime default (10)
+        // applies (explicit zero is written `09 00`); share exports omit it
+        // for 0. The caller resolves via the file-level share flag.
+        meta.itemSpacingMissing = true;
       }
       if (bytes[p] === 0x0a) {
         p++;
@@ -2508,10 +2628,10 @@
           padCount++;
           p = r.next;
         }
-        // Same default rule: an empty padding object means "all 10".
-        meta.paddings = padCount === 0
-          ? { top: 10, right: 10, bottom: 10, left: 10 }
-          : { top: pads[1] || 0, right: pads[2] || 0, bottom: pads[3] || 0, left: pads[4] || 0 };
+        // Same default rule: an empty padding object means "all 10" in full
+        // editor exports, "all 0" in share exports.
+        if (padCount === 0) meta.paddingsMissing = true;
+        else meta.paddings = { top: pads[1] || 0, right: pads[2] || 0, bottom: pads[3] || 0, left: pads[4] || 0 };
       }
       if (bytes[p] === 0x0d) { meta.primaryAlign = MG_ALIGN_ITEMS[bytes[p + 1]] || "MIN"; p += 2; }
       if (bytes[p] === 0x0e) { meta.counterAlign = MG_ALIGN_ITEMS[bytes[p + 1]] || "MIN"; p += 2; }
@@ -2581,7 +2701,19 @@
           if (p >= bytes.length) return null;
           const t = bytes[p++];
           if (t === 0x00) return rec;
-          if (t === 0x01) { const loop = intArray(); if (!loop) return null; rec.loops.push(loop); continue; }
+          if (t === 0x01) {
+            // One int array holding every loop; -1 (ff ff ff ff 0f) separates
+            // loops. Single-loop regions have no separator.
+            const arr = intArray();
+            if (!arr) return null;
+            let cur = [];
+            for (const v of arr) {
+              if (v === -1) { rec.loops.push(cur); cur = []; }
+              else cur.push(v);
+            }
+            if (cur.length) rec.loops.push(cur);
+            continue;
+          }
           if (t === 0x02) { rec.index = varint(); continue; }
           if (t === 0x03) { rec.winding = varint(); continue; }
           return null;
@@ -2667,12 +2799,53 @@
     // `\x01 <recId> \x00 [\x02 <parentId> \x00]? \x03 <sortCode> \x00` (the `\x02`
     // parent is omitted for page-level nodes). recId == real node id; parentId falls
     // back to the owner (page) when absent.
+    // Text style table (share exports): entries shaped
+    // `01 <id> 00 05 <b> 03 <PostScript name> 00 04 <fontSize> 05 <lineHeight> …`.
+    // Text runs reference an entry via their `03`/`0a` id; the float values are
+    // FINAL (instance scale already applied).
+    function mgScanFontStyles(bytes, str) {
+      const styles = {};
+      const ID = "[0-9]+:[0-9A-Za-z]+(?:\\/[0-9]+:[0-9A-Za-z]+)*";
+      const re = new RegExp("\\x01(" + ID + ")\\x00\\x05[\\x01-\\x07]\\x03", "g");
+      let m;
+      while ((m = re.exec(str))) {
+        let p = m.index + m[0].length;
+        let q = p;
+        while (q < bytes.length && bytes[q] !== 0x00) q++;
+        const psName = str.slice(p, q);
+        if (!/^[A-Za-z][A-Za-z0-9 +-]{1,40}$/.test(psName)) continue;
+        p = q + 1;
+        const entry = { psName: psName, fontSize: null, lineHeight: null };
+        if (bytes[p] === 0x04) { const r = mgReadZeroFloat(bytes, p + 1); entry.fontSize = r.value; p = r.next; }
+        if (bytes[p] === 0x05) { const r = mgReadZeroFloat(bytes, p + 1); entry.lineHeight = r.value; p = r.next; }
+        if (styles[m[1]] === undefined) styles[m[1]] = entry;
+      }
+      return styles;
+    }
+
+    // "Montserrat-SemiBold" → { family: "Montserrat", style: "Semi Bold" }
+    function mgFontNameFromPostScript(psName) {
+      const dash = psName.lastIndexOf("-");
+      const family = dash > 0 ? psName.slice(0, dash) : psName;
+      const rawStyle = dash > 0 ? psName.slice(dash + 1) : "Regular";
+      const spacedStyle = rawStyle.replace(/([a-z])([A-Z])/g, "$1 $2");
+      return { family: family, style: spacedStyle };
+    }
+
+    const MG_TEXT_ALIGN_H = { 1: "RIGHT", 2: "CENTER", 3: "JUSTIFIED" };
+    const MG_TEXT_ALIGN_V = { 1: "CENTER", 2: "BOTTOM" };
+
     function mgDecodeNativeNodes(bytes) {
       const str = new TextDecoder("latin1").decode(bytes);
       const utf8 = new TextDecoder("utf-8");
-      const ID = "[0-9]+:[0-9A-Za-z]+";
+      // Instance children are stored as their own records with slash-composed
+      // ids (`2:1010/2:0162`); page ids can be short tokens (`M`).
+      const ID = "[0-9]+:[0-9A-Za-z]+(?:\\/[0-9]+:[0-9A-Za-z]+)*";
+      const OWNER = "[0-9A-Za-z:\\/]{1,64}";
       const paints = mgScanPaints(bytes, str);
       const geoms = mgScanGeometryBlobs(bytes, str);
+      const fontStyles = mgScanFontStyles(bytes, str);
+      const effectTable = mgScanEffects(bytes, str);
       const mre = new RegExp("\\x01(" + ID + ")\\x00(?:\\x02(" + ID + ")?\\x00)?\\x03([^\\x00]+)\\x00", "g");
       const marks = [];
       let m;
@@ -2685,11 +2858,30 @@
           code: m[3] || ""
         });
       }
+      // Component-master roots have no parent AND no sort code: `01 <id> 00 04
+      // <name>` directly. Collect those as a second marker shape. Their
+      // presence marks a share/partial export, which flips omitted-field
+      // defaults (spacing/padding 0 instead of 10).
+      const cre = new RegExp("\\x01(" + ID + ")\\x00\\x04", "g");
+      let componentRootMarks = 0;
+      while ((m = cre.exec(str))) {
+        componentRootMarks++;
+        marks.push({
+          start: m.index,
+          end: m.index + m[0].length - 1, // keep the 04 name tag in the body
+          recId: m[1],
+          id2: null,
+          code: ""
+        });
+      }
+      mgShareModeActive = componentRootMarks > 0;
+      marks.sort((a, b) => a.start - b.start);
       const nodes = {};
-      const oRe = new RegExp("\\x1b(" + ID + ")\\x00", "g");
+      const oRe = new RegExp("\\x1b(" + OWNER + ")\\x00", "g");
       const pRe = new RegExp("\\x15(" + ID + ")\\x00");
       const sRe = new RegExp("\\x16(" + ID + ")\\x00");
       const cRe = new RegExp("\\x17(" + ID + ")\\x00");
+      const tRe = new RegExp("\\x1a(" + ID + ")\\x00");
       for (let i = 0; i < marks.length; i++) {
         const mk = marks[i];
         const end = (i + 1 < marks.length) ? marks[i + 1].start : Math.min(mk.start + 6000, bytes.length);
@@ -2717,6 +2909,9 @@
         const pr = pRe.exec(scal); const paintRef = pr ? pr[1] : null;
         const sr = sRe.exec(scal); const strokeRef = sr ? sr[1] : null;
         const cr = cRe.exec(scal); const cornerRef = cr ? cr[1] : null;
+        // `1a <id>` = template/source reference: for INSTANCE records it points
+        // at the component whose subtree this instance mirrors.
+        const tr = tRe.exec(scal); const templateRef = tr ? tr[1] : null;
         let cornerRadius = 0;
         if (jt >= 0 && type === "RECTANGLE") {
           const local = fb + jt;
@@ -2733,13 +2928,25 @@
         }
         const scalar = mgWalkScalarFields(bytes, fb, scalEnd, afterName);
         const trailer = jt >= 0 ? mgParseTrailer(bytes, str, fb + jt, end) : null;
-        // TEXT object leading field `03` = textAutoResize
-        // (0=WIDTH_AND_HEIGHT 1=HEIGHT; omitted=NONE/fixed size).
+        // TEXT object leading fields: 01 = textAlignHorizontal, 02 =
+        // textAlignVertical, 03 = textAutoResize (0=WIDTH_AND_HEIGHT 1=HEIGHT;
+        // omitted = NONE for full records / inherit for shallow overrides).
         let textAutoResize = null;
+        let textAlignH = null, textAlignV = null, textStyleRef = null;
         if (typeByte === 8) {
-          textAutoResize = bytes[fb + jt + 2] === 0x03
-            ? (bytes[fb + jt + 3] === 1 ? "HEIGHT" : "WIDTH_AND_HEIGHT")
-            : "NONE";
+          let tp = fb + jt + 2;
+          for (let guard = 0; guard < 4; guard++) {
+            const tt = bytes[tp];
+            if (tt === 0x01) { textAlignH = bytes[tp + 1]; tp += 2; continue; }
+            if (tt === 0x02) { textAlignV = bytes[tp + 1]; tp += 2; continue; }
+            if (tt === 0x03) { textAutoResize = bytes[tp + 1] === 1 ? "HEIGHT" : "WIDTH_AND_HEIGHT"; tp += 2; continue; }
+            break;
+          }
+          // The run's `03 <id>` reference (followed by the `05` glyph table)
+          // indexes the text style table (font/size/lineHeight).
+          const srRe = new RegExp("\\x03(" + ID + ")\\x00\\x05");
+          const srm = srRe.exec(str.slice(fb + jt, end));
+          if (srm) textStyleRef = srm[1];
         }
         // ELLIPSE object `01 <obj>`: field 01 = sweep as a fraction of a full
         // turn (omitted=+1, -1=clockwise full circle), field 02 = innerRadius.
@@ -2766,16 +2973,23 @@
           paintRef: paintRef, strokeRef: strokeRef, cornerRef: cornerRef,
           strokeWeight: scalar.strokeWeight !== undefined ? scalar.strokeWeight : 0,
           strokeWeightExplicit: scalar.strokeWeight !== undefined,
+          opacity: scalar.opacity,
           cornerRadius: cornerRadius, name: name, code: mk.code,
           relativeTransform: xy.relativeTransform, rotation: xy.rotation,
           containerMeta: containerMeta, geomHash: geomHash,
+          templateRef: templateRef,
+          hasExplicitSize: scalar.sawWidth === true,
           constrainProportions: scalar.t08 === 1,
           isMask: scalar.t09 === 1,
-          constraintH: scalar.t0b || 0, constraintV: scalar.t0c || 0,
+          visibleByte: scalar.t07,
+          strokeCapByte: scalar.t11,
+          // 0c = horizontal, 0b = vertical (see MG_CONSTRAINT note)
+          constraintH: scalar.t0c, constraintV: scalar.t0b,
           blendModeByte: scalar.t0d,
           strokeJoinByte: scalar.t12, strokeAlignByte: scalar.t13,
           dashPattern: scalar.dashPattern || null,
-          trailer: trailer, textAutoResize: textAutoResize, arcData: arcData
+          trailer: trailer, textAutoResize: textAutoResize, arcData: arcData,
+          textAlignH: textAlignH, textAlignV: textAlignV, textStyleRef: textStyleRef
         };
         if (textDetails.characters && (!name || name.indexOf("_") >= 0)) nodes[mk.recId].characters = textDetails.characters;
         if (textDetails.fontName && (!name || name.indexOf("_") >= 0 || textDetails.characters === name)) {
@@ -2783,7 +2997,7 @@
         }
       }
       for (const id in nodes) if (!nodes[id].parent) nodes[id].parent = nodes[id].owner;
-      return { nodes: nodes, paints: paints, geoms: geoms };
+      return { nodes: nodes, paints: paints, geoms: geoms, fontStyles: fontStyles, effectTable: effectTable };
     }
 
     function mgResolveNativeTypes(n, fallbackType) {
@@ -3096,7 +3310,7 @@
       props.blend = Object.assign({}, props.blend || {});
       if (Array.isArray(props.blend.effects)) {
         props.blend.effects.forEach(e => {
-          if (e && (e.blendMode === "NORMAL" || !e.blendMode)) e.blendMode = "PASS_THROUGH";
+          if (e && e.blendMode === "NORMAL") e.blendMode = "PASS_THROUGH";
         });
       }
       if (props.geometry) {
@@ -3187,7 +3401,7 @@
       props.textDecoration = props.textDecoration || "NONE";
       props.paragraphIndent = 0;
       props.paragraphSpacing = 0;
-      props.letterSpacing = { value: 0, unit: "PERCENT" };
+      if (!props.letterSpacing) props.letterSpacing = { value: 0, unit: "PERCENT" };
       if (props.name === "Fidelity: normal BOLD large colored underlined end") {
         props.styledTextSegments = mgFidelityStyledTextSegments();
         props.fontWeight = 400;
@@ -3203,12 +3417,45 @@
       mgApplyCommonVisualDefaults(props);
     }
 
+    // Scale a decoded vectorNetwork's coordinates (per-axis: instances can be
+    // resized non-uniformly).
+    function mgScaleVectorNetwork(vn, sx, sy) {
+      const sr = Math.min(sx, sy);
+      for (const v of vn.vertices) { v.x *= sx; v.y *= sy; if (v.cornerRadius) v.cornerRadius *= sr; }
+      for (const seg of vn.segments) {
+        if (seg.tangentStart) { seg.tangentStart.x *= sx; seg.tangentStart.y *= sy; }
+        if (seg.tangentEnd) { seg.tangentEnd.x *= sx; seg.tangentEnd.y *= sy; }
+      }
+    }
+
     // Build v2 props from a decoded native node.
-    function mgNativeProps(n, nodes, paints, geoms) {
+    function mgNativeProps(n, nodes, paints, geoms, fontStyles, effectTable) {
       const t = n.type || "FRAME";
       const types = mgResolveNativeTypes(n, t);
       if (t === "VECTOR" && types.sourceType === "VECTOR") types.sourceType = "PEN";
-      const geomVn = (t === "VECTOR" && n.geomHash && geoms) ? geoms[n.geomHash] : null;
+      // Effective instance scale: size-like scalars in an instance subtree are
+      // the template values times this factor (trailer tag 26).
+      const scale = n.effScale || (n.trailer && n.trailer.scaleFactor) || 1;
+      let geomVn = (t === "VECTOR" && n.geomHash && geoms) ? geoms[n.geomHash] : null;
+      if (geomVn) {
+        // Instance vectors scale by their actual-vs-template size ratio
+        // (compound across nested instances), falling back to the scale factor.
+        const vsx = (n.tplW > 0 && n.w > 0) ? n.w / n.tplW : scale;
+        const vsy = (n.tplH > 0 && n.h > 0) ? n.h / n.tplH : scale;
+        if (Math.abs(vsx - 1) > 1e-9 || Math.abs(vsy - 1) > 1e-9) {
+          geomVn = mgCloneJsonValue(geomVn);
+          mgScaleVectorNetwork(geomVn, vsx, vsy);
+        }
+        // Derive the node-level stroke cap from uniform vertex caps: share
+        // exports carry ROUND only on the geometry-blob vertices.
+        let uniformCap = null;
+        for (const v of geomVn.vertices) {
+          const cap = v.strokeCap || "NONE";
+          if (uniformCap === null) uniformCap = cap;
+          else if (uniformCap !== cap) { uniformCap = null; break; }
+        }
+        if (uniformCap && uniformCap !== "NONE") n.vnUniformCap = uniformCap;
+      }
       if (geomVn) {
         // MasterGo omits scalar width/height when they can be derived from the
         // path; node size = geometry bounds plus symmetric padding.
@@ -3220,11 +3467,29 @@
       const stroke = paints[n.strokeRef];
       const fills = fill ? [mgCloneJsonValue(fill)] : [];
       const strokes = stroke ? [mgCloneJsonValue(stroke)] : [];
-      const strokeWeight = n.strokeWeightExplicit ? n.strokeWeight : (n.strokeWeight || 1);
-      const meta = n.containerMeta;
-      const cornerRadius = (meta && meta.corners) ? 0 : (n.cornerRadius || (n.cornerRef ? 10 : 0));
+      // Values read from the node's OWN record are final; template-inherited
+      // and default values still need the instance scale.
+      const ownFinal = !n.templateValues;
+      const strokeWeight = n.strokeWeightExplicit && !n.strokeWeightInherited && ownFinal
+        ? n.strokeWeight
+        : (n.strokeWeightExplicit ? n.strokeWeight : (n.strokeWeight || 1)) * scale;
+      let meta = n.containerMeta;
+      // Instance shells inherit corner/auto-layout meta from their component.
+      if (meta && meta.subtype === "INSTANCE" && n.inheritedMeta) {
+        meta = Object.assign({}, n.inheritedMeta, { subtype: "INSTANCE", instanceRef: meta.instanceRef });
+      }
+      // Tag 17 is a generic style reference: in share exports it points at the
+      // effect registry; only treat it as the legacy corner-style ref when it
+      // does NOT resolve to effects.
+      const refEffects = (effectTable && n.cornerRef && effectTable[n.cornerRef]) || null;
+      const cornerRadius = ((meta && meta.corners) ? 0 : (n.cornerRadius || (n.cornerRef && !refEffects && !mgShareModeActive ? 10 : 0))) * scale;
       const trailer = n.trailer || {};
-      const sideWeights = trailer.sideWeights || [strokeWeight, strokeWeight, strokeWeight, strokeWeight];
+      const inheritedTrailer = n.inheritedTrailer || {};
+      const sideWeights = trailer.sideWeights
+        ? (ownFinal ? trailer.sideWeights.slice() : trailer.sideWeights.map(v => v * scale))
+        : (inheritedTrailer.sideWeights
+          ? inheritedTrailer.sideWeights.map(v => v * scale)
+          : [strokeWeight, strokeWeight, strokeWeight, strokeWeight]);
       const props = {
         type: types.type, sourceType: types.sourceType, restoreType: types.restoreType, id: n.id, name: n.name || n.id,
         parentID: (nodes[n.parent] ? n.parent : null),
@@ -3233,8 +3498,19 @@
           vertical: MG_CONSTRAINT[n.constraintV] || "START"
         },
         exportSettings: [],
-        scence: { visible: true, locked: false },
-        blend: { opacity: 1, isMask: !!n.isMask, blendMode: "NORMAL", effects: [] },
+        scence: { visible: n.visibleByte !== 0, locked: false },
+        blend: {
+          opacity: n.opacity !== undefined ? n.opacity : 1, isMask: !!n.isMask, blendMode: "NORMAL",
+          effects: refEffects
+            ? refEffects.map(fx => {
+                const c = mgCloneJsonValue(fx);
+                if (c.radius) c.radius *= scale;
+                if (c.spread) c.spread *= scale;
+                if (c.offset) { c.offset.x *= scale; c.offset.y *= scale; }
+                return c;
+              })
+            : []
+        },
         corner: {
           topLeftRadius: cornerRadius, topRightRadius: cornerRadius,
           bottomLeftRadius: cornerRadius, bottomRightRadius: cornerRadius,
@@ -3244,8 +3520,8 @@
           fills: fills, strokes: strokes, strokeWeight: strokeWeight,
           strokeAlign: (t === "SLICE" ? "CENTER" : (MG_STROKE_ALIGN[n.strokeAlignByte] || "INSIDE")),
           strokeJoin: MG_STROKE_JOIN[n.strokeJoinByte] || "MITER",
-          dashPattern: n.dashPattern ? n.dashPattern.slice() : [],
-          strokeCap: MG_STROKE_CAP[trailer.strokeCap] || "NONE"
+          dashPattern: n.dashPattern ? n.dashPattern.map(v => v * scale) : [],
+          strokeCap: MG_STROKE_CAP[n.strokeCapByte || trailer.strokeCap || inheritedTrailer.strokeCap] || n.vnUniformCap || "NONE"
         },
         layout: {
           relativeTransform: n.relativeTransform || [[1, 0, n.x], [0, 1, n.y]], x: n.x, y: n.y, rotation: n.rotation || 0, width: n.w, height: n.h,
@@ -3256,11 +3532,28 @@
       };
       if (t === "TEXT") {
         props.characters = n.characters || n.name || "";
-        props.fontSize = mgGuessTextFontSize(n);
-        props.fontName = n.fontName || { family: "Inter", style: "Regular" };
-        props.textAlignHorizontal = "LEFT"; props.textAlignVertical = "TOP";
+        props.textAlignHorizontal = MG_TEXT_ALIGN_H[n.textAlignH] || "LEFT";
+        props.textAlignVertical = MG_TEXT_ALIGN_V[n.textAlignV] || "TOP";
         props.textAutoResize = n.textAutoResize || "NONE";
-        props.letterSpacing = { value: 0, unit: "PIXELS" }; props.lineHeight = { unit: "AUTO" };
+        props.letterSpacing = { value: 0, unit: "PIXELS" };
+        // Font family/size/line-height come from the text style table (values
+        // are final — instance scale already applied); fall back to the
+        // box-height guess otherwise.
+        const style = n.textStyleRef && fontStyles ? fontStyles[n.textStyleRef] : null;
+        if (style) {
+          // Own entries carry final values; entries inherited from the
+          // template carry template values, so the instance scale applies.
+          const styleScale = n.textStyleInherited ? scale : 1;
+          props.fontSize = style.fontSize !== null ? style.fontSize * styleScale : mgGuessTextFontSize(n) * scale;
+          props.fontName = mgNormalizeFontName(mgFontNameFromPostScript(style.psName));
+          props.lineHeight = style.lineHeight !== null
+            ? { value: style.lineHeight * styleScale, unit: "PIXELS" }
+            : { unit: "AUTO" };
+        } else {
+          props.fontSize = mgGuessTextFontSize(n) * scale;
+          props.fontName = n.fontName || { family: "Inter", style: "Regular" };
+          props.lineHeight = { unit: "AUTO" };
+        }
       }
       // Per-side stroke weights only exist on rectangle-like and frame-like
       // nodes in Figma; the v2 exporter omits them elsewhere.
@@ -3288,7 +3581,7 @@
       }
       if (meta) {
         if (meta.corners) {
-          const c = meta.corners;
+          const c = meta.corners.map(v => v * scale);
           props.corner = {
             topLeftRadius: c[0], topRightRadius: c[1] !== undefined ? c[1] : c[0],
             bottomLeftRadius: c[2] !== undefined ? c[2] : c[0], bottomRightRadius: c[3] !== undefined ? c[3] : c[0],
@@ -3301,23 +3594,33 @@
         } else if (types.type === "GROUP") {
           props.clipsContent = false;
         } else if (types.sourceType === "INSTANCE") {
-          props.clipsContent = meta.clipsContent === undefined ? false : meta.clipsContent;
+          props.clipsContent = meta.clipsContent === undefined ? true : meta.clipsContent;
         } else if (frameFamily) {
           props.clipsContent = meta.clipsContent === undefined ? true : meta.clipsContent;
         }
         if (meta.layoutMode) props.layout.layoutMode = meta.layoutMode;
-        if (meta.itemSpacing !== undefined && types.type !== "SECTION") props.layout.itemSpacing = meta.itemSpacing;
-        if (meta.paddings && types.type !== "SECTION") {
-          props.layout.paddingTop = meta.paddings.top;
-          props.layout.paddingRight = meta.paddings.right;
-          props.layout.paddingBottom = meta.paddings.bottom;
-          props.layout.paddingLeft = meta.paddings.left;
+        const missingDefault = mgShareModeActive ? 0 : 10;
+        const spacing = meta.itemSpacingMissing ? missingDefault : meta.itemSpacing;
+        if (spacing !== undefined && types.type !== "SECTION") props.layout.itemSpacing = spacing;
+        const pads = meta.paddingsMissing
+          ? { top: missingDefault, right: missingDefault, bottom: missingDefault, left: missingDefault }
+          : meta.paddings;
+        if (pads && types.type !== "SECTION") {
+          props.layout.paddingTop = pads.top;
+          props.layout.paddingRight = pads.right;
+          props.layout.paddingBottom = pads.bottom;
+          props.layout.paddingLeft = pads.left;
         }
         if (meta.primaryAlign) props.layout.primaryAxisAlignItems = meta.primaryAlign;
         if (meta.counterAlign) props.layout.counterAxisAlignItems = meta.counterAlign;
         // Sizing modes live in the record trailer: field 21/22 present = FIXED,
-        // omitted = AUTO. Instances inherit from their component instead.
-        if (n.trailer && types.sourceType !== "INSTANCE") {
+        // omitted = AUTO. Instances inherit their component's trailer.
+        if (types.sourceType === "INSTANCE") {
+          if (n.inheritedTrailer) {
+            props.layout.primaryAxisSizingMode = inheritedTrailer.has21 ? "FIXED" : "AUTO";
+            props.layout.counterAxisSizingMode = inheritedTrailer.has22 ? "FIXED" : "AUTO";
+          }
+        } else if (n.trailer) {
           props.layout.primaryAxisSizingMode = trailer.has21 ? "FIXED" : "AUTO";
           props.layout.counterAxisSizingMode = trailer.has22 ? "FIXED" : "AUTO";
         }
@@ -3325,6 +3628,11 @@
       }
       if (geomVn) {
         props.vectorNetwork = mgCloneJsonValue(geomVn);
+      }
+      // Booleans inside instance subtrees export as childless leaves with an
+      // empty vectorNetwork.
+      if (n.instanceBooleanLeaf && !props.vectorNetwork) {
+        props.vectorNetwork = { segments: [], vertices: [], regions: [] };
       }
       mgApplyNativeVisualFallbacks(props);
       return props;
@@ -3412,13 +3720,210 @@
       return Object.keys(additions).length;
     }
 
+    // ---- Share-export template instances --------------------------------------
+    // Share/partial .mg exports store the component trees once (plain-id records
+    // without a parent field) and each instance as a SHALLOW record whose id is
+    // the slash-composed instance path (`2:1499/2:0907`). Only overridden
+    // children get shallow records; the rest of the component subtree must be
+    // synthesized from the template, with geometry recomputed from the
+    // instance's actual size via each child's constraints.
+
+    function mgScaleByConstraint(constraint, pos, size, oldParent, newParent) {
+      switch (constraint) {
+        case 2: // END: keep the far-edge gap
+          return { pos: newParent - (oldParent - pos), size: size };
+        case 1: { // CENTER: keep the offset of the child's center to the parent's center
+          const centerOffset = pos + size / 2 - oldParent / 2;
+          return { pos: newParent / 2 + centerOffset - size / 2, size: size };
+        }
+        case 3: // STRETCH: keep both edge gaps
+          return { pos: pos, size: Math.max(0, newParent - pos - (oldParent - pos - size)) };
+        default: { // SCALE — and the default: children of a scaled instance
+          // follow the instance size proportionally (MasterGo reports their
+          // constraints as SCALE at runtime; the template stores nothing).
+          const s = oldParent > 0 ? newParent / oldParent : 1;
+          return { pos: pos * s, size: size * s };
+        }
+      }
+    }
+
+    // Clone one template child into an instance subtree. Geometry is the
+    // template's times the instance scale factor (trailer 26): scaled
+    // instances multiply every child uniformly, and children affected by a
+    // non-uniform resize get their own shallow override records instead.
+    function mgSynthesizeInstanceChild(t, cloneId, parentCloneId, s) {
+      const clone = {};
+      for (const key in t) clone[key] = t[key];
+      clone.id = cloneId;
+      clone.parent = parentCloneId;
+      // every scalar copied from the template still needs the instance scale
+      clone.templateValues = true;
+      clone.x = (t.x || 0) * s; clone.y = (t.y || 0) * s;
+      clone.w = (t.w || 0) * s; clone.h = (t.h || 0) * s;
+      // Remember the template's natural size: vectorNetwork/text scaling uses
+      // the actual-vs-template size ratio.
+      clone.tplW = t.tplW || t.w || 0;
+      clone.tplH = t.tplH || t.h || 0;
+      if (t.relativeTransform) {
+        const m = t.relativeTransform;
+        clone.relativeTransform = [[m[0][0], m[0][1], clone.x], [m[1][0], m[1][1], clone.y]];
+      } else {
+        clone.relativeTransform = null;
+      }
+      return clone;
+    }
+
+    // Expand every INSTANCE node (template ref via tag 1a) by walking its
+    // component subtree; shallow override records that already exist keep their
+    // own geometry, synthesized ones are constraint-scaled. Nested instances
+    // re-queue with the accumulated path.
+    function mgExpandTemplateInstances(nodes, childIds) {
+      const queue = [];
+      for (const id of Object.keys(nodes)) {
+        const n = nodes[id];
+        if (n && n.templateRef && n.containerMeta && n.containerMeta.subtype === "INSTANCE" && nodes[n.templateRef]) {
+          queue.push({ instId: id, tplSide: id });
+        }
+      }
+      let added = 0;
+      const expanded = {};
+      while (queue.length) {
+        const job = queue.shift();
+        const instId = job.instId;
+        if (expanded[instId] || instId.split("/").length > 8) continue;
+        expanded[instId] = true;
+        const inst = nodes[instId];
+        const comp = nodes[inst.templateRef];
+        if (!comp) continue;
+        // instance scale factor (trailer tag 26) applies to every size-like
+        // scalar in the subtree: stroke weights, corners, font sizes, vector
+        // geometry. The stored value is ABSOLUTE (already accumulated across
+        // nesting); an instance record without one is unscaled.
+        inst.effScale = (inst.trailer && inst.trailer.scaleFactor) || 1;
+        // walk the template subtree breadth-first; parents are processed before
+        // children so the parent's actual size is known for constraint scaling.
+        // tplPath tracks the template-side path: component trees carry their
+        // own nested-instance override records (e.g. `2:0748/2:0018`), which
+        // take precedence over the raw template child as the clone source.
+        const walk = [{ tplId: comp.id, cloneId: instId, tplPath: job.tplSide }];
+        while (walk.length) {
+          const cur = walk.shift();
+          const tplNode = nodes[cur.tplId];
+          const cloneNode = nodes[cur.cloneId];
+          if (!tplNode || !cloneNode) continue;
+          const tplChildren = (childIds[cur.tplId] || []);
+          for (const childTplId of tplChildren) {
+            let t = nodes[childTplId];
+            if (!t) continue;
+            const lastSegId = childTplId.indexOf("/") >= 0 ? childTplId.slice(childTplId.lastIndexOf("/") + 1) : childTplId;
+            const overrideKey = cur.tplPath + "/" + lastSegId;
+            if (overrideKey !== childTplId && nodes[overrideKey]) t = nodes[overrideKey];
+            const cloneId = instId + "/" + lastSegId;
+            let child = nodes[cloneId];
+            if (!child) {
+              child = mgSynthesizeInstanceChild(t, cloneId, cur.cloneId, inst.effScale);
+              if (t.textStyleRef) child.textStyleInherited = true;
+              nodes[cloneId] = child;
+              added++;
+            } else {
+              // shallow override record: fill template-inherited gaps
+              child.templateNode = childTplId;
+              if (child.parent == null || child.parent === child.owner) child.parent = cur.cloneId;
+            }
+            child.effScale = (child.trailer && child.trailer.scaleFactor) || inst.effScale;
+            if (child.templateRef && nodes[child.templateRef] &&
+                child.containerMeta && child.containerMeta.subtype === "INSTANCE") {
+              queue.push({ instId: cloneId, tplSide: lastSegId });
+            } else {
+              walk.push({ tplId: childTplId, cloneId: cloneId, tplPath: overrideKey !== childTplId && nodes[overrideKey] ? overrideKey : childTplId });
+            }
+          }
+        }
+      }
+      return added;
+    }
+
+    // Shallow instance records omit everything the component already defines
+    // (name, paints, stroke fields, corner/layout meta). Fill those gaps from
+    // the template chain (tag 1a, followed transitively).
+    function mgInheritFromTemplate(nodes) {
+      for (const id of Object.keys(nodes)) {
+        const n = nodes[id];
+        if (!n || !n.templateRef) continue;
+        // Positional/slot fields (constraints, visibility) belong to the
+        // template CHILD this record overrides — the last path segment — not
+        // to the component the tag-1a chain leads to.
+        const lastSeg = id.indexOf("/") >= 0 ? id.slice(id.lastIndexOf("/") + 1) : null;
+        const slot = lastSeg && lastSeg !== id ? nodes[lastSeg] : null;
+        if (slot && slot !== n) {
+          if (n.constraintH === undefined && slot.constraintH !== undefined) n.constraintH = slot.constraintH;
+          if (n.constraintV === undefined && slot.constraintV !== undefined) n.constraintV = slot.constraintV;
+          if (n.visibleByte === undefined && slot.visibleByte !== undefined) n.visibleByte = slot.visibleByte;
+          if (!n.tplW && slot.w) { n.tplW = slot.w; n.tplH = slot.h; }
+          // A shallow boolean override omits the operation kind (`01 00` with
+          // no `02`), decoding as GROUP; the slot record has the real subtype.
+          if (n.containerMeta && n.containerMeta.subtype === "GROUP" &&
+              slot.containerMeta && slot.containerMeta.subtype === "BOOLEAN_OPERATION") {
+            n.containerMeta = slot.containerMeta;
+          }
+        }
+        let t = nodes[n.templateRef];
+        let guard = 0;
+        while (t && guard++ < 6) {
+          if (n.name == null && t.name != null) n.name = t.name;
+          if (!n.paintRef && t.paintRef) n.paintRef = t.paintRef;
+          if (!n.strokeRef && t.strokeRef) n.strokeRef = t.strokeRef;
+          if (!n.cornerRef && t.cornerRef) n.cornerRef = t.cornerRef;
+          if (!n.strokeWeightExplicit && t.strokeWeightExplicit) {
+            n.strokeWeight = t.strokeWeight;
+            n.strokeWeightExplicit = true;
+            n.strokeWeightInherited = true;
+          }
+          if (n.strokeAlignByte === undefined && t.strokeAlignByte !== undefined) n.strokeAlignByte = t.strokeAlignByte;
+          if (n.strokeJoinByte === undefined && t.strokeJoinByte !== undefined) n.strokeJoinByte = t.strokeJoinByte;
+          if (n.constraintH === undefined && t.constraintH !== undefined) n.constraintH = t.constraintH;
+          if (n.constraintV === undefined && t.constraintV !== undefined) n.constraintV = t.constraintV;
+          if (n.visibleByte === undefined && t.visibleByte !== undefined) n.visibleByte = t.visibleByte;
+          if (n.strokeCapByte === undefined && t.strokeCapByte !== undefined) n.strokeCapByte = t.strokeCapByte;
+          if (!n.isMask && t.isMask) n.isMask = t.isMask;
+          if (n.opacity === undefined && t.opacity !== undefined) n.opacity = t.opacity;
+          if (!n.tplW && (t.tplW || t.w)) { n.tplW = t.tplW || t.w; n.tplH = t.tplH || t.h; }
+          if (!n.dashPattern && t.dashPattern) n.dashPattern = t.dashPattern;
+          if (n.blendModeByte === undefined && t.blendModeByte !== undefined) n.blendModeByte = t.blendModeByte;
+          if (!n.geomHash && t.geomHash) n.geomHash = t.geomHash;
+          if (!n.arcData && t.arcData) n.arcData = t.arcData;
+          if (n.textAutoResize == null && t.textAutoResize != null) n.textAutoResize = t.textAutoResize;
+          if (n.characters == null && t.characters != null) n.characters = t.characters;
+          if (!n.fontName && t.fontName) n.fontName = t.fontName;
+          if (n.textAlignH == null && t.textAlignH != null) n.textAlignH = t.textAlignH;
+          if (n.textAlignV == null && t.textAlignV != null) n.textAlignV = t.textAlignV;
+          if (!n.textStyleRef && t.textStyleRef) {
+            // A template's style entry stores TEMPLATE values; the instance
+            // scale still applies (own entries are final).
+            n.textStyleRef = t.textStyleRef;
+            n.textStyleInherited = true;
+          }
+          if (n.cornerRadius === 0 && t.cornerRadius) n.cornerRadius = t.cornerRadius;
+          if (!n.inheritedMeta && t.containerMeta &&
+              (t.containerMeta.subtype === "COMPONENT" || t.containerMeta.subtype === "FRAME")) {
+            n.inheritedMeta = t.containerMeta;
+          }
+          if (!n.inheritedTrailer && t.trailer) n.inheritedTrailer = t.trailer;
+          t = t.templateRef ? nodes[t.templateRef] : null;
+        }
+      }
+    }
+
     // The document header lists the real MasterGo pages as records shaped
     // `\x01 <id> \x00 \x02 <name> \x00 \x03`. Node records share that shape but
     // their `\x02` value is an id, so keep only records whose name is not an id.
     function parseMgPages(bytes, headerEnd) {
       const pages = [];
       const seen = {};
-      const idRe = /^[0-9]+:[0-9A-Za-z]+$/;
+      // Node ids look like `2:1010` or slash-composed `2:1010/2:0162`; page ids
+      // can additionally be short tokens like `M` (share/partial exports).
+      const idRe = /^(?:[0-9]+:[0-9A-Za-z]+(?:\/[0-9]+:[0-9A-Za-z]+)*|[A-Za-z][0-9A-Za-z]{0,7})$/;
+      const nodeIdRe = /^[0-9]+:[0-9A-Za-z]+(?:\/[0-9]+:[0-9A-Za-z]+)*$/;
       const limit = Math.min(headerEnd > 0 ? headerEnd : bytes.length, 200000);
       let p = 0;
       while (p < limit) {
@@ -3435,7 +3940,7 @@
               // very start. The first record whose `02` value is itself an id is a
               // node record — that marks the end of the page table, so stop there
               // to avoid picking up later component-property records.
-              if (idRe.test(name)) break;
+              if (nodeIdRe.test(name)) break;
               // The `03` field is a fractional-index sort code (e.g. a4, a5P, a6)
               // that defines the page's display order.
               let c = r + 2;
@@ -3474,7 +3979,7 @@
       const metaBytes = getEntryByName(zipEntries, "meta.json");
       if (metaBytes) { try { meta = JSON.parse(decodeUtf8(metaBytes)); } catch (e) { /* ignore */ } }
 
-      const { nodes, paints, geoms } = mgDecodeNativeNodes(documentBytes);
+      const { nodes, paints, geoms, fontStyles, effectTable } = mgDecodeNativeNodes(documentBytes);
       const embeddedProps = mgExtractEmbeddedProps(documentBytes);
       const embeddedIndex = mgBuildEmbeddedIndex(embeddedProps);
       const embeddedOverlayUsed = {};
@@ -3506,6 +4011,14 @@
         for (const p in childIds) sortNativeChildIds(childIds[p]);
       }
       rebuildChildIds();
+      // Share-export template instances (tag 1a component refs) first; the
+      // legacy name-based expansion only covers old-style fixtures.
+      const expandedTemplateCount = mgExpandTemplateInstances(nodes, childIds);
+      mgInheritFromTemplate(nodes);
+      if (expandedTemplateCount > 0) {
+        nodeIds = Object.keys(nodes);
+        rebuildChildIds();
+      }
       const expandedInstanceCount = mgExpandInstanceLikeNodes(nodes, childIds);
       if (expandedInstanceCount > 0) {
         nodeIds = Object.keys(nodes);
@@ -3536,8 +4049,15 @@
       const reachable = {};
       const pageList = [];
       const rootIndexOverride = {};
+      // Component/component-set masters live off-canvas: in share exports they
+      // share the page owner, so drop them from the page roots explicitly.
+      function isComponentMaster(id) {
+        const n = nodes[id];
+        const sub = n && n.containerMeta && n.containerMeta.subtype;
+        return sub === "COMPONENT" || sub === "COMPONENT_SET";
+      }
       for (const pg of mgPages) {
-        const roots = (childIds[pg.id] || []).filter(r => nodes[r] && nodes[r].type);
+        const roots = (childIds[pg.id] || []).filter(r => nodes[r] && nodes[r].type && !isComponentMaster(r));
         let count = 0;
         for (const r of roots) for (const id of subtreeOf(r)) { if (!reachable[id]) { reachable[id] = true; count++; } }
         // Keep empty pages too: MasterGo files legitimately contain pages with
@@ -3560,7 +4080,7 @@
       const nativeEmbeddedMatches = {};
       for (const id in reachable) {
         const n = nodes[id];
-        const props = mgNativeProps(n, nodes, paints, geoms);
+        const props = mgNativeProps(n, nodes, paints, geoms, fontStyles, effectTable);
         const preferredParentId = nativeEmbeddedMatches[n.parent] ? nativeEmbeddedMatches[n.parent].id : null;
         const overlay = mgFindEmbeddedOverlay(props, embeddedIndex, embeddedOverlayUsed, preferredParentId);
         if (overlay) nativeEmbeddedMatches[id] = overlay;
@@ -3575,7 +4095,7 @@
           props.blend.isMask = !!n.isMask;
           if (Array.isArray(props.blend.effects)) {
             props.blend.effects.forEach(e => {
-              if (e && (e.blendMode === "NORMAL" || !e.blendMode)) e.blendMode = "PASS_THROUGH";
+              if (e && e.blendMode === "NORMAL") e.blendMode = "PASS_THROUGH";
             });
           }
         }

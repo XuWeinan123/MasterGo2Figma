@@ -11,22 +11,64 @@ fill regions). The native decoder in `ReceiveFromMasterGo/src/ui/mgPackage.js` r
 directly; embedded JSON is only an overlay for props not yet natively decoded.
 
 ## Rosetta Stone (ground truth)
-- `插件测试.mg` (repo root, 2026-07) — full export; meta.json: `turtleVersion ^1.1.10`,
-  `schemaVersion 4.1`.
-- `mastergo2figma-partial-pages-2026-07-06T12-25-25-320Z.zip` (repo root) — SendToFigma's correct
-  v2 export of the SAME file: page `Plugin Node Coverage Demo` (191 records) + empty page `Temp`.
-  Node ids match the binary 1:1.
-- Older fixtures referenced by previous revisions of this doc (`插件测试 2.mg`, the 2026-06-05
-  zips) were removed from the repo; validation numbers below are against the 2026-07 pair.
+- `新文件.mg` (repo root, 2026-07-09) — a real-world UI design (Tesla-style driving app), exported
+  in the **share/partial** form (see the dedicated section below): component template trees +
+  shallow instance-override records, NO embedded v2-JSON at all.
+- `mastergo2figma-partial-pages-2026-07-09T14-27-10-967Z.zip` — SendToFigma's v2 export of the
+  SAME file: page `页面 1`, 1388 records (14 plain roots + 1374 slash-id instance children).
+- Older fixtures (`插件测试.mg` + the 2026-07-06 zip, and the 2026-06-05 generation before that)
+  were removed from the repo as test sets rotated; their findings remain folded into this doc.
 
-Validation: `node tools/compare_mg_import.js 插件测试.mg mastergo2figma-partial-pages-2026-07-06T12-25-25-320Z.zip`
-→ **all-zero diff**, including the recursive **deep-prop check** that diffs every props field of
-every record against the baseline (strokeAlign/Cap/Join, textAutoResize, isMask, clipsContent,
-constraints, auto-layout, dashPattern, arcData, per-side stroke weights, blend modes,
-exportSettings, …) with a 0.015 numeric tolerance. The decoder aliases image paints to the
-exporter's `image-001, image-002, …` naming (first-use order, backed by the content-hash asset),
-so packages match literally; the compare tool additionally canonicalizes `imageRef` to the SHA-1
-of the asset bytes as a safety net.
+Validation: `node tools/compare_mg_import.js 新文件.mg mastergo2figma-partial-pages-2026-07-09T14-27-10-967Z.zip`.
+State (2026-07-10): 1388/1388 expected records present (0 missing, 0 type / 0 parent mismatches);
+deep-prop mismatches down from 11063 (first run after structure decode) to ~935, all in the
+known-residual buckets listed under TODO. The 2026-07-06 full-export fixture reached a true
+all-zero deep diff before rotation. The decoder aliases image paints to the exporter's
+`image-001, image-002, …` naming; the compare tool additionally canonicalizes `imageRef` to the
+SHA-1 of the asset bytes as a safety net.
+
+## Share/partial export form — CRACKED ✓ (2026-07-09 fixture)
+MasterGo's share/partial `.mg` differs structurally from full editor exports:
+- **Page ids are short tokens** (`M`), not `n:n`; page records gain a `09 01 00 04 80 10` tail.
+- **No embedded v2-JSON at all** — every property must decode natively.
+- **Component template trees** are stored once. Component-master roots have NO parent field and
+  NO sort code: marker shape `01 <id> 00 04 <name>` (a second marker regex catches these; their
+  presence = share mode, `mgShareModeActive`).
+- **Instances are shallow override records** with slash-composed ids (`2:1499/2:0907`): only the
+  overridden fields are stored (size, transform, text chars…). `1a <id>` names the component the
+  instance mirrors; the container object's `06 01 0f <id>` names the template child it overrides.
+  Non-overridden children have NO record and must be synthesized from the template
+  (`mgExpandTemplateInstances`): geometry = template × the instance **scale factor** (trailer
+  tag `26`, an ABSOLUTE accumulated float; absent = unscaled). Size-like scalars (strokeWeight,
+  corners, fontSize, dash, effect radii, VN coordinates) scale the same way — but only values
+  INHERITED from the template; values read from a node's own record are final.
+- **Component trees contain their own nested-instance override records** (`2:0748/2:0018`),
+  which take precedence over the raw template child during expansion.
+- Slot-positional fields (constraints, visibility) inherit from the template CHILD (the id's
+  last segment); visual fields (paints, font, caps) follow the `1a` component chain.
+- Missing spacing/padding fields mean **0** here (full editor exports mean 10).
+- Booleans inside instances export as childless leaves with an empty vectorNetwork (residual:
+  the exact rule for which operand subtrees are kept is still undetermined).
+
+Fields cracked with this fixture (all in `mgWalkScalarFields` / record grammar below):
+- scalar `07 <b>` = **visible** (0 = hidden); scalar `0a <f>` = **node opacity**;
+- scalar `11 <b>` = **strokeCap** (1=ROUND; the trailer `2c` field is a second location);
+- **constraints corrected**: `0b` = VERTICAL, `0c` = HORIZONTAL, enum
+  `0=START 1=END 2=STARTANDEND 3=CENTER 4=SCALE` (the old fixture's symmetric SCALE/SCALE
+  samples could not tell order or values apart);
+- scalar `19 <varint>` = flags (skip; multi-byte LEB128);
+- TEXT object fields `01`/`02` = textAlignHorizontal (2=CENTER 1=RIGHT 3=JUSTIFIED) /
+  textAlignVertical (1=CENTER 2=BOTTOM); the run's `03 <id>` (followed by the `05` glyph table)
+  references the **text style table**: entries `01 <id> 00 05 <b> 03 <PostScript name> 00
+  04 <fontSize> 05 <lineHeight px>` (`mgScanFontStyles`; PostScript name splits into
+  family/style, style camel-case → spaced);
+- **effect registry** via node tag `17` (`mgScanEffects`): child records
+  `05 <kind: 1=DROP_SHADOW 2=LAYER_BLUR> 08 <argb> 09 <radius> 0a <offset.x> 0b <offset.y>
+  0c <spread> 0d/0e <flags>` (floats zero-compressed; omitted offset = 0). Tag 17 doubles as the
+  legacy corner-style ref in full exports — only treat as corner when it resolves to no effects;
+- paint records: `09 <f>` = paint **opacity**; gradients may omit the handle fields
+  (default = vertical top→bottom); image scaleMode enum corrected to `2=TILE 3=CROP`;
+- geometry-blob region loops: ONE int array with `-1` (ff ff ff ff 0f) separating loops.
 
 ## Number codec — CRACKED ✓ (verified both directions)
 - decode([s0,s1,s2,s3]): `S=[s0,s3,s2,s1]`; `value = float32_be( rotr1(uint32_be(S)) )` (rotate
@@ -198,19 +240,24 @@ entries (`convertMgPackageToV2Entries`). `ui.html` is generated by `tools/build-
 `mgPackage.js` is loaded at runtime by `pythonParser/mg_to_zip.py`.
 
 ## TODO (remaining gaps)
-- Native effects (DROP_SHADOW etc.): encoding not yet located; effects come from the embedded
-  overlay plus name-based frame fallbacks (`mgApplyFrameFallbacks`).
-- Native instance override table (`1c 07` sub-field 15): decode to replace
-  `mgApplyButtonInstanceTextCentering` / `mgApplyCardInstanceOverrides` name rules.
-- TEXT: exact native fontSize + full per-segment styled runs (fontWeight now maps from the font
-  style string; size still box-height inference).
-- star/polygon shape fields (`pointCount`, `innerRadius`) — still type-default fallbacks
-  (arcData is now native).
-- exportSettings: not in the node record (slice `1c 0a` object is empty); currently restored
-  from the embedded-JSON twin only.
-- Unknown fields: scalar `11`, trailer `1e/25/27/2b/37`, paint fields `07/09/0c/0d`,
-  image scaleMode values 2/4 (CROP/TILE guesses), vertex flag `03` values 1/2/3,
-  `0d/0e` align values for MAX/SPACE_BETWEEN (guessed 3/4).
+Known residuals on the 2026-07-09 share fixture (~935 deep-prop lines, categorized):
+- **Instance-boolean subtree rule**: booleans inside instances sometimes export as childless
+  empty-VN leaves (43 nodes) while our expansion synthesizes their operand children (94 extra
+  records); a first leaf-ification attempt regressed other booleans that DO keep children —
+  the discriminating signal is still unknown.
+- **Hidden variant-state text styles** (~280 lines, all `visible:false` nodes): inactive
+  component states report a different font (e.g. Source Han Sans 12) than both the template's
+  run ref AND the component-tree override record say (Montserrat). Zero visual impact.
+- **GROUP bounding boxes**: synthesized groups keep template-nominal x/y/w/h × scale; the
+  baseline exports the child-content bbox (±4 px class, ~300 lines incl. transforms).
+- TEXT: multi-run characters lose `\n` between runs (8); `textCase` (LOWER) not decoded;
+  letterSpacing PERCENT-vs-PIXELS signal unknown (tied to the hidden-variant bucket).
+- Full-export era gaps that still stand: native instance override table (`1c 07` sub-field 15)
+  for the old fixtures' name-rule hacks; star/polygon `pointCount`/`innerRadius`;
+  exportSettings (absent from node records; embedded-JSON twin only).
+- Unknown fields: trailer `1e/25/27/2b/37`, paint fields `07/0c/0d`, vertex flag `03` values,
+  `0d/0e` align values for MAX/SPACE_BETWEEN (guessed 3/4), scalar `19` flag-bit meanings,
+  text-style entry fields `06/0b/0e/0f/13`.
 
 ## Mirror
 Mirrors auto-memory `mg-binary-format.md`. Keep both updated as decoding progresses.
