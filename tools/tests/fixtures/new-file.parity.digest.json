@@ -1,0 +1,7 @@
+{
+  "fixture": "new-file-2026-07-10",
+  "mgSha256": "f9a710983eb653937a95e9b74ce266ec8310c266e8384ef315d90814dd4e838e",
+  "zipSha256": "01db13ffd65616f50066f9d5b8f45c7693d12af1363286766f6a0756ade17b62",
+  "expectedLayerCount": 1388,
+  "note": "The source ZIP remains ignored locally; this file contains no design payload."
+}

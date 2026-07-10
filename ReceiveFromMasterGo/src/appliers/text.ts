@@ -26,19 +26,24 @@ export async function applyTextProperties(node: TextNode, data: any) {
         node.name = "[Font Missing][" + family + "][" + style + "] " + node.name;
     }
 
-    node.textAlignHorizontal = data.textAlignHorizontal || "LEFT";
-    node.textAlignVertical = data.textAlignVertical || "TOP";
-    node.textAutoResize = data.textAutoResize || "NONE";
-    node.paragraphIndent = data.paragraphIndent || 0;
-    node.paragraphSpacing = data.paragraphSpacing || 0;
-    node.autoRename = data.autoRename || false;
-    node.fontSize = data.fontSize || 12;
+    // Core text state must succeed or the caller can roll back the node.
     node.fontName = resolvedFontName || { family: "Inter", style: "Regular" };
     node.characters = data.characters || "";
-    if (data.textCase) node.textCase = data.textCase;
-    if (data.textDecoration) node.textDecoration = data.textDecoration;
-    if (data.letterSpacing !== undefined) node.letterSpacing = data.letterSpacing;
-    if (data.lineHeight !== undefined) node.lineHeight = data.lineHeight;
+    node.fontSize = Number.isFinite(data.fontSize) && data.fontSize > 0 ? data.fontSize : 12;
+
+    // Figma rejects some values depending on the installed font/version. These
+    // are formatting refinements, so one bad optional field must not remove the
+    // entire text node from an otherwise valid import.
+    trySetText(() => { node.textAlignHorizontal = data.textAlignHorizontal || "LEFT"; });
+    trySetText(() => { node.textAlignVertical = data.textAlignVertical || "TOP"; });
+    trySetText(() => { node.textAutoResize = data.textAutoResize || "NONE"; });
+    trySetText(() => { node.paragraphIndent = data.paragraphIndent || 0; });
+    trySetText(() => { node.paragraphSpacing = data.paragraphSpacing || 0; });
+    trySetText(() => { node.autoRename = data.autoRename || false; });
+    if (data.textCase) trySetText(() => { node.textCase = data.textCase; });
+    if (data.textDecoration) trySetText(() => { node.textDecoration = data.textDecoration; });
+    if (data.letterSpacing !== undefined) trySetText(() => { node.letterSpacing = data.letterSpacing; });
+    if (data.lineHeight !== undefined) trySetText(() => { node.lineHeight = data.lineHeight; });
 
     if (Array.isArray(data.styledTextSegments) && data.styledTextSegments.length > 0) {
         await applyStyledTextSegments(node, data.styledTextSegments);
@@ -96,6 +101,14 @@ function trySetRange(fn: () => void) {
         fn();
     } catch (error) {
         // A single malformed range/value must not abort the rest of the text node.
+    }
+}
+
+function trySetText(fn: () => void) {
+    try {
+        fn();
+    } catch (_) {
+        // Optional text formatting is intentionally best-effort.
     }
 }
 

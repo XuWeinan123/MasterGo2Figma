@@ -429,19 +429,39 @@ ${style}`;
       } else {
         node.name = "[Font Missing][" + family + "][" + style + "] " + node.name;
       }
-      node.textAlignHorizontal = data.textAlignHorizontal || "LEFT";
-      node.textAlignVertical = data.textAlignVertical || "TOP";
-      node.textAutoResize = data.textAutoResize || "NONE";
-      node.paragraphIndent = data.paragraphIndent || 0;
-      node.paragraphSpacing = data.paragraphSpacing || 0;
-      node.autoRename = data.autoRename || false;
-      node.fontSize = data.fontSize || 12;
       node.fontName = resolvedFontName || { family: "Inter", style: "Regular" };
       node.characters = data.characters || "";
-      if (data.textCase) node.textCase = data.textCase;
-      if (data.textDecoration) node.textDecoration = data.textDecoration;
-      if (data.letterSpacing !== void 0) node.letterSpacing = data.letterSpacing;
-      if (data.lineHeight !== void 0) node.lineHeight = data.lineHeight;
+      node.fontSize = Number.isFinite(data.fontSize) && data.fontSize > 0 ? data.fontSize : 12;
+      trySetText(() => {
+        node.textAlignHorizontal = data.textAlignHorizontal || "LEFT";
+      });
+      trySetText(() => {
+        node.textAlignVertical = data.textAlignVertical || "TOP";
+      });
+      trySetText(() => {
+        node.textAutoResize = data.textAutoResize || "NONE";
+      });
+      trySetText(() => {
+        node.paragraphIndent = data.paragraphIndent || 0;
+      });
+      trySetText(() => {
+        node.paragraphSpacing = data.paragraphSpacing || 0;
+      });
+      trySetText(() => {
+        node.autoRename = data.autoRename || false;
+      });
+      if (data.textCase) trySetText(() => {
+        node.textCase = data.textCase;
+      });
+      if (data.textDecoration) trySetText(() => {
+        node.textDecoration = data.textDecoration;
+      });
+      if (data.letterSpacing !== void 0) trySetText(() => {
+        node.letterSpacing = data.letterSpacing;
+      });
+      if (data.lineHeight !== void 0) trySetText(() => {
+        node.lineHeight = data.lineHeight;
+      });
       if (Array.isArray(data.styledTextSegments) && data.styledTextSegments.length > 0) {
         yield applyStyledTextSegments(node, data.styledTextSegments);
       }
@@ -490,6 +510,12 @@ ${style}`;
     try {
       fn();
     } catch (error) {
+    }
+  }
+  function trySetText(fn) {
+    try {
+      fn();
+    } catch (_) {
     }
   }
   function parseMissingFontTextLayerName(name) {
@@ -1036,7 +1062,15 @@ ${style}`;
     if (isRemovedNode(node) || isGroup || !hasAutoLayout(node)) return;
     const layout = normalizeDeferredLayoutForNativeGroupParent(node, record.layout);
     if (layout.width === void 0 || layout.height === void 0 || !shouldRestoreFixedSize(node, layout)) return;
-    safeResize(node, layout.width, layout.height);
+    const mode = normalizeLayoutMode(layout.layoutMode || node.layoutMode);
+    const primaryFixed = normalizeAxisSizingMode(layout.primaryAxisSizingMode || node.primaryAxisSizingMode) === "FIXED";
+    const counterFixed = normalizeAxisSizingMode(layout.counterAxisSizingMode || node.counterAxisSizingMode) === "FIXED";
+    const horizontalPrimary = mode === "HORIZONTAL";
+    const widthFixed = horizontalPrimary ? primaryFixed : counterFixed;
+    const heightFixed = horizontalPrimary ? counterFixed : primaryFixed;
+    safeResize(node, widthFixed ? layout.width : node.width, heightFixed ? layout.height : node.height);
+    if (layout.primaryAxisSizingMode) safeSet(node, "primaryAxisSizingMode", normalizeAxisSizingMode(layout.primaryAxisSizingMode));
+    if (layout.counterAxisSizingMode) safeSet(node, "counterAxisSizingMode", normalizeAxisSizingMode(layout.counterAxisSizingMode));
     if (hasFiniteRelativeTransform(layout)) {
       safeSet(node, "relativeTransform", layout.relativeTransform);
     } else {
@@ -2014,8 +2048,14 @@ ${style}`;
   function createFinalizedContainerProps(data, preserveLayout = false) {
     const props = __spreadValues({}, data);
     if (!preserveLayout) {
-      delete props.layout;
-      delete props.constraints;
+      const layout = data && data.layout;
+      if (layout) {
+        const parentLayout = {};
+        for (const key of ["layoutAlign", "layoutGrow", "layoutPositioning"]) {
+          if (layout[key] !== void 0) parentLayout[key] = layout[key];
+        }
+        props.layout = Object.keys(parentLayout).length > 0 ? parentLayout : void 0;
+      }
     }
     return props;
   }
@@ -2482,6 +2522,7 @@ ${style}`;
       } catch (error) {
         console.error("Import request failed:", error);
         if (typeof message.type === "string" && message.type.indexOf("import-") === 0) {
+          rollbackImportSession(activeImportSession);
           state.importInProgress = false;
           activeImportSession = null;
           clearPendingImportAssets();
@@ -2588,7 +2629,8 @@ ${style}`;
       pageIndex,
       page: importPage,
       layers: {},
-      recordCount: 0
+      recordCount: 0,
+      error: void 0
     };
   }
   function appendImportPageChunk(message) {
@@ -2599,6 +2641,10 @@ ${style}`;
     if (!pending || !Array.isArray(message.records)) return;
     for (const record of message.records) {
       if (record && record.id) {
+        if (pending.layers[record.id]) {
+          pending.error = `\u9875\u9762\u5206\u5757\u5305\u542B\u91CD\u590D\u56FE\u5C42\uFF1A${record.id}`;
+          continue;
+        }
         pending.layers[record.id] = record;
         pending.recordCount++;
       }
@@ -2614,6 +2660,11 @@ ${style}`;
       const pending = pendingImportPages[pendingKey];
       if (!pending) throw new Error(`\u9875\u9762\u4F20\u8F93\u4E0D\u5B58\u5728\uFF1A${pendingKey}`);
       try {
+        if (pending.error) throw new Error(pending.error);
+        const expectedCount = Number(pending.page.layerCount || 0);
+        if (expectedCount > 0 && Object.keys(pending.layers).length !== expectedCount) {
+          throw new Error(`\u9875\u9762\u56FE\u5C42\u6570\u91CF\u4E0D\u4E00\u81F4\uFF1Aexpected=${expectedCount}, actual=${Object.keys(pending.layers).length}`);
+        }
         addImportTimingCount(session, "page.receivedRecordCount", pending.recordCount);
         yield restoreImportPageData(pending.page, pending.layers, pageIndex);
       } finally {
@@ -2627,6 +2678,9 @@ ${style}`;
       const session = activeImportSession;
       const pageName = createRestoredPageName(importPage.name);
       const pageNodeCount = countLayerRecords(layers);
+      if (importPage.layerCount !== void 0 && pageNodeCount !== Number(importPage.layerCount)) {
+        throw new Error(`\u9875\u9762\u8BB0\u5F55\u6570\u91CF\u4E0D\u4E00\u81F4\uFF1Aexpected=${importPage.layerCount}, actual=${pageNodeCount}`);
+      }
       const postprocessStart = session.postProcessedNodes;
       figma.ui.postMessage({
         type: "progress",
@@ -2644,10 +2698,14 @@ ${style}`;
       figma.currentPage = restoredPage;
       addImportTiming(session, "restore.createPageMs", Date.now() - pageCreateStartedAt);
       const nodeRestoreStartedAt = Date.now();
+      let restoredOnPage = 0;
       for (let rootIndex = 0; rootIndex < importPage.rootNodeIds.length; rootIndex++) {
         const rootId = importPage.rootNodeIds[rootIndex];
-        session.restoredNodes += yield restoreImportedNode(rootId, restoredPage, layers, session.restoredNodes, session.totalNodes);
+        const restored = yield restoreImportedNode(rootId, restoredPage, layers, session.restoredNodes, session.totalNodes);
+        restoredOnPage += restored;
+        session.restoredNodes += restored;
       }
+      if (restoredOnPage !== pageNodeCount) throw new Error(`\u9875\u9762\u8FD8\u539F\u6570\u91CF\u4E0D\u4E00\u81F4\uFF1Aexpected=${pageNodeCount}, actual=${restoredOnPage}`);
       addImportTiming(session, "restore.nodesMs", Date.now() - nodeRestoreStartedAt);
       addImportTimingCount(session, "restore.pageCount", 1);
       yield reportPagePostprocessProgress(session, pageIndex, pageName, postprocessStart, pageNodeCount, 0, 0, 1, "\u6B63\u5728\u5E94\u7528\u81EA\u52A8\u5E03\u5C40...");
@@ -2699,6 +2757,12 @@ ${style}`;
       const session = requireImportSession(message.transferId);
       if (message.clientTimings) session.clientTimings = message.clientTimings;
       try {
+        if (session.restoredPages.length !== session.totalPages) {
+          throw new Error(`\u4F1A\u8BDD\u9875\u9762\u6570\u91CF\u4E0D\u4E00\u81F4\uFF1Aexpected=${session.totalPages}, actual=${session.restoredPages.length}`);
+        }
+        if (session.restoredNodes !== session.totalNodes) {
+          throw new Error(`\u4F1A\u8BDD\u56FE\u5C42\u6570\u91CF\u4E0D\u4E00\u81F4\uFF1Aexpected=${session.totalNodes}, actual=${session.restoredNodes}`);
+        }
         postFinalizeProgress(session, 0, 4, "\u6B63\u5728\u6062\u590D\u8FDE\u63A5\u7EBF...");
         const connectorStartedAt = Date.now();
         applyDeferredConnectorRestores();
@@ -2730,7 +2794,7 @@ ${style}`;
         logImportPerformanceSummary(session, missingFontRestoreResult);
         figma.notify("Restore complete!");
       } catch (error) {
-        figma.currentPage = session.previousCurrentPage;
+        rollbackImportSession(session);
         console.error("Import failed:", error);
         figma.ui.postMessage({
           type: "error",
@@ -2817,6 +2881,20 @@ ${style}`;
   }
   function clearPendingImportPages() {
     for (const pageIndex in pendingImportPages) delete pendingImportPages[pageIndex];
+  }
+  function rollbackImportSession(session) {
+    if (!session) return;
+    for (const page of session.restoredPages) {
+      try {
+        if (!page.removed) page.remove();
+      } catch (error) {
+        console.warn("Unable to roll back imported page:", page.name, error);
+      }
+    }
+    try {
+      if (session.previousCurrentPage && !session.previousCurrentPage.removed) figma.currentPage = session.previousCurrentPage;
+    } catch (_) {
+    }
   }
   function recordStreamedMissingImage(assetName) {
     if (state.missingImageAssetNames[assetName]) return;
@@ -2946,8 +3024,7 @@ ${style}`;
     return __async(this, null, function* () {
       const layerRecord = layers[nodeId];
       if (!layerRecord || !layerRecord.props) {
-        console.warn("Missing layer record:", nodeId);
-        return 0;
+        throw new Error(`\u7F3A\u5C11\u56FE\u5C42\u8BB0\u5F55\uFF1A${nodeId}`);
       }
       let nodeProps = applyManifestLayoutToProps(layerRecord.props, layerRecord);
       if (shouldRestoreBooleanOperationTree(nodeProps, layerRecord)) {
@@ -2999,10 +3076,10 @@ ${style}`;
       const createStartedAt = Date.now();
       const newNode = yield createNodeFromData(nodeProps);
       addImportTiming(activeImportSession, "restore.createNodeMs", Date.now() - createStartedAt);
-      if (!newNode) return 0;
+      if (!newNode) throw new Error(`\u65E0\u6CD5\u521B\u5EFA\u56FE\u5C42\uFF1A${(nodeProps == null ? void 0 : nodeProps.name) || layerRecord.name || nodeId}`);
       try {
         const appendStartedAt = Date.now();
-        if (!appendRestoredNode(parent, newNode)) return 0;
+        if (!appendRestoredNode(parent, newNode)) throw new Error(`\u65E0\u6CD5\u6302\u8F7D\u56FE\u5C42\uFF1A${(nodeProps == null ? void 0 : nodeProps.name) || layerRecord.name || nodeId}`);
         addImportTiming(activeImportSession, "restore.appendNodeMs", Date.now() - appendStartedAt);
         const applyStartedAt = Date.now();
         yield applyProperties(newNode, nodeProps);
@@ -3010,7 +3087,7 @@ ${style}`;
       } catch (error) {
         console.warn("Unable to restore node, removing partial node:", (nodeProps == null ? void 0 : nodeProps.name) || layerRecord.name || nodeId, error);
         safeRemove(newNode);
-        return 0;
+        throw error;
       }
       let restoredCount = 1;
       const currentCount = restoredBefore + restoredCount;

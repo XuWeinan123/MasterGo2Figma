@@ -9,7 +9,7 @@
 
 | tag | 出现频次 | 状态 | 备注 |
 |---|---|---|---|
-| `0x19` | ×1097 | 未破解 | LEB128 位集；疑为 override 掩码，**优先级最高**——可能是隐藏变体文本样式之谜的钥匙 |
+| `0x19` | ×1097 | 部分破解 | LEB128 字段存在/override 掩码；已顺序解析并用于一致性断言，剩余 bit 语义未全解 |
 | `0x05` | ×163 | 部分 | 存在性已兼容跳过，取值 1/2/3 的语义未明（"形状 flag"） |
 
 ## 容器对象（`1c 07`，FRAME/COMPONENT/GROUP/BOOLEAN 等）
@@ -26,7 +26,9 @@
 |---|---|---|---|
 | `0x04` | — | 未破解 | 头部字段，义未明 |
 | `0x05` | — | 未破解 | 头部字段，义未明 |
-| 样式条目 `06/0b/0e/0f/13` | — | 未破解 | 字号/行高/字体名已破；这几个疑 letterSpacing 单位、`textCase` |
+| `0x08 <b>` | — | 未破解 | run 列表与颜色 run 表之间的单字节字段 |
+| 样式条目 `06/0b/13` | — | 未破解 | 2026-07-10 已破：`01`=decoration、`0c`=psName、`12`=styleName、`05` lineHeight `-1`=AUTO；`0e` 疑 letterSpacing 值（样本恒 -1=默认） |
+| run 字形表（`05`/`07` 段） | — | 已定位未利用 | 每字形 x/y 零压缩浮点对 + `00`+LEB128 字形 id；仅顺序跳过，未参与还原 |
 
 ## VECTOR 对象（`1c 01`）
 
@@ -68,9 +70,10 @@
 
 以下不是单个 tag，而是**已知有还原差异、但尚未定位具体字节**的功能点，记录方便对照：
 
-- 实例内布尔的子树导出规则（哪些操作数子树被保留 vs 空 VN 叶子化）——很可能就是标量 `0x19` 位集在起作用。
-- 隐藏变体状态（`visible:false`）的文本样式来源，与模板 run 引用和组件树 override 记录都对不上。
-- 合成 GROUP 的包围盒：当前用"模板标称值 × 缩放"，基准用子内容实际包围盒，暂无字段线索，可能是运行时计算而非存储值。
+- 空 Boolean 叶在嵌套 UNION 中的 1×1 fallback 原点仍与 Figma 基准不同；现有标量、模板 slot
+  与 operand bounds 都不足以推导，可能来自容器 `0x15` typed override 或宿主 Boolean 引擎。
+- `WIDTH_AND_HEIGHT` 文本的最终盒尺寸由 Figma 的 Montserrat 字体 shaping 决定，Node 包对比器不应
+  伪造字体度量；需要继续以 Figma 运行时复核其派生 GROUP/FRAME bounds。
 
 ## 统计口径与复现
 
@@ -80,13 +83,24 @@
   tag，非真实未知字段）。
 - 复现：临时脚本已清出仓库，思路是 vm sandbox 加载 `ReceiveFromMasterGo/src/ui/mgPackage.js`
   内部函数、逐 tag 计数，可参照 `MG_DECODER_JOURNAL.md` 「已知答案攻击」一节的脚手架重建。
-- 结论摘要：**所有承载视觉属性的字段均已破解**（几何/变换/约束/可见性/全部 paint 类型/
-  描边四件套/圆角/自动布局/文本内容与样式/effects/vectorNetwork/实例展开与缩放）。未破解的
-  ~20 类字段里，高频的 `0x1e`/`0x27` 基本确定是无视觉意义的元数据；真正可能有还原价值的是
-  `0x19` 位集与容器 override 表 `0x14/0x15`。
+- 结论摘要：结构、可见性、paint/effect、文本内容/字体、vectorNetwork、实例叶裁剪和绝大部分
+  几何/变换已对齐。未破解的 ~20 类字段里，高频 `0x1e`/`0x27` 基本确定是无视觉意义的元数据；
+  真正可能继续影响视觉的是 `0x19` 剩余 bit、容器 override 表 `0x14/0x15`，以及宿主运行时的
+  字体/Boolean 派生布局。
 
 ## Mirror
 
 字段规格权威见 [`MG_DECODER.md`](MG_DECODER.md)；逆向方法论与踩坑史见
 [`MG_DECODER_JOURNAL.md`](MG_DECODER_JOURNAL.md)。本文只是前两者「未破解部分」的速查表，
 有新突破时把对应行从本文划掉、挪进 `MG_DECODER.md` 正文。
+# Newly constrained by the 2026-07 parity fixture
+
+- `0x19` is a scalar field-presence/override mask. Its Boolean-leaf bit is a
+  useful format consistency check, but semantic detection remains based on the
+  raw VECTOR record and BOOLEAN_OPERATION template slot.
+- Instance container field `0x15` remains the next required source for typed
+  visibility and paint overrides. Do not treat an omitted scalar visibility
+  field as explicit false; template inheritance alone loses variant state.
+- Gradient object subfield `0x0a/0x06/0x03` is solved: it is an axis-scale
+  coefficient, with Figma ratio `2 × |p1 − p0| / scalar`. It is no longer an
+  unknown-field candidate.

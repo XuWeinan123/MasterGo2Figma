@@ -4,7 +4,7 @@
 
 本仓库用于在 MasterGo 与 Figma 之间迁移设计图层。`SendToFigma/` 是 MasterGo 端插件，负责读取页面、序列化图层并导出 MasterGo2Figma JSON zip（v2 格式）；核心代码在 `SendToFigma/src/`，打包产物为 `SendToFigma/code.js`。`ReceiveFromMasterGo/` 是 Figma 端插件，负责上传 zip 并还原为可编辑图层；核心代码在 `ReceiveFromMasterGo/src/`，UI 模板在 `ReceiveFromMasterGo/ui.template.html`，生成后的 UI 在 `ReceiveFromMasterGo/ui.html`（**不要手动改 `ui.html`**，见下文构建说明）。
 
-共享类型与工具函数放在 `shared/`（`shared/types.ts` 定义跨端类型，其余为矩阵/矢量/connector 辅助函数与图层规则配置），两端通过相对路径 `../../shared/...` 引用。本地大文件中继服务在 `tools/mastergo_relay_server.py`；`tools/compare_mg_import.js` 用于比对 `.mg` 解码结果与基准 zip；`pythonParser/mg_to_zip.py` 是独立的 Python CLI，复用 `ReceiveFromMasterGo/src/ui/mgPackage.js` 的解码逻辑，可在不启动任何插件的情况下把 `.mg` 直接转成 v2 zip。说明文档包括 `README.md`、`QUICKSTART.md`、`MG_DECODER.md`（`.mg` 二进制格式规格）、`MG_DECODER_JOURNAL.md`（逆向过程与方法论）、`MG_DECODER_UNKNOWN_FIELDS.md`（未破解字段清单速查表）、`PERFORMANCE_OPTIMIZATIONS.md`；截图与示例资源放在 `assets/`。不要手动修改第三方依赖目录或构建缓存。
+共享类型与工具函数放在 `shared/`（`shared/types.ts` 定义跨端类型，其余为矩阵/矢量/connector 辅助函数与图层规则配置），两端通过相对路径 `../../shared/...` 引用。本地大文件中继服务在 `tools/mastergo_relay_server.py`；`tools/compare_mg_import.js` 用于比对 `.mg` 解码结果与基准 zip；`pythonParser/mg_to_zip.py` 是独立的 Python CLI，复用 `ReceiveFromMasterGo/src/ui/mgPackage.js` 的解码逻辑，可在不启动任何插件的情况下把 `.mg` 直接转成 v2 zip。根目录保留 `README.md` 和 `QUICKSTART.md`；其余长期说明集中在 `docs/`，包括 `docs/MG_DECODER.md`（`.mg` 二进制格式规格）、`docs/MG_DECODER_JOURNAL.md`（逆向过程与方法论）、`docs/MG_DECODER_UNKNOWN_FIELDS.md`（未破解字段清单速查表）、`docs/MG_ZIP_PARITY_STATUS.md`（MG/ZIP 当前一致性状态）和 `docs/PERFORMANCE_OPTIMIZATIONS.md`。截图与示例资源放在 `assets/`。不要手动修改第三方依赖目录或构建缓存。
 
 ## Build, Test, and Development Commands
 
@@ -41,7 +41,7 @@ Python 中继服务默认监听 `http://127.0.0.1:8765`，用于大文件流式�
 - **逆向新字段用“已知答案交叉表”，别盲猜。** 基准 zip 给出每个节点的精确期望值：把节点按期望值分组，再把原生记录里的候选字节交叉制表，看哪个 tag 的取值与分组完全对齐。`strokeAlign` 就是这样从被误读为“paint 引用计数”的 `13` 上定位出来的。
 - **顺序步进解析，别用正则找 tag。** `.mg` 的 twisted-float 载荷里会自然出现 tag 样字节（`0x1c` 曾害得 `case 4` 整个子树丢失）。标量区/尾部/容器对象都改成从固定锚点顺序消费字段（见 `mgWalkScalarFields` / `mgParseTrailer` / `mgParseContainerMeta`）。
 - **区分“字段缺失”和“字段值为 0”。** MasterGo 大量“省略即默认”：padding/itemSpacing 字段缺失=默认 10、strokeWeight 缺失=1、sizing 字段缺失=AUTO、blendMode 缺失=PASS_THROUGH。语义完全不同，不能一律当 0。
-- 改 `mgPackage.js` 前先读 `MG_DECODER.md`（字段规格），破解手法与踩坑史见 `MG_DECODER_JOURNAL.md`；有进展时两者都要同步。
+- 改 `mgPackage.js` 前先读 `docs/MG_DECODER.md`（字段规格），破解手法与踩坑史见 `docs/MG_DECODER_JOURNAL.md`；有进展时两者都要同步。
 
 ## Architecture Notes
 
@@ -62,7 +62,7 @@ Python 中继服务默认监听 `http://127.0.0.1:8765`，用于大文件流式�
 7. 所有页面创建完后，`deferredLayout.ts` 的 `applyDeferredLayoutRestores()` 分三步补齐 auto-layout：节点自身、作为 auto-layout 子项、固定尺寸/transform 收尾；其中 native Group 子节点会把局部坐标转换为 Figma Group 所需的父级坐标。
 8. 最后清理：删除导入 shell、修正单子节点 `SPACE_BETWEEN`、执行 `appliers/connector.ts` 的 deferred connector 恢复、尝试用 `fontLoader.ts` / `appliers/text.ts` 恢复缺失字体、定位视口、发送完成通知。
 
-`src/ui/mgPackage.js` 是原生 `.mg` 二进制解码器（不仅是 v2-JSON 透传），能直接解码 MasterGo 专有的二进制 node/paint/text record，让没有内嵌 v2-JSON 的页面也能正确导入；它通过 `build-ui.js` 内联进 `ui.html`（见上文构建说明），也被 `pythonParser/mg_to_zip.py` 复用。**改动原生格式解码逻辑前必须先读 `MG_DECODER.md`**——它是逆向出的 `.mg` 二进制格式的活文档（数值/tag 编解码、node record 语法、paint/text/instance 解码细节、已知缺口），修改 `mgPackage.js` 时要同步更新它。
+`src/ui/mgPackage.js` 是原生 `.mg` 二进制解码器（不仅是 v2-JSON 透传），能直接解码 MasterGo 专有的二进制 node/paint/text record，让没有内嵌 v2-JSON 的页面也能正确导入；它通过 `build-ui.js` 内联进 `ui.html`（见上文构建说明），也被 `pythonParser/mg_to_zip.py` 复用。**改动原生格式解码逻辑前必须先读 `docs/MG_DECODER.md`**——它是逆向出的 `.mg` 二进制格式的活文档（数值/tag 编解码、node record 语法、paint/text/instance 解码细节、已知缺口），修改 `mgPackage.js` 时要同步更新它。
 
 ### 已知限制
 

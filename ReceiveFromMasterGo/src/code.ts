@@ -60,6 +60,7 @@ type PendingPage = {
   page: ImportPageIndex;
   layers: { [id: string]: ImportLayerRecord };
   recordCount: number;
+  error?: string;
 };
 
 let activeImportSession: ImportSession | null = null;
@@ -201,6 +202,7 @@ async function handleImportRequest(message: any, action: () => Promise<void> | v
   } catch (error) {
     console.error("Import request failed:", error);
     if (typeof message.type === "string" && message.type.indexOf("import-") === 0) {
+      rollbackImportSession(activeImportSession);
       state.importInProgress = false;
       activeImportSession = null;
       clearPendingImportAssets();
@@ -314,7 +316,8 @@ function startImportPage(message: any) {
     pageIndex,
     page: importPage,
     layers: {},
-    recordCount: 0
+    recordCount: 0,
+    error: undefined
   };
 }
 
@@ -326,6 +329,10 @@ function appendImportPageChunk(message: any) {
   if (!pending || !Array.isArray(message.records)) return;
   for (const record of message.records as ImportLayerRecord[]) {
     if (record && record.id) {
+      if (pending.layers[record.id]) {
+        pending.error = `页面分块包含重复图层：${record.id}`;
+        continue;
+      }
       pending.layers[record.id] = record;
       pending.recordCount++;
     }
@@ -341,6 +348,11 @@ async function finishImportPage(message: any) {
   const pending = pendingImportPages[pendingKey];
   if (!pending) throw new Error(`页面传输不存在：${pendingKey}`);
   try {
+    if (pending.error) throw new Error(pending.error);
+    const expectedCount = Number(pending.page.layerCount || 0);
+    if (expectedCount > 0 && Object.keys(pending.layers).length !== expectedCount) {
+      throw new Error(`页面图层数量不一致：expected=${expectedCount}, actual=${Object.keys(pending.layers).length}`);
+    }
     addImportTimingCount(session, "page.receivedRecordCount", pending.recordCount);
     await restoreImportPageData(pending.page, pending.layers, pageIndex);
   } finally {
@@ -353,6 +365,9 @@ async function restoreImportPageData(importPage: ImportPageIndex, layers: { [id:
   const session = activeImportSession;
   const pageName = createRestoredPageName(importPage.name);
   const pageNodeCount = countLayerRecords(layers);
+  if (importPage.layerCount !== undefined && pageNodeCount !== Number(importPage.layerCount)) {
+    throw new Error(`页面记录数量不一致：expected=${importPage.layerCount}, actual=${pageNodeCount}`);
+  }
   const postprocessStart = session.postProcessedNodes;
   figma.ui.postMessage({
     type: "progress",
@@ -372,10 +387,14 @@ async function restoreImportPageData(importPage: ImportPageIndex, layers: { [id:
   addImportTiming(session, "restore.createPageMs", Date.now() - pageCreateStartedAt);
 
   const nodeRestoreStartedAt = Date.now();
+  let restoredOnPage = 0;
   for (let rootIndex = 0; rootIndex < importPage.rootNodeIds.length; rootIndex++) {
     const rootId = importPage.rootNodeIds[rootIndex];
-    session.restoredNodes += await restoreImportedNode(rootId, restoredPage, layers, session.restoredNodes, session.totalNodes);
+    const restored = await restoreImportedNode(rootId, restoredPage, layers, session.restoredNodes, session.totalNodes);
+    restoredOnPage += restored;
+    session.restoredNodes += restored;
   }
+  if (restoredOnPage !== pageNodeCount) throw new Error(`页面还原数量不一致：expected=${pageNodeCount}, actual=${restoredOnPage}`);
   addImportTiming(session, "restore.nodesMs", Date.now() - nodeRestoreStartedAt);
   addImportTimingCount(session, "restore.pageCount", 1);
 
@@ -444,6 +463,12 @@ async function completeImportSession(message: any) {
   const session = requireImportSession(message.transferId);
   if (message.clientTimings) session.clientTimings = message.clientTimings;
   try {
+    if (session.restoredPages.length !== session.totalPages) {
+      throw new Error(`会话页面数量不一致：expected=${session.totalPages}, actual=${session.restoredPages.length}`);
+    }
+    if (session.restoredNodes !== session.totalNodes) {
+      throw new Error(`会话图层数量不一致：expected=${session.totalNodes}, actual=${session.restoredNodes}`);
+    }
     postFinalizeProgress(session, 0, 4, "正在恢复连接线...");
     const connectorStartedAt = Date.now();
     applyDeferredConnectorRestores();
@@ -478,7 +503,7 @@ async function completeImportSession(message: any) {
     logImportPerformanceSummary(session, missingFontRestoreResult);
     figma.notify("Restore complete!");
   } catch (error) {
-    figma.currentPage = session.previousCurrentPage;
+    rollbackImportSession(session);
     console.error("Import failed:", error);
     figma.ui.postMessage({
       type: "error",
@@ -572,6 +597,22 @@ function clearPendingImportAssets() {
 
 function clearPendingImportPages() {
   for (const pageIndex in pendingImportPages) delete pendingImportPages[pageIndex];
+}
+
+function rollbackImportSession(session: ImportSession | null) {
+  if (!session) return;
+  for (const page of session.restoredPages) {
+    try {
+      if (!page.removed) page.remove();
+    } catch (error) {
+      console.warn("Unable to roll back imported page:", page.name, error);
+    }
+  }
+  try {
+    if (session.previousCurrentPage && !session.previousCurrentPage.removed) figma.currentPage = session.previousCurrentPage;
+  } catch (_) {
+    // Viewport restoration is best effort in the desktop plugin runtime.
+  }
 }
 
 function recordStreamedMissingImage(assetName: string) {
@@ -724,8 +765,7 @@ async function restoreImportedNode(
 ): Promise<number> {
   const layerRecord = layers[nodeId];
   if (!layerRecord || !layerRecord.props) {
-    console.warn("Missing layer record:", nodeId);
-    return 0;
+    throw new Error(`缺少图层记录：${nodeId}`);
   }
 
   let nodeProps = applyManifestLayoutToProps(layerRecord.props, layerRecord);
@@ -782,11 +822,11 @@ async function restoreImportedNode(
   const createStartedAt = Date.now();
   const newNode = await createNodeFromData(nodeProps);
   addImportTiming(activeImportSession, "restore.createNodeMs", Date.now() - createStartedAt);
-  if (!newNode) return 0;
+  if (!newNode) throw new Error(`无法创建图层：${nodeProps?.name || layerRecord.name || nodeId}`);
 
   try {
     const appendStartedAt = Date.now();
-    if (!appendRestoredNode(parent, newNode)) return 0;
+    if (!appendRestoredNode(parent, newNode)) throw new Error(`无法挂载图层：${nodeProps?.name || layerRecord.name || nodeId}`);
     addImportTiming(activeImportSession, "restore.appendNodeMs", Date.now() - appendStartedAt);
     const applyStartedAt = Date.now();
     await applyProperties(newNode as any, nodeProps);
@@ -794,7 +834,7 @@ async function restoreImportedNode(
   } catch (error) {
     console.warn("Unable to restore node, removing partial node:", nodeProps?.name || layerRecord.name || nodeId, error);
     safeRemove(newNode);
-    return 0;
+    throw error;
   }
 
   let restoredCount = 1;

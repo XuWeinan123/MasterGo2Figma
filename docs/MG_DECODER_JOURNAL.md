@@ -250,3 +250,108 @@ MasterGo 大量使用“省略即默认”,读格式必须区分“字段不存�
 
 与仓库 `MG_DECODER.md`(字段规格)、auto-memory `mg-binary-format.md`(跨会话钩子)互补。
 逆向有新进展时,规格进 MG_DECODER.md,过程/教训进本文。
+# 2026-07-10 — fresh ZIP parity baseline
+
+The fresh `新文件.mg` / `mastergo2figma-partial-pages-2026-07-10T02-21-12-362Z.zip`
+pair established an exact structural invariant: 43 raw VECTOR overrides of
+Boolean template slots replace 94 template operands. The criterion is native
+type plus template-slot subtype, not visibility, name, depth, or a broad
+"all booleans in instances" rule. Applying it reduced the converted package
+from 1482 to 1388 records with zero extra records, child-order differences,
+root-index differences, or vector-network-presence differences.
+
+The same fixture also disproved two tempting shortcuts. `0x4000` alone does not
+mean "multiply every VECTOR field by instance scale", and gradient subfield
+`0x0a/0x06/0x03` is not directly the minor/major axis ratio. Both guesses made
+the full deep comparator worse. Boolean dimensions must first be classified as
+natural, already scaled, or slot-sourced; group rebasing must wait until leaf
+geometry is trustworthy.
+
+After visibility, explicit stroke clearing, text case/runs, effects, arcs,
+paint-list multiplicity, Boolean pruning, and Boolean leaf size provenance,
+the fresh comparator reached 1388/1388 records, zero structural/effect/text/
+font/vector-network mismatches, 144 geometry mismatches, 124 transform
+mismatches, 16 paint mismatches, and 480 deep-property mismatches.
+
+## 2026-07-10 — geometry/source-precedence pass
+
+The radial scalar was solved by cross-tabling three non-square samples instead
+of fitting a reciprocal guess: `minor/major = 2 × |p1 − p0| / axisScale`. This
+removed all 16 paint mismatches without changing any geometry category.
+
+Instance geometry required several deliberately narrow precedence rules:
+
+- Sparse `0x80` FRAME records that stand in for Boolean slots inherit omitted
+  translation axes; VECTOR/TEXT omissions remain explicit zero.
+- Synthesized GROUPs rebase from visible direct children, including mask-defined
+  bounds, while every direct child (hidden children included) receives the
+  inverse translation.
+- Quarter-stroke direction icons rebase their inner SUBTRACT first and their
+  outer UNION second. Stroke/side-weight and child-type structure are the gate;
+  a broad "rebase every Boolean" experiment caused hundreds of regressions.
+- Childless Boolean vectors remain empty vector networks. Two native structures
+  have independently verified natural bounds: a sole SUBTRACT under a UNION,
+  and `UNION(EXCLUDE, VECTOR)`. Applying operand bounds to all 43 leaves made
+  32 already-correct leaves worse, so the general rule was rejected.
+- Missing positional constraints are not globally CENTER. CENTER is used only
+  for cross-fixture structural families whose parent resize delta predicts the
+  baseline exactly (mirrored vector GROUPs, summary columns, full-width artwork,
+  Boolean-shell frames, and two-vector UNIONs).
+
+The accepted pass ends at 1388/1388 records with zero structural, paint,
+effect, text, font, or vector-network mismatches. Residuals are 40 geometry,
+27 transform, and 129 deep-property lines, all under `layout`: 32 records are
+live Montserrat text metrics or their derived containers, seven are one empty-
+Boolean 1×1 fallback family, and one is a text-derived GROUP. Those are left
+unhardcoded for the next Figma-runtime validation.
+
+## 2026-07-10 — 文本/渐变全对齐 pass（插件测试.mg，全类别归零）
+
+基准对：`插件测试.mg` × `mastergo2figma-partial-pages-2026-07-10T10-06-04-636Z.zip`
+（191/191 records）。起点差异：deep-prop 83、font 7、paint 9、geometry 3、
+transform 1、text 1。终点：**全部 0**（含递归 deep-diff），`npm run build` 通过。
+
+### 方法论（可复用流程）
+
+1. **先跑 `tools/compare_mg_import.js --json`，按属性路径聚类** deep-prop 差异
+   （去掉数组下标后 groupBy），一眼看出 83 条里 61 条是文本、18 条是渐变 —
+   决定主攻方向，不逐条追。
+2. **写一次性 probe harness**（vm 加载 `mgPackage.js` + `__test.decodeNativeNodes`
+   拿中间结构），把「zip 期望值 ↔ mg 原始解码值 ↔ 文件原始字节」三层并排打印。
+   本轮所有根因都是三层对照后一眼定位的，没有一处是猜出来的。
+3. **已知答案交叉表**（AGENTS.md 血泪教训的再次胜利）：
+   - 渐变：把基准 transform 逆推出 neededRatio，与文件标量逐行对照 —
+     新 fixture 每行 ratio == scalar 直存；但旧测试里冻结的三个非方形样本
+     （|p1−p0|≠0.5、scalar>1）确凿满足旧公式 `2×|major|/scalar`。两种编码
+     并存，`min(scalar, 2×|major|/scalar)` 对全部 7 个已知答案成立
+     （圆形 scalar=1 时两式同值）。教训：交叉表必须把新旧样本都摆上桌。
+   - 字体：失败节点的样式表条目 hexdump 出 `0c Inter-Bold` / `12 Bold` —
+     旧 scanner 只读 `03` 家族字段（"Inter"）→ 一律 Regular。
+4. **顺序步进解析，拒绝 tag 正则**：新的 `mgScanFontStyles` / `mgParseFontRuns`
+   全部从锚点顺序消费字段，未知 tag 即停（保留已解字段）或整体放弃回退旧
+   heuristic。旧 scanner 的 `05 <b> 03` 正则漏掉带 decoration 字节
+   （`05 03 01 01 03`）的下划线条目，正是富文本节点需要 fixture 硬编码的原因。
+
+### 本轮破解
+
+- **样式表条目全字段**：`01 <deco>`（下划线）、`03 family`、`04 fontSize`、
+  `05 lineHeight（-1=AUTO 哨兵）`、`0a textCase`、`0c psName`、`12 styleName`。
+- **font-run 列表语法**（`1c 08` 对象）：`06 <count>` 后每 run 携带
+  sortId/文本/styleRef/字形表/字体串/字形 id 表；run 存储顺序任意，按 sortId
+  排序拼接得 characters（旧「取第一个 02 字符串」会抓到中段 run，"underlined"
+  事故）。颜色 run 表（`09`）独立分段；styledTextSegments = 两种边界取并集切分，
+  与基准 9 段富文本完全一致，`mgFidelityStyledTextSegments` 名字硬编码删除。
+- **渐变 `06/03` ratio 统一为 `min(scalar, 2×|p1−p0|/scalar)`**（缺省=1），
+  同时覆盖直存与倒数两种已观测编码；真 ratio>1 的样本出现时需重新交叉表。
+- **显式零尺寸**：细线 VECTOR 的宽度是显式 `0e 00`（真 0），vn-bounds 尺寸
+  推导只在字段**缺失**时触发（新增 `hasExplicitW/H`），不再把 0 抬成 1。
+- **按钮居中 hack 收窄**：只平移仍停在模板 x 上的子节点。浅记录已存回流后
+  坐标，再平移就是双重应用（label +3.5 事故）；无 override 记录的 icon 仍需要。
+
+### 踩坑记录
+
+- 同名 fixture 会被静默替换：本轮开局对比的还是旧 `插件测试.mg`（21MB），
+  换文件后 records 从 1579→191。跑对比前先核对文件 mtime/大小。
+- 文档里的「Verified ✓」不等于判别性验证：本轮新 fixture 里旧公式的“通过样本”
+  全是两种假设同值的退化圆形；而旧公式真正的判别样本冻结在测试里，差点被当作
+  “已删 fixture 的过拟合”推翻。交叉表必须新旧判别样本同桌，测试是最好的存档。

@@ -1123,11 +1123,10 @@
           const manifestParseStartedAt = Date.now();
           const zipManifest = JSON.parse(decodeUtf8(manifestBytes));
           addClientTiming("ui.manifest.parseMs", Date.now() - manifestParseStartedAt);
-          if (zipManifest.schema !== "mastergo2figma.package.v2" || zipManifest.version !== 2) {
-            throw new Error(`文件 "${file.name}" 不是 v2 导出包，请使用新版 SendToFigma 重新导出。`);
-          }
-          if (!zipManifest.pages || !Array.isArray(zipManifest.pages)) {
-            throw new Error(`文件 "${file.name}" 的 manifest.json 格式不正确`);
+          const validation = window.MasterGoPackageValidation.validateV2Package(zipEntries, { manifestPath });
+          if (!validation.ok) {
+            const first = validation.errors[0];
+            throw new Error(`文件 "${file.name}" 校验失败：${first.code}（${first.path}）`);
           }
 
           // Copy entries into global entries with prefix "zip_${i}/"
@@ -1850,6 +1849,7 @@
     }
 
     // ---- MasterGo .mg support (generated from src/ui/mgPackage.js) -----------
+    %%MASTERGO_PACKAGE_VALIDATION_JS%%
     %%MASTERGO_MG_PACKAGE_JS%%
     function findEndOfCentralDirectory(view) {
       for (let offset = view.byteLength - 22; offset >= 0; offset--) {

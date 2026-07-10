@@ -200,14 +200,20 @@ Paint child record body (after `01 <id> 00 02 <ref> 00 03 <sort> 00`), see `mgPa
   SOLID #979797 0.592 with this flag).
 - `07 <b>` unknown flag. `08 <a><r><g><b>` solid / gradient-fallback color (zero-compressed).
   `09 <float>` unknown.
-- `0a { 01 <kind> 03 <p0.x p0.y> 04 <p1.x p1.y> 05 <n stops> 06 { 03 <axisRatio> } } 00` —
+- `0a { 01 <kind> 03 <p0.x p0.y> 04 <p1.x p1.y> 05 <n stops> 06 { 03 <ratio> } } 00` —
   gradient geometry. Stop record: `[01 <position>] 02 <argb> 00`. p0/p1 are the gradient handles
-  in node-normalized space; `axisRatio` = minor/major axis ratio (absent = 1 = circular).
+  in node-normalized space. **`06/03` encodes the Figma minor/major handle ratio in one of two
+  observed forms**: stored directly (2026-07-10 `插件测试.mg`: handles (0.5,0.5)→(1,0.5),
+  scalar < 1, needed ratio == scalar exactly — cross-tabled by inverting the baseline-zip
+  `gradientTransform` per sample) or as `2 × |p1 − p0| / ratio` (the older non-square samples
+  frozen in `tools/tests/mgPackage.test.js`: |p1−p0| ≠ 0.5, scalar > 1). `mgRadialAxisRatio`
+  takes `min(scalar, 2 × |p1 − p0| / scalar)`, which reproduces all seven known answers; both
+  forms agree on the circular scalar=1 case. Absent/0 = circular. A future sample with a true
+  ratio > 1 would be ambiguous under this rule — re-cross-table if one appears.
   Figma `gradientTransform` is computed with the exact SendToFigma math
   (`mgLinearGradientTransform` / `mgRadialGradientTransform`, ports of
   `SendToFigma/src/serializers/universal.ts`), so native decode is bit-compatible with real
-  exports. Verified: radial identity, angular `[[1,0,0],[0,1.75,-0.375]]` (ratio 0.5714…),
-  legacy radial `[[1,…],[0,3.0625,-1.03125]]` (ratio 0.3265…), 4-stop gradients.
+  exports.
 - `0b { 01 <scaleMode: 0=FILL 1=FIT 2=CROP? 3=TILE?> 02 <ratio> 03 <image path> 00
   04 { <crop rect floats> } 07 <w> 08 <h> } 00` — image paint guts. imageRef = path basename
   (content-hash filename, resolves through `manifest.assets` and `images/`).
@@ -222,42 +228,124 @@ when the paint table resolved them, never a native vectorNetwork, and never the 
 container layout (clipsContent / layoutMode / spacing / paddings / align / sizing — see
 `nativeLayoutKeys` in `mgApplyEmbeddedOverlay`).
 
-## Native TEXT — partially decoded
-Unchanged from previous findings: `1c 08` records keep characters/font in the nested `05` run
-blob; font size still inferred from box height; the known fidelity rich-text string uses an
-explicit fixture fallback (`mgFidelityStyledTextSegments`).
+## Native TEXT — CRACKED ✓ (font runs + style table, 2026-07-10)
 
-## Native instance expansion — implemented (name-based)
-Instances import by cloning the component-source subtree into `<instanceId>/<sourceChildId>` ids;
-overrides restored from embedded props + fixture rules. The native override table (`1c 07` →
-`06 01 15 …`) is the decoded-but-unused replacement candidate.
+### Font-run list (`1c 08` object, `mgParseFontRuns`)
+```
+[01 <alignH> 02 <alignV> 03 <autoResize>]   one-byte values < 0x10
+06 <runCount>
+runCount × ( 01 <sortId> 00                 fractional-index sort code ("a0", "a7", …)
+             02 <run text, UTF-8> 00
+             03 <styleRef> 00               → text style table entry
+             05 <glyphCount> <glyphCount × 2 zero-floats>     per-glyph x/y
+             06 01 <"Family/Style/Version …"> 00              font string
+             07 <glyphCount> <glyphCount × (00 <LEB128 glyphId>)> 00 )
+[08 <b>]
+09 <count> color runs: [01 <start>] 02 <end> 03 <paintRef> 00  (byte offsets)
+[0a <defaultStyleRef> 00]
+```
+- Runs are stored in **arbitrary order**; sort by `sortId` and concatenate the texts to get
+  `characters` (fixes the old first-`02`-string heuristic that could grab a mid-text run —
+  "underlined" instead of the full fidelity sentence).
+- Color runs (`09`, parsed by `mgParseTextRuns`) segment the text **independently** of font
+  runs; their `paintRef` resolves through the ordinary paint table. Figma
+  `styledTextSegments` = split at the union of font-run and color-run boundaries; per-segment
+  font/size/decoration/lineHeight come from the font run's style entry, fills from the color
+  run's paints. Validated exactly against the baseline's 9-segment fidelity node (the old
+  name-keyed `mgFidelityStyledTextSegments` fixture is deleted).
+- Glyph tables consume strictly sequentially (zero-floats are 1 byte for 0, else 4); any
+  structural violation aborts the parser and falls back to the legacy heuristics.
+- Caveats: color-run start/end offsets are single bytes — texts > 255 UTF-16 units are
+  unverified; CJK run offsets assumed UTF-16 (only ASCII multi-run samples exist so far).
+
+### Text style table (`mgScanFontStyles`)
+Entries (interleaved with compact non-font shells `05 <b> 00 00`):
+```
+01 <id> 00 05 <kind=3> [01 <decoration: 1=UNDERLINE, 2=STRIKETHROUGH?>]
+03 <family> 00 [04 <fontSize>] [05 <lineHeight, -1 = AUTO>]
+[06 <b>] [0b <b>] [0a <textCase: 1=UPPER 2=LOWER>]
+[0c <PostScript name> 00] [0e <float, -1 = default; suspected letterSpacing>]
+[12 <style name "Bold"/"SemiBold"/…> 00] [13 …] 00
+```
+- **`0c`/`12` carry the real font style** — the `03` family alone ("Inter") is what made every
+  share-export Bold/SemiBold header import as Regular. Resolution order in `mgNativeProps`
+  (`mgFontNameFromStyleEntry`): entry styleName (`12`) → dash-style psName (`0c`, or the legacy
+  full-export family slot) → record font string → Regular.
+- **`lineHeight = -1` is the AUTO sentinel** (twisted bytes `7f 01 00 00`), not a pixel value.
+- The old scanner regex required `05 <b> 03 …` and silently dropped entries carrying the
+  decoration byte (`05 03 01 01 03 …`) — the underline style entry was invisible, which is why
+  the fidelity node needed a fixture. Sequential field consumption only; unknown tags stop the
+  walk and keep whatever parsed (e.g. AlibabaPuHuiTi entries with an `08` field keep their
+  family-only fontName).
+- letterSpacing value is not decoded yet: field `0e` is -1 on every sample; the importer emits
+  `{ value: 0, unit: "PERCENT" }` (previously hardcoded to PIXELS at node level — wrong unit).
+- fontSize still falls back to the box-height guess when a node has no style ref.
+
+## Native instance expansion — template chain implemented
+Share-export instances expand from tag `0x1a` template refs into
+`<instanceId>/<sourceChildId>` ids. Sparse scalar presence, visibility, transform-matrix
+inheritance, absolute tag `0x26` scale, Boolean leaf pruning, and evidenced GROUP/Boolean rebasing
+are native. The old full-export button/card fallback remains name-based until the container
+override table (`1c 07` → `06 01 15 …`) is fully typed and regression-tested — but the button
+centering shift is now gated: it only moves children still sitting at their template x
+(`mgApplyButtonInstanceTextCentering`). Shallow share-export override records store the
+already-reflowed position; shifting those again double-applies the centered-auto-layout delta
+(label +3.5 bug). Children without an override record keep the template x and still need it.
+Explicit-zero sizes are respected during vector decode: a hairline VECTOR stores width `0e 00`
+(true 0), and the vn-bounds size fallback now fires only when the axis field is absent
+(`hasExplicitW/H`), not when it is an explicit 0.
 
 ## Decoder pipeline (mgPackage.js)
 `mgScanPaints` (paint table) + `mgScanGeometryBlobs` (vector geometry) + `mgDecodeNativeNodes`
 (records: scalars, flags, transform, container meta, geometry hash) → `mgNativeProps` (v2 props)
 → embedded overlay (`mgApplyEmbeddedOverlay`) → instance expansion → per-page chunked v2 zip
-entries (`convertMgPackageToV2Entries`). `ui.html` is generated by `tools/build-ui.js`; the same
+entries (`convertMgPackageToV2Entries`). Direct `.mg` conversion appends `_mg` to every restored
+page name (without duplicating an existing suffix), so it remains distinguishable from a v2 zip
+baseline after import. `ui.html` is generated by `tools/build-ui.js`; the same
 `mgPackage.js` is loaded at runtime by `pythonParser/mg_to_zip.py`.
 
 ## TODO (remaining gaps)
-Known residuals on the 2026-07-09 share fixture (~935 deep-prop lines, categorized):
-- **Instance-boolean subtree rule**: booleans inside instances sometimes export as childless
-  empty-VN leaves (43 nodes) while our expansion synthesizes their operand children (94 extra
-  records); a first leaf-ification attempt regressed other booleans that DO keep children —
-  the discriminating signal is still unknown.
-- **Hidden variant-state text styles** (~280 lines, all `visible:false` nodes): inactive
-  component states report a different font (e.g. Source Han Sans 12) than both the template's
-  run ref AND the component-tree override record say (Montserrat). Zero visual impact.
-- **GROUP bounding boxes**: synthesized groups keep template-nominal x/y/w/h × scale; the
-  baseline exports the child-content bbox (±4 px class, ~300 lines incl. transforms).
-- TEXT: multi-run characters lose `\n` between runs (8); `textCase` (LOWER) not decoded;
-  letterSpacing PERCENT-vs-PIXELS signal unknown (tied to the hidden-variant bucket).
+
+### 2026-07 share-export parity checkpoint
+
+- Scalar fields are now consumed in record order through `0x1b`; the parser
+  preserves field presence, the native transform matrix, and the `0x19` LEB128
+  override mask. Never use a tag regex in this range because float payloads
+  naturally contain tag-like bytes.
+- A raw `VECTOR` that overrides a `BOOLEAN_OPERATION` template slot is a
+  flattened instance leaf. It remains a childless VECTOR with an empty vector
+  network; its template operand subtree must not be emitted. A shallow leaf
+  dimension matching the slot's natural dimension is multiplied by the absolute
+  `tag 0x26` scale; a dimension already matching `slot × scale` remains final.
+- Missing padding/itemSpacing is `10` on ordinary native page nodes and `0`
+  only for template-derived/shallow share nodes. These are distinct semantics.
+Current fresh-fixture result: 1388/1388 records; zero missing/extra/type/parent/index/child-order,
+paint/effect/text/font/vector-network mismatches. The remaining comparator output is 40 geometry,
+27 transform, and 129 deep-property lines; every deep mismatch is under `layout`.
+
+- 32 geometry records are `WIDTH_AND_HEIGHT` text or GROUP/FRAME bounds derived from those text
+  metrics. The importer loads Montserrat and lets Figma compute the live text size; the binary
+  package comparator cannot reproduce Figma's font shaper in Node.
+- Seven records are one repeated nested Boolean family where Figma and MasterGo choose different
+  1×1 fallback origins after an empty vector leaf. No stored native scalar or reusable structural
+  formula has been found; do not add node-name/id constants.
+- One residual GROUP size is also derived from live text metrics.
 - Full-export era gaps that still stand: native instance override table (`1c 07` sub-field 15)
   for the old fixtures' name-rule hacks; star/polygon `pointCount`/`innerRadius`;
   exportSettings (absent from node records; embedded-JSON twin only).
 - Unknown fields: trailer `1e/25/27/2b/37`, paint fields `07/0c/0d`, vertex flag `03` values,
   `0d/0e` align values for MAX/SPACE_BETWEEN (guessed 3/4), scalar `19` flag-bit meanings,
-  text-style entry fields `06/0b/0e/0f/13`.
+  text-style entry fields `06/0b/13` (letterSpacing value likely in `0e`, -1 = default on all
+  samples), TEXT-object leading `08 <b>`, run glyph tables' float semantics (skipped, not used).
+
+### 2026-07-10 — text/gradient parity pass (插件测试.mg fixture)
+`插件测试.mg` vs `mastergo2figma-partial-pages-2026-07-10T10-06-04-636Z.zip`: **all comparator
+categories 0** (191/191 records, deep-prop recursive diff included). Cracked this pass: text
+style table `0c/12` psName/styleName + decoration byte + lineHeight `-1 = AUTO`; font-run list
+grammar (sortId/text/styleRef/fontString per run); generic styledTextSegments from font-run ×
+color-run boundary union (fixture fallback deleted); gradient `06/03` ratio unified as
+`min(scalar, 2×|p1−p0|/scalar)` across both observed encodings; explicit-zero hairline width;
+template-x-gated button centering shift.
 
 ## Mirror
 Mirrors auto-memory `mg-binary-format.md`. Keep both updated as decoding progresses.

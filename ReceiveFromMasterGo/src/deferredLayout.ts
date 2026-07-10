@@ -181,7 +181,17 @@ function finalizeDeferredAutoLayout(record: { node: SceneNode; layout: any; isGr
     const layout = normalizeDeferredLayoutForNativeGroupParent(node, record.layout);
     if (layout.width === undefined || layout.height === undefined || !shouldRestoreFixedSize(node, layout)) return;
 
-    safeResize(node, layout.width, layout.height);
+    const mode = normalizeLayoutMode(layout.layoutMode || (node as any).layoutMode);
+    const primaryFixed = normalizeAxisSizingMode(layout.primaryAxisSizingMode || (node as any).primaryAxisSizingMode) === "FIXED";
+    const counterFixed = normalizeAxisSizingMode(layout.counterAxisSizingMode || (node as any).counterAxisSizingMode) === "FIXED";
+    const horizontalPrimary = mode === "HORIZONTAL";
+    const widthFixed = horizontalPrimary ? primaryFixed : counterFixed;
+    const heightFixed = horizontalPrimary ? counterFixed : primaryFixed;
+    // Resizing both dimensions turns a HUG axis into FIXED in Figma. Keep the
+    // live HUG dimension and resize only the physical axis that is explicit.
+    safeResize(node, widthFixed ? layout.width : (node as any).width, heightFixed ? layout.height : (node as any).height);
+    if (layout.primaryAxisSizingMode) safeSet(node, "primaryAxisSizingMode", normalizeAxisSizingMode(layout.primaryAxisSizingMode));
+    if (layout.counterAxisSizingMode) safeSet(node, "counterAxisSizingMode", normalizeAxisSizingMode(layout.counterAxisSizingMode));
     if (hasFiniteRelativeTransform(layout)) {
         safeSet(node, "relativeTransform", layout.relativeTransform);
     } else {

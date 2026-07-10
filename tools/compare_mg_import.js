@@ -14,9 +14,18 @@ function newestMatchingFile(pattern) {
     .sort((a, b) => b.mtimeMs - a.mtimeMs)[0]?.name;
 }
 
-const mgPath = path.resolve(root, process.argv[2] || newestMatchingFile(/\.mg$/i) || "插件测试.mg");
-const baselineZipPath = path.resolve(root, process.argv[3] || newestMatchingFile(/^mastergo2figma-.*\.zip$/i) || "mastergo2figma-partial-pages-2026-06-05T08-52-29-134Z.zip");
+const argv = process.argv.slice(2);
+const jsonOutput = argv.includes("--json");
+const includeRecords = argv.includes("--include-records");
+const positional = argv.filter(arg => arg !== "--json" && arg !== "--include-records");
+if (positional.length !== 2) {
+  console.error("Usage: node tools/compare_mg_import.js <file.mg> <baseline.zip> [--json] [--include-records]");
+  process.exit(2);
+}
+const mgPath = path.resolve(root, positional[0]);
+const baselineZipPath = path.resolve(root, positional[1]);
 const mgPackagePath = path.join(root, "ReceiveFromMasterGo", "src", "ui", "mgPackage.js");
+const packageValidationPath = path.join(root, "ReceiveFromMasterGo", "src", "ui", "packageValidation.js");
 const textDecoder = new TextDecoder("utf-8");
 
 function decodeUtf8(bytes) {
@@ -96,7 +105,7 @@ async function convertMgWithUiDecoder() {
   vm.runInContext(mgPackageSource, sandbox, { filename: mgPackagePath });
 
   const entries = sandbox.window.MasterGoMg.convertMgPackageToV2Entries(readZipEntries(mgPath), path.basename(mgPath));
-  return loadPackageRecords(entries);
+  return { ...loadPackageRecords(entries), entries };
 }
 
 function loadPackageRecords(entries) {
@@ -199,6 +208,16 @@ function stableJson(value) {
   return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
 }
 
+function numbersClose(actual, expected) {
+  return Math.abs(actual - expected) <= Math.max(0.015, Math.abs(expected) * 1e-4) ||
+    (Math.abs(actual) < 1e-8 && Math.abs(expected) < 1e-8);
+}
+
+function anglesClose(actual, expected) {
+  const delta = ((actual - expected + 180) % 360 + 360) % 360 - 180;
+  return numbersClose(delta, 0);
+}
+
 // Recursive full-props diff with a small numeric tolerance. This is the
 // strict parity net: any prop the field-specific checks below don't cover
 // (strokeAlign/strokeCap/strokeJoin, textAutoResize, isMask, clipsContent,
@@ -212,7 +231,7 @@ function deepDiffProps(pathStr, a, e, out, id, name) {
     return;
   }
   if (ta === "number") {
-    const close = Math.abs(a - e) <= Math.max(0.015, Math.abs(e) * 1e-4) || (Math.abs(a) < 1e-8 && Math.abs(e) < 1e-8);
+    const close = pathStr.endsWith(".rotation") ? anglesClose(a, e) : numbersClose(a, e);
     if (!close) out.push([id, pathStr, a, e, name]);
     return;
   }
@@ -230,6 +249,12 @@ function deepDiffProps(pathStr, a, e, out, id, name) {
     return;
   }
   if (a !== e) out.push([id, pathStr, a, e, name]);
+}
+
+function comparableValuesEqual(actual, expected) {
+  const diff = [];
+  deepDiffProps("", actual, expected, diff, "", "");
+  return diff.length === 0;
 }
 
 function compareRecords(actual, expected) {
@@ -273,12 +298,12 @@ function compareRecords(actual, expected) {
     const aLayout = actualProps.layout || {};
     const eLayout = expectedProps.layout || {};
     for (const key of ["x", "y", "width", "height"]) {
-      if (Math.abs((aLayout[key] || 0) - (eLayout[key] || 0)) > 0.01) {
+      if (!numbersClose(aLayout[key] || 0, eLayout[key] || 0)) {
         geometryMismatches.push([expectedRecord.id, key, aLayout[key], eLayout[key], expectedRecord.name]);
         break;
       }
     }
-    if (Math.abs((aLayout.rotation || 0) - (eLayout.rotation || 0)) > 0.01) {
+    if (!anglesClose(aLayout.rotation || 0, eLayout.rotation || 0)) {
       transformMismatches.push([expectedRecord.id, "rotation", aLayout.rotation || 0, eLayout.rotation || 0, expectedRecord.name]);
     } else {
       const actualTransform = aLayout.relativeTransform || [];
@@ -287,7 +312,7 @@ function compareRecords(actual, expected) {
         for (let col = 0; col < 3; col++) {
           const av = actualTransform[row] ? actualTransform[row][col] : undefined;
           const ev = expectedTransform[row] ? expectedTransform[row][col] : undefined;
-          if (Math.abs((av || 0) - (ev || 0)) > 0.01) {
+          if (!numbersClose(av || 0, ev || 0)) {
             transformMismatches.push([expectedRecord.id, `relativeTransform[${row}][${col}]`, av, ev, expectedRecord.name]);
             row = 2;
             break;
@@ -297,7 +322,7 @@ function compareRecords(actual, expected) {
     }
     const actualEffects = normalizeComparableEffects(actualProps.blend && actualProps.blend.effects);
     const expectedEffects = normalizeComparableEffects(expectedProps.blend && expectedProps.blend.effects);
-    if (JSON.stringify(actualEffects) !== JSON.stringify(expectedEffects)) {
+    if (!comparableValuesEqual(actualEffects, expectedEffects)) {
       effectMismatches.push([expectedRecord.id, actualEffects, expectedEffects, expectedRecord.name]);
     }
     const actualGeometry = actualProps.geometry || {};
@@ -305,7 +330,7 @@ function compareRecords(actual, expected) {
     for (const paintKey of ["fills", "strokes"]) {
       const actualPaints = normalizeComparablePaints(actualGeometry[paintKey], actual.resolveImageRef);
       const expectedPaints = normalizeComparablePaints(expectedGeometry[paintKey], expected.resolveImageRef);
-      if (stableJson(actualPaints) !== stableJson(expectedPaints)) {
+      if (!comparableValuesEqual(actualPaints, expectedPaints)) {
         paintMismatches.push([expectedRecord.id, paintKey, actualPaints, expectedPaints, expectedRecord.name]);
         break;
       }
@@ -316,7 +341,7 @@ function compareRecords(actual, expected) {
       }
       const actualFont = actualProps.fontName ? `${actualProps.fontName.family}/${actualProps.fontName.style}` : "";
       const expectedFont = expectedProps.fontName ? `${expectedProps.fontName.family}/${expectedProps.fontName.style}` : "";
-      if (actualFont !== expectedFont || Math.abs((actualProps.fontSize || 0) - (expectedProps.fontSize || 0)) > 0.01) {
+      if (actualFont !== expectedFont || !numbersClose(actualProps.fontSize || 0, expectedProps.fontSize || 0)) {
         fontMismatches.push([expectedRecord.id, `${actualFont} ${actualProps.fontSize || 0}`, `${expectedFont} ${expectedProps.fontSize || 0}`, expectedRecord.name]);
       }
     }
@@ -347,13 +372,45 @@ function compareRecords(actual, expected) {
 
 (async function main() {
   const actual = await convertMgWithUiDecoder();
-  const expected = loadPackageRecords(readZipEntries(baselineZipPath));
+  const expectedEntries = readZipEntries(baselineZipPath);
+  const expected = { ...loadPackageRecords(expectedEntries), entries: expectedEntries };
+  const { validateV2Package } = require(packageValidationPath);
+  const actualValidation = validateV2Package(actual.entries);
+  const expectedValidation = validateV2Package(expected.entries);
+  if (!actualValidation.ok || !expectedValidation.ok) {
+    const result = { actualValidation, expectedValidation };
+    if (jsonOutput) console.log(JSON.stringify(result, null, 2));
+    else console.error("Package validation failed:", JSON.stringify(result, null, 2));
+    process.exitCode = 1;
+    return;
+  }
   const diff = compareRecords(actual, expected);
+
+  if (jsonOutput) {
+    const actualById = new Map(actual.records.map(record => [record.id, record]));
+    const expectedById = new Map(expected.records.map(record => [record.id, record]));
+    console.log(JSON.stringify({
+      actual: { pages: actual.manifest.pages, recordCount: actual.records.length, canonicalDigest: actualValidation.canonicalDigest },
+      expected: { pages: expected.manifest.pages, recordCount: expected.records.length, canonicalDigest: expectedValidation.canonicalDigest },
+      counts: Object.fromEntries(Object.entries(diff).map(([key, value]) => [key, value.length])),
+      diff,
+      ...(includeRecords ? {
+        recordPairs: Object.fromEntries(Array.from(new Set([...actualById.keys(), ...expectedById.keys()])).map(id => [id, {
+          actual: actualById.get(id),
+          expected: expectedById.get(id)
+        }]))
+      } : {})
+    }, null, 2));
+    if (Object.values(diff).some(list => list.length > 0)) process.exitCode = 1;
+    return;
+  }
 
   console.log("Actual pages:", actual.manifest.pages.map(page => `${page.name}=${page.layerCount}`).join(", "));
   console.log("Expected pages:", expected.manifest.pages.map(page => `${page.name}=${page.layerCount}`).join(", "));
   console.log("Actual records:", actual.records.length);
   console.log("Expected records:", expected.records.length);
+  console.log("Actual canonical digest:", actualValidation.canonicalDigest);
+  console.log("Expected canonical digest:", expectedValidation.canonicalDigest);
   console.log("Missing records:", diff.missing.length);
   console.log("Extra records:", diff.extra.length);
   console.log("Type mismatches:", diff.typeMismatches.length);
@@ -381,7 +438,7 @@ function compareRecords(actual, expected) {
   console.log("Vector network mismatch sample:", diff.vectorNetworkMismatches.slice(0, 10));
   console.log("Deep prop mismatch sample:", diff.deepPropMismatches.slice(0, 20));
 
-  if (diff.missing.length || diff.extra.length || diff.typeMismatches.length || diff.parentMismatches.length || diff.indexMismatches.length || diff.childOrderMismatches.length || diff.transformMismatches.length || diff.effectMismatches.length || diff.paintMismatches.length || diff.deepPropMismatches.length) {
+  if (Object.values(diff).some(list => list.length > 0)) {
     console.log("Missing sample:", diff.missing.slice(0, 10).map(record => [record.id, record.name]));
     console.log("Extra sample:", diff.extra.slice(0, 10).map(record => [record.id, record.name]));
     console.log("Type mismatch sample:", diff.typeMismatches.slice(0, 10));

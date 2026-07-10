@@ -18,7 +18,7 @@
 2. **直接导入 MasterGo 原生 `.mg` 文件**：接收端插件可以直接上传 `.mg`（无需先跑发送端），内置的原生二进制
    解码器会把它解析成 v2 图层再还原。适合手上只有 `.mg` 文件、无法运行 MasterGo 端插件的场景。当前解码器在
    基准样例上已能做到与发送端 zip 逐字段一致；仍有少量属性依赖 `.mg` 内嵌的 JSON 兜底（见
-   [`MG_DECODER.md`](MG_DECODER.md) 的「TODO」）。
+   [`MG_DECODER.md`](docs/MG_DECODER.md) 的「TODO」）。
 
 ## SendToFigma 用法
 
@@ -81,8 +81,9 @@ python3 pythonParser/mg_to_zip.py 输入.mg -o 输出.zip
 ```
 
 它复用接收端同一份解码器 `ReceiveFromMasterGo/src/ui/mgPackage.js`，产出的 zip 可以直接喂给
-`ReceiveFromMasterGo`。`.mg` 二进制格式的逆向说明见 [`MG_DECODER.md`](MG_DECODER.md)，逆向过程与方法论
-见 [`MG_DECODER_JOURNAL.md`](MG_DECODER_JOURNAL.md)。
+`ReceiveFromMasterGo`。`.mg` 二进制格式的逆向说明见 [`MG_DECODER.md`](docs/MG_DECODER.md)，逆向过程与方法论
+见 [`MG_DECODER_JOURNAL.md`](docs/MG_DECODER_JOURNAL.md)。当前 MG/ZIP 一致性状态见
+[`MG_ZIP_PARITY_STATUS.md`](docs/MG_ZIP_PARITY_STATUS.md)。
 
 ### 接收端还原阶段
 

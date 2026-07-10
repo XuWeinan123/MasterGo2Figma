@@ -73,8 +73,17 @@ export function createContainerShellFrameProps(data: any): any {
 export function createFinalizedContainerProps(data: any, preserveLayout = false): any {
     const props = { ...data };
     if (!preserveLayout) {
-        delete props.layout;
-        delete props.constraints;
+        // figma.group() derives x/y/size for a translation-only GroupNode, but
+        // it does not replace the group's role as an auto-layout child. Keep
+        // only parent-item layout semantics for the deferred layout pass.
+        const layout = data && data.layout;
+        if (layout) {
+            const parentLayout: any = {};
+            for (const key of ["layoutAlign", "layoutGrow", "layoutPositioning"]) {
+                if (layout[key] !== undefined) parentLayout[key] = layout[key];
+            }
+            props.layout = Object.keys(parentLayout).length > 0 ? parentLayout : undefined;
+        }
     }
     return props;
 }
