@@ -4,7 +4,7 @@
 
 本仓库用于在 MasterGo 与 Figma 之间迁移设计图层。`SendToFigma/` 是 MasterGo 端插件，负责读取页面、序列化图层并导出 MasterGo2Figma JSON zip（v2 格式）；核心代码在 `SendToFigma/src/`，打包产物为 `SendToFigma/code.js`。`ReceiveFromMasterGo/` 是 Figma 端插件，负责上传 zip 并还原为可编辑图层；核心代码在 `ReceiveFromMasterGo/src/`，UI 模板在 `ReceiveFromMasterGo/ui.template.html`，生成后的 UI 在 `ReceiveFromMasterGo/ui.html`（**不要手动改 `ui.html`**，见下文构建说明）。
 
-共享类型与工具函数放在 `shared/`（`shared/types.ts` 定义跨端类型，其余为矩阵/矢量/connector 辅助函数与图层规则配置），两端通过相对路径 `../../shared/...` 引用。本地大文件中继服务在 `tools/mastergo_relay_server.py`；`tools/compare_mg_import.js` 用于比对 `.mg` 解码结果与基准 zip；`pythonParser/mg_to_zip.py` 是独立的 Python CLI，复用 `ReceiveFromMasterGo/src/ui/mgPackage.js` 的解码逻辑，可在不启动任何插件的情况下把 `.mg` 直接转成 v2 zip。说明文档包括 `README.md`、`QUICKSTART.md`、`MG_DECODER.md`（`.mg` 二进制格式规格）、`MG_DECODER_JOURNAL.md`（逆向过程与方法论）、`PERFORMANCE_OPTIMIZATIONS.md`；截图与示例资源放在 `assets/`。不要手动修改第三方依赖目录或构建缓存。
+共享类型与工具函数放在 `shared/`（`shared/types.ts` 定义跨端类型，其余为矩阵/矢量/connector 辅助函数与图层规则配置），两端通过相对路径 `../../shared/...` 引用。本地大文件中继服务在 `tools/mastergo_relay_server.py`；`tools/compare_mg_import.js` 用于比对 `.mg` 解码结果与基准 zip；`pythonParser/mg_to_zip.py` 是独立的 Python CLI，复用 `ReceiveFromMasterGo/src/ui/mgPackage.js` 的解码逻辑，可在不启动任何插件的情况下把 `.mg` 直接转成 v2 zip。说明文档包括 `README.md`、`QUICKSTART.md`、`MG_DECODER.md`（`.mg` 二进制格式规格）、`MG_DECODER_JOURNAL.md`（逆向过程与方法论）、`MG_DECODER_UNKNOWN_FIELDS.md`（未破解字段清单速查表）、`PERFORMANCE_OPTIMIZATIONS.md`；截图与示例资源放在 `assets/`。不要手动修改第三方依赖目录或构建缓存。
 
 ## Build, Test, and Development Commands
 
