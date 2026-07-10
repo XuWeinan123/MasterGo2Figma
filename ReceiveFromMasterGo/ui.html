@@ -2991,7 +2991,10 @@
           trailer: trailer, textAutoResize: textAutoResize, arcData: arcData,
           textAlignH: textAlignH, textAlignV: textAlignV, textStyleRef: textStyleRef
         };
-        if (textDetails.characters && (!name || name.indexOf("_") >= 0)) nodes[mk.recId].characters = textDetails.characters;
+        // Share exports: the run characters are authoritative (layer names
+        // collapse newlines, e.g. "SPEED\nLIMIT" → "SPEED LIMIT"). Full
+        // exports keep the old conservative rule for rich-text edge cases.
+        if (textDetails.characters && (mgShareModeActive || !name || name.indexOf("_") >= 0)) nodes[mk.recId].characters = textDetails.characters;
         if (textDetails.fontName && (!name || name.indexOf("_") >= 0 || textDetails.characters === name)) {
           nodes[mk.recId].fontName = mgNormalizeFontName(textDetails.fontName);
         }
