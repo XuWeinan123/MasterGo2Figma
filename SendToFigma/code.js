@@ -1004,6 +1004,169 @@
     };
   }
 
+  // src/serializers/svgGradientTruth.ts
+  var IDENTITY = [[1, 0, 0], [0, 1, 0]];
+  function parseSvgColor(raw) {
+    if (!raw) return null;
+    const text = raw.trim().toLowerCase();
+    if (text === "white") return { r: 1, g: 1, b: 1 };
+    if (text === "black") return { r: 0, g: 0, b: 0 };
+    let m = /^#([0-9a-f]{3})$/.exec(text);
+    if (m) {
+      const h = m[1];
+      return {
+        r: parseInt(h[0] + h[0], 16) / 255,
+        g: parseInt(h[1] + h[1], 16) / 255,
+        b: parseInt(h[2] + h[2], 16) / 255
+      };
+    }
+    m = /^#([0-9a-f]{6})([0-9a-f]{2})?$/.exec(text);
+    if (m) {
+      return {
+        r: parseInt(m[1].slice(0, 2), 16) / 255,
+        g: parseInt(m[1].slice(2, 4), 16) / 255,
+        b: parseInt(m[1].slice(4, 6), 16) / 255
+      };
+    }
+    m = /^rgba?\(([^)]+)\)$/.exec(text);
+    if (m) {
+      const parts = m[1].split(",").map((part) => part.trim());
+      if (parts.length >= 3) {
+        const channel = (value) => value.endsWith("%") ? parseFloat(value) / 100 : parseFloat(value) / 255;
+        return { r: channel(parts[0]), g: channel(parts[1]), b: channel(parts[2]) };
+      }
+    }
+    return null;
+  }
+  function parseSvgTransform(raw) {
+    if (!raw) return IDENTITY;
+    let result = IDENTITY;
+    const re = /(matrix|translate|scale)\s*\(([^)]*)\)/g;
+    let m;
+    let any = false;
+    const mul = (a, b) => [
+      [a[0][0] * b[0][0] + a[0][1] * b[1][0], a[0][0] * b[0][1] + a[0][1] * b[1][1], a[0][0] * b[0][2] + a[0][1] * b[1][2] + a[0][2]],
+      [a[1][0] * b[0][0] + a[1][1] * b[1][0], a[1][0] * b[0][1] + a[1][1] * b[1][1], a[1][0] * b[0][2] + a[1][1] * b[1][2] + a[1][2]]
+    ];
+    while (m = re.exec(raw)) {
+      const args = m[2].split(/[\s,]+/).filter(Boolean).map(Number);
+      if (args.some((v) => !Number.isFinite(v))) return null;
+      let step = null;
+      if (m[1] === "matrix" && args.length === 6) {
+        step = [[args[0], args[2], args[4]], [args[1], args[3], args[5]]];
+      } else if (m[1] === "translate" && args.length >= 1) {
+        step = [[1, 0, args[0]], [0, 1, args.length > 1 ? args[1] : 0]];
+      } else if (m[1] === "scale" && args.length >= 1) {
+        step = [[args[0], 0, 0], [0, args.length > 1 ? args[1] : args[0], 0]];
+      }
+      if (!step) return null;
+      result = mul(result, step);
+      any = true;
+    }
+    return any ? result : IDENTITY;
+  }
+  function parseAttributes(tag) {
+    const attrs = {};
+    const re = /([A-Za-z_][\w:-]*)\s*=\s*"([^"]*)"/g;
+    let m;
+    while (m = re.exec(tag)) attrs[m[1].toLowerCase()] = m[2];
+    return attrs;
+  }
+  function parseStops(body) {
+    const stops = [];
+    const re = /<stop\b[^>]*>/g;
+    let m;
+    while (m = re.exec(body)) {
+      const attrs = parseAttributes(m[0]);
+      const style = attrs["style"] || "";
+      const styleGet = (key) => {
+        const sm = new RegExp(key + '\\s*:\\s*([^;"]+)').exec(style);
+        return sm ? sm[1].trim() : void 0;
+      };
+      const rawOffset = attrs["offset"] || styleGet("offset") || "0";
+      const offset = rawOffset.endsWith("%") ? parseFloat(rawOffset) / 100 : parseFloat(rawOffset);
+      const color = parseSvgColor(attrs["stop-color"] || styleGet("stop-color"));
+      const rawOpacity = attrs["stop-opacity"] || styleGet("stop-opacity");
+      const opacity = rawOpacity === void 0 ? 1 : parseFloat(rawOpacity);
+      if (!color || !Number.isFinite(offset)) continue;
+      stops.push({
+        position: Math.min(1, Math.max(0, offset)),
+        color: { r: color.r, g: color.g, b: color.b, a: Number.isFinite(opacity) ? Math.min(1, Math.max(0, opacity)) : 1 }
+      });
+    }
+    return stops;
+  }
+  function parseSvgRadialGradients(svg) {
+    if (!svg || typeof svg !== "string") return [];
+    const results = [];
+    const stopsById = {};
+    const anyGradRe = /<(radialGradient|linearGradient)\b([^>]*)>([\s\S]*?)<\/\1>/g;
+    let m;
+    const pendingRadials = [];
+    while (m = anyGradRe.exec(svg)) {
+      const attrs = parseAttributes(m[2]);
+      const stops = parseStops(m[3]);
+      if (attrs["id"] && stops.length) stopsById[attrs["id"]] = stops;
+      if (m[1] === "radialGradient") pendingRadials.push({ attrs, stops });
+    }
+    const selfClosedRe = /<radialGradient\b([^>]*)\/>/g;
+    while (m = selfClosedRe.exec(svg)) {
+      pendingRadials.push({ attrs: parseAttributes(m[1]), stops: [] });
+    }
+    for (const pending of pendingRadials) {
+      let stops = pending.stops;
+      if (!stops.length) {
+        const href = pending.attrs["href"] || pending.attrs["xlink:href"];
+        const refId = href && href.charAt(0) === "#" ? href.slice(1) : null;
+        if (refId && stopsById[refId]) stops = stopsById[refId];
+      }
+      if (stops.length < 2) continue;
+      const matrix = parseSvgTransform(pending.attrs["gradienttransform"]);
+      if (!matrix) continue;
+      const units = (pending.attrs["gradientunits"] || "objectBoundingBox").toLowerCase();
+      results.push({
+        stops,
+        matrix,
+        objectBoundingBox: units !== "userspaceonuse"
+      });
+    }
+    return results;
+  }
+  function svgStopsMatchPaintStops(svgStops, paintStops) {
+    if (!Array.isArray(paintStops) || svgStops.length !== paintStops.length) return false;
+    for (let i = 0; i < svgStops.length; i++) {
+      const a = svgStops[i], b = paintStops[i];
+      if (!b || !b.color) return false;
+      if (Math.abs(a.position - (b.position || 0)) > 0.015) return false;
+      if (Math.abs(a.color.r - b.color.r) > 0.02 || Math.abs(a.color.g - b.color.g) > 0.02 || Math.abs(a.color.b - b.color.b) > 0.02 || Math.abs(a.color.a - (b.color.a === void 0 ? 1 : b.color.a)) > 0.02) return false;
+    }
+    return true;
+  }
+  function svgRadialAxisRatio(gradient, nodeWidth, nodeHeight, u) {
+    const len = Math.sqrt(u.x * u.x + u.y * u.y);
+    if (!(len > 0) || !(nodeWidth > 0) || !(nodeHeight > 0)) return null;
+    const g = gradient.matrix;
+    const det = g[0][0] * g[1][1] - g[0][1] * g[1][0];
+    if (!Number.isFinite(det) || Math.abs(det) < 1e-12) return null;
+    const ia = g[1][1] / det, ib = -g[0][1] / det;
+    const ic = -g[1][0] / det, id = g[0][0] / det;
+    const sx = gradient.objectBoundingBox ? 1 : nodeWidth;
+    const sy = gradient.objectBoundingBox ? 1 : nodeHeight;
+    const b00 = ia * sx, b01 = ib * sy;
+    const b10 = ic * sx, b11 = id * sy;
+    const quad = (dx, dy) => {
+      const qx = b00 * dx + b01 * dy;
+      const qy = b10 * dx + b11 * dy;
+      return qx * qx + qy * qy;
+    };
+    const ux = u.x / len, uy = u.y / len;
+    const along = quad(ux, uy);
+    const perpendicular = quad(-uy, ux);
+    if (!(along > 0) || !(perpendicular > 0)) return null;
+    const ratio = Math.sqrt(along / perpendicular);
+    return Number.isFinite(ratio) && ratio > 0 ? ratio : null;
+  }
+
   // ../shared/vectorUtils.ts
   function normalizeVectorWindingRule(value) {
     if (value === "Evenodd" || value === "EVENODD") return "EVENODD";
@@ -1561,6 +1724,62 @@
       nodeJson.vectorFallback = "svgMissingRegions";
     });
   }
+  var RADIAL_TRUTH_MAX_SUBTREE_NODES = 40;
+  var RADIAL_TRUTH_MAX_SVG_BYTES = 2 * 1024 * 1024;
+  function applySvgRadialTruth(jsonPaints, rawPaints, gradients, width, height) {
+    if (!Array.isArray(jsonPaints)) return;
+    for (const paint of jsonPaints) {
+      if (!paint || paint.type !== "GRADIENT_RADIAL" || !Array.isArray(paint.gradientStops)) continue;
+      const gradient = gradients.find((candidate) => !candidate.used && svgStopsMatchPaintStops(candidate.stops, paint.gradientStops));
+      if (!gradient) continue;
+      gradient.used = true;
+      const raw = Array.isArray(rawPaints) ? rawPaints.find((candidate) => candidate && candidate.type === "GRADIENT_RADIAL" && Array.isArray(candidate.gradientHandlePositions) && svgStopsMatchPaintStops(gradient.stops, candidate.gradientStops)) : null;
+      const handles = raw && raw.gradientHandlePositions || [];
+      if (!handles[0] || !handles[1]) continue;
+      const p0 = { x: Number(handles[0].x), y: Number(handles[0].y) };
+      const p1 = { x: Number(handles[1].x), y: Number(handles[1].y) };
+      const u = { x: p1.x - p0.x, y: p1.y - p0.y };
+      const ratio = svgRadialAxisRatio(gradient, width, height, u);
+      if (ratio === null) continue;
+      const minorEnd = { x: p0.x - u.y * ratio, y: p0.y + u.x * ratio };
+      const transform = getResultArrayByThreePoints([p0, p1, minorEnd]);
+      if (isFiniteTransform(transform)) paint.gradientTransform = transform;
+    }
+  }
+  function enrichRadialGradientTruth(node, nodeJson) {
+    return __async(this, null, function* () {
+      const geometry = nodeJson && nodeJson.geometry;
+      if (!geometry) return;
+      const hasRadial = (list) => Array.isArray(list) && list.some((paint) => paint && paint.type === "GRADIENT_RADIAL");
+      if (!hasRadial(geometry.fills) && !hasRadial(geometry.strokes)) return;
+      if (countExportableSubtreeNodes(node) > RADIAL_TRUTH_MAX_SUBTREE_NODES) return;
+      let svg = "";
+      try {
+        const exported = yield node.exportAsync({ format: "SVG" });
+        if (typeof exported === "string") {
+          svg = exported;
+        } else if (exported && typeof exported.length === "number" && exported.length <= RADIAL_TRUTH_MAX_SVG_BYTES) {
+          let text = "";
+          for (let i = 0; i < exported.length; i++) text += String.fromCharCode(exported[i]);
+          svg = text;
+        }
+      } catch (error) {
+        state.logDiagnostic("warn", "[MasterGo2Figma] Radial gradient SVG probe failed", {
+          node: getNodeProbe(node),
+          error: describeError(error)
+        });
+        return;
+      }
+      if (!svg || svg.length > RADIAL_TRUTH_MAX_SVG_BYTES) return;
+      const gradients = parseSvgRadialGradients(svg);
+      if (!gradients.length) return;
+      const width = Number(safeRead(() => node.width, 0)) || 0;
+      const height = Number(safeRead(() => node.height, 0)) || 0;
+      if (!(width > 0) || !(height > 0)) return;
+      applySvgRadialTruth(geometry.fills, readNodeProperty(node, "fills", []), gradients, width, height);
+      applySvgRadialTruth(geometry.strokes, readNodeProperty(node, "strokes", []), gradients, width, height);
+    });
+  }
   function getRawChildCount(node) {
     return safeRead(() => {
       const children = node && node.children;
@@ -1695,6 +1914,8 @@
         yield enrichBooleanOperationExport(node, nodeJson, childNodes);
         setNodeDebug("enrich-vector");
         yield enrichFilledVectorExport(node, nodeJson);
+        setNodeDebug("enrich-radial-gradient");
+        yield enrichRadialGradientTruth(node, nodeJson);
         setNodeDebug("override-layout");
         overrideExportLayoutFromSourceNode(nodeJson, node);
         setNodeDebug("build-record");

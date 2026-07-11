@@ -396,3 +396,19 @@ transform 1、text 1。终点：**全部 0**（含递归 deep-diff），`npm run
 - 0:50 Subtract 尺寸（67.25 vs 65.57）：.mg 存 MasterGo 自身包围盒，zip 存 API
   重算的布尔结果盒；无路径求值器无法在包级复现，导入端 figma.subtract 会重算，
   记为已知残差（同"空布尔 1×1 fallback"家族）。
+
+### 2026-07-11 追加 — zip 导出端径向渐变自证（SVG 逃生舱）
+
+API 折叠不可逆已证死，但发现 `node.exportAsync({format:"SVG"})` 的输出来自
+渲染器本身：`<radialGradient gradientTransform>` 携带真椭圆。导出端新增
+`enrichRadialGradientTruth`（nodeSerializer）+ 纯函数模块 `svgGradientTruth.ts`：
+
+- 只需 G 矩阵、单位模式（userSpaceOnUse/objectBoundingBox）与节点宽高 ——
+  ratio 对 viewBox 描边留白平移与统一导出缩放**不变**，对 SVG 序列化细节鲁棒。
+- 按渐变 stops 匹配 paint（±0.015 offset / ±0.02 颜色通道），方向与圆心仍锚定
+  API handles，只替换 ratio → 与 mg 端 `mgRadialGradientTransform` 输出严格同式
+  （跨插件断言测试）。
+- 门槛：子树 ≤40 节点、SVG ≤2MB；解析失败静默回退折叠值。角向/菱形无 SVG
+  等价物，维持折叠近似。
+- 测试 `tools/tests/svgGradientTruth.test.js`（esbuild 即时编译 TS 模块）：
+  合成 Tesla 用例双单位模式命中 3.5696、stops 匹配、跨插件 transform 一致，4/4。

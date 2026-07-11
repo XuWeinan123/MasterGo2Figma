@@ -243,11 +243,20 @@ Paint child record body (after `01 <id> 00 02 <ref> 00 03 <sort> 00`), see `mgPa
   - **ZIP baselines are NOT ground truth for this ratio.** The 2026-07-11 ZIP carries 0.4117 for
     the Tesla vignette — MasterGo's plugin API exposes only two handles plus a transform built
     from the folded `min(ratio, 2|p1−p0|/ratio)`, which disagrees with MasterGo's own renderer
-    whenever `ratio² > 2|p1−p0|`; the fold is not invertible, so SendToFigma cannot recover the
-    true value (it now prefers a real third handle if the runtime ever provides one, and
-    `tools/compare_mg_import.js` canonicalizes both sides to the folded form so the known
-    exporter-side loss doesn't read as a decoder regression). The 0710-2 ZIP carried the TRUE
-    3.5696, so the API transform's provenance varies per document — trust the .mg + screenshots.
+    whenever `ratio² > 2|p1−p0|`; the fold is not invertible from the API paint alone.
+    The 0710-2 ZIP carried the TRUE 3.5696, so the API transform's provenance varies per
+    document — trust the .mg + screenshots. `tools/compare_mg_import.js` canonicalizes both
+    sides to the folded form so the known exporter-side loss doesn't read as a decoder
+    regression.
+  - **SendToFigma escape hatch (2026-07-11)**: for nodes carrying radial-gradient paints the
+    exporter now probes `node.exportAsync({format:"SVG"})` — the SVG comes from the renderer
+    and its `<radialGradient gradientTransform>` carries the true ellipse. The minor/major
+    ratio extracted from it is invariant to viewBox padding and uniform export scale (only the
+    matrix, unit mode, and node aspect matter); paints are matched by gradient stops, and the
+    rebuilt transform stays anchored to the API handles (`enrichRadialGradientTruth` in
+    `nodeSerializer.ts`, pure math in `serializers/svgGradientTruth.ts`). Angular/diamond
+    gradients have no SVG equivalent and still export the folded transform; a real third
+    gradient handle is preferred if the runtime ever provides one.
   Figma `gradientTransform` is computed with the exact SendToFigma math
   (`mgLinearGradientTransform` / `mgRadialGradientTransform`, ports of
   `SendToFigma/src/serializers/universal.ts`), so native decode is bit-compatible with real

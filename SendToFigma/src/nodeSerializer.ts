@@ -1,9 +1,13 @@
 import { state } from "./state";
 import { safeRead, isOutOfMemoryError, describeError } from "../../shared/utils";
-import { 
-    getUniversalProperty, readNodeProperty, cloneJsonCompatible, 
-    getNodeProbe, overrideLayoutTransform 
+import {
+    getUniversalProperty, readNodeProperty, cloneJsonCompatible,
+    getNodeProbe, overrideLayoutTransform,
+    getResultArrayByThreePoints, isFiniteTransform
 } from "./serializers/universal";
+import {
+    parseSvgRadialGradients, svgStopsMatchPaintStops, svgRadialAxisRatio, SvgRadialGradient
+} from "./serializers/svgGradientTruth";
 import { transPenNode, cloneVectorNetworkForExport, normalizeVectorRegions } from "./serializers/vector";
 import { 
     transEllipseNode, transRectangleNode, transStarNode, 
@@ -262,6 +266,87 @@ export async function enrichFilledVectorExport(node: SceneNode, nodeJson: any) {
     nodeJson.vectorFallback = "svgMissingRegions";
 }
 
+// Replace radial-gradient transforms with the render truth recovered from the
+// node's SVG export. MasterGo's API paint.transform is built from the FOLDED
+// axis ratio min(r, 2·|major|/r) and disagrees with the renderer whenever
+// r² > 2·|major| (wide flat vignettes import too dark/narrow); the fold is not
+// invertible, so the SVG — produced by the renderer itself — is the only
+// runtime source of the true ellipse. Orientation and center stay anchored to
+// the API handles; only the minor/major ratio comes from the SVG, matched to
+// each paint by its gradient stops. Angular/diamond gradients have no SVG
+// equivalent and keep the handle-derived transform.
+const RADIAL_TRUTH_MAX_SUBTREE_NODES = 40;
+const RADIAL_TRUTH_MAX_SVG_BYTES = 2 * 1024 * 1024;
+
+function applySvgRadialTruth(
+    jsonPaints: any[],
+    rawPaints: readonly any[],
+    gradients: SvgRadialGradient[],
+    width: number,
+    height: number
+): void {
+    if (!Array.isArray(jsonPaints)) return;
+    for (const paint of jsonPaints) {
+        if (!paint || paint.type !== "GRADIENT_RADIAL" || !Array.isArray(paint.gradientStops)) continue;
+        const gradient = gradients.find(candidate => !candidate.used && svgStopsMatchPaintStops(candidate.stops, paint.gradientStops));
+        if (!gradient) continue;
+        gradient.used = true;
+        const raw = Array.isArray(rawPaints)
+            ? rawPaints.find(candidate => candidate && candidate.type === "GRADIENT_RADIAL" &&
+                Array.isArray(candidate.gradientHandlePositions) &&
+                svgStopsMatchPaintStops(gradient.stops, candidate.gradientStops))
+            : null;
+        const handles = (raw && raw.gradientHandlePositions) || [];
+        if (!handles[0] || !handles[1]) continue;
+        const p0 = { x: Number(handles[0].x), y: Number(handles[0].y) };
+        const p1 = { x: Number(handles[1].x), y: Number(handles[1].y) };
+        const u = { x: p1.x - p0.x, y: p1.y - p0.y };
+        const ratio = svgRadialAxisRatio(gradient, width, height, u);
+        if (ratio === null) continue;
+        const minorEnd = { x: p0.x - u.y * ratio, y: p0.y + u.x * ratio };
+        const transform = getResultArrayByThreePoints([p0, p1, minorEnd]);
+        if (isFiniteTransform(transform)) paint.gradientTransform = transform;
+    }
+}
+
+export async function enrichRadialGradientTruth(node: SceneNode, nodeJson: any): Promise<void> {
+    const geometry = nodeJson && nodeJson.geometry;
+    if (!geometry) return;
+    const hasRadial = (list: any) => Array.isArray(list) && list.some((paint: any) => paint && paint.type === "GRADIENT_RADIAL");
+    if (!hasRadial(geometry.fills) && !hasRadial(geometry.strokes)) return;
+    if (countExportableSubtreeNodes(node) > RADIAL_TRUTH_MAX_SUBTREE_NODES) return;
+
+    let svg = "";
+    try {
+        const exported = await (node as any).exportAsync({ format: "SVG" });
+        if (typeof exported === "string") {
+            svg = exported;
+        } else if (exported && typeof exported.length === "number" && exported.length <= RADIAL_TRUTH_MAX_SVG_BYTES) {
+            // Byte output: a lossy charCode decode is fine — every attribute the
+            // parser reads is ASCII; only text content could be multi-byte.
+            let text = "";
+            for (let i = 0; i < exported.length; i++) text += String.fromCharCode(exported[i]);
+            svg = text;
+        }
+    } catch (error) {
+        state.logDiagnostic("warn", "[MasterGo2Figma] Radial gradient SVG probe failed", {
+            node: getNodeProbe(node),
+            error: describeError(error)
+        });
+        return;
+    }
+    if (!svg || svg.length > RADIAL_TRUTH_MAX_SVG_BYTES) return;
+
+    const gradients = parseSvgRadialGradients(svg);
+    if (!gradients.length) return;
+    const width = Number(safeRead(() => node.width, 0)) || 0;
+    const height = Number(safeRead(() => node.height, 0)) || 0;
+    if (!(width > 0) || !(height > 0)) return;
+
+    applySvgRadialTruth(geometry.fills, readNodeProperty<any[]>(node, "fills", []), gradients, width, height);
+    applySvgRadialTruth(geometry.strokes, readNodeProperty<any[]>(node, "strokes", []), gradients, width, height);
+}
+
 export function getRawChildCount(node: any): number | undefined {
     return safeRead(() => {
         const children = node && node.children;
@@ -441,6 +526,9 @@ export async function collectSingleNodeExport(
 
         setNodeDebug("enrich-vector");
         await enrichFilledVectorExport(node, nodeJson);
+
+        setNodeDebug("enrich-radial-gradient");
+        await enrichRadialGradientTruth(node, nodeJson);
 
         setNodeDebug("override-layout");
         overrideExportLayoutFromSourceNode(nodeJson, node);

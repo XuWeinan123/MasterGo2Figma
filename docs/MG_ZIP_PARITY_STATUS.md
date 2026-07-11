@@ -35,6 +35,13 @@ removed 必须全部属于本轮目标字段。
      导出存相反分支：0710-2 存 0.4117 除法得真值、0711-1 直存 3.5696）。
    - 比较器新增 `foldGradientTransform` 归一化：已知导出端折叠不再误报 decoder 回归。
    - SendToFigma：优先信运行时可能提供的真实第 3 个 handle（typings 只声明 2 个）。
+   - **zip 侧径向渐变已修（当日晚，SVG 自证）**：导出端对含径向渐变的节点做
+     `exportAsync(SVG)`，从渲染器输出的 `<radialGradient gradientTransform>` 反推真
+     ratio（`enrichRadialGradientTruth` + `serializers/svgGradientTruth.ts`），绕开 API
+     折叠；**需重新导出 zip 生效**。ratio 对 viewBox 平移/统一缩放不变；按 stops 匹配
+     paint；门槛子树 ≤40 节点、SVG ≤2MB，失败静默回退。角向/菱形无 SVG 等价物，
+     仍为折叠近似。测试 `svgGradientTruth.test.js` 4 项（合成 Tesla 用例 + 跨插件
+     transform 一致性断言）。
 3. **SECTION 恒 FIXED/FIXED**（trailer 21/22 对 SECTION 无意义）。
 
 ## 剩余项（有意不修，运行时派生族）
