@@ -427,3 +427,31 @@ viewport）则返回 null 回退折叠值。不硬编码 swap，MasterGo 未来�
 
 教训：**渲染器的导出物也不等于渲染真值**——MasterGo 的 fold 混乱延伸到了它的
 SVG 导出器；任何"真值通道"都要先用已知答案标定再信。
+
+## 2026-07-11 — 大文件导入计数崩溃（特斯拉 Model 3 车载系统，5779/5643）
+
+真实项目文件（29.7MB，5779+1388 记录）导入报"页面还原数量不一致
+expected=5779, actual=5643"。定位方法论：
+
+1. **可达性审计**（转换端）：convertMgPackageToV2Entries 输出 → 从 rootNodeIds
+   沿 childIds 走图 → 5779 全可达、0 孤儿 → 包结构自洽，问题在还原语义。
+2. **还原计数模拟**（插件端语义离线复刻）：BOOLEAN/GROUP 走 shell 递归，其余
+   类型仅当 Figma 节点可挂子（canContainRestoredChildren）才递归 → 模拟结果
+   **5643，与报错分毫不差**；差值全部来自 61 个带 2 子的 `VECTOR/PEN "Subtract"`
+   记录（136 个后代被静默跳过）。
+3. 根因：**无斜杠 id 的顶层 raw VECTOR 覆盖 Boolean 槽位** ——
+   `mgIsInstanceBooleanLeafCandidate` 只认 `id 含 "/"` 的浅层实例记录，这批
+   漏过剪枝，模板操作数克隆挂到了它们名下；且这批自身 vn/fills 全空（几何在
+   操作数里），剪枝会变透明图标，不能照搬旧规则。
+4. 修复：发射循环终局检查——`type === "VECTOR" 且仍带子` → 改判
+   BOOLEAN_OPERATION（booleanOperation 按名字 Subtract/交集/排除 → 对应枚举，
+   缺省 UNION），删除空 vn/constraints，走插件布尔树真实合成。计数一致 + 图标
+   真实还原。四个回归集 vector-with-children 均为 0 → 改动零触发、比较器全数
+   持平（0 全零 / 45·32·157 / 7·9 / Subtract 族）。
+5. 顺手修掉转换端二次方热点：`mgFindTemplateRoot` 此前对**每个无子节点**先建
+   全节点数组再做名字判断，5.8k 记录文件 Node 端 10 分钟未出；名字门槛前置后
+   全流程秒级（浏览器端同样受益）。
+
+遗留观察：这 61 个方向图标（0.25 描边 ROUND）的 fills/strokes 为空，疑走
+trailer `0x23` 样式库引用（未利用字段）——视觉核验若发现无描边，下一轮以此
+为切入点。

@@ -46,6 +46,12 @@ removed 必须全部属于本轮目标字段。
      「沿轴半径==|p1−p0|」不变量仲裁（两节点实测命中真值），需**再次重导出** zip。
 3. **SECTION 恒 FIXED/FIXED**（trailer 21/22 对 SECTION 无意义）。
 
+## 2026-07-11 大文件修复（特斯拉 Model 3 车载系统）
+
+- 无斜杠 Boolean 槽位覆盖记录（VECTOR 仍带子）改判 BOOLEAN_OPERATION 走布尔树，
+  修复 5779/5643 还原计数崩溃；四回归集零触发。
+- `mgFindTemplateRoot` 名字门槛前置，转换从二次方降为线性（大文件分钟级→秒级）。
+
 ## 剩余项（有意不修，运行时派生族）
 
 - 测试集/2 的 9 deep + 7 geometry 与 0711-1 的 Subtract 宽高同族：2 Group / 2 Subtract

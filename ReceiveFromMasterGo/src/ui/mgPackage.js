@@ -2249,6 +2249,14 @@
 
     function mgFindTemplateRoot(instance, nodes, childIds) {
       const name = instance && instance.name ? instance.name : "";
+      // Name gate first: this legacy fallback only serves the old fixtures'
+      // Button/Card rules, and it is called for EVERY childless node — building
+      // the all-nodes array unconditionally made conversion quadratic on large
+      // documents (minutes on a 5.8k-record file).
+      const isButtonLike = name.indexOf("Button_Primary_Instance") >= 0 || name.indexOf("主按钮实例") >= 0 ||
+        name.indexOf("Button_Secondary_Instance") >= 0 || name.indexOf("次按钮实例") >= 0;
+      const isCardLike = name.indexOf("Card_Instance") >= 0 || name.indexOf("卡片实例") >= 0;
+      if (!isButtonLike && !isCardLike) return null;
       const pagePrefix = instance && instance.id && instance.id.indexOf(":") >= 0 ? instance.id.split(":")[0] + ":" : "";
       let all = Object.keys(nodes).map(id => nodes[id]);
       if (pagePrefix) {
@@ -3215,6 +3223,27 @@
           }
         }
         if (props.sourceType === "INSTANCE") props.shellPlaceholder = true;
+        // A VECTOR that still carries children at emission time is a Boolean
+        // slot override whose operand subtree survived pruning (top-level raw
+        // records have slash-less ids, so mgIsInstanceBooleanLeafCandidate
+        // never saw them). Figma vectors cannot contain children — the import
+        // would silently drop the whole subtree and fail the page count
+        // check. These records carry no geometry or fills of their own (the
+        // operands do), so restore them as a real Boolean combine instead.
+        const emittedChildIds = (childIds[id] || []).filter(c => nodes[c] && nodes[c].type);
+        if (props.type === "VECTOR" && emittedChildIds.length > 0) {
+          props.type = "BOOLEAN_OPERATION";
+          props.sourceType = "BOOLEAN_OPERATION";
+          props.restoreType = "BOOLEAN_OPERATION";
+          if (!props.booleanOperation) {
+            props.booleanOperation =
+              (props.name.indexOf("Subtract") >= 0 || props.name.indexOf("减去") >= 0) ? "SUBTRACT" :
+              (props.name.indexOf("Intersect") >= 0 || props.name.indexOf("交集") >= 0) ? "INTERSECT" :
+              (props.name.indexOf("Exclude") >= 0 || props.name.indexOf("排除") >= 0) ? "EXCLUDE" : "UNION";
+          }
+          delete props.vectorNetwork;
+          delete props.constraints;
+        }
         delete props.__nativeContainerLayout;
         records.push({
           version: 2,
