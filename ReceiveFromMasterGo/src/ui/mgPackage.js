@@ -435,7 +435,7 @@
       function zfloat() { const r = mgReadZFloatAt(bytes, p); p = r.next; return r.value; }
 
       function parseGradientObject() {
-        const g = { kind: 0, p0: null, p1: null, stops: null, ratio: 0 };
+        const g = { kind: 0, p0: null, p1: null, stops: null, ratio: 0, majorLen2: 0 };
         for (;;) {
           if (p >= end) return null;
           const t = bytes[p++];
@@ -469,6 +469,12 @@
               const st = bytes[p++];
               if (st === 0x00) break;
               if (st === 0x03) { g.ratio = zfloat(); continue; }
+              // Extended form (测试集 0710-2 radials): the 06 sub-object also
+              // carries floats 01/02/04/05 (ellipse-frame values we don't
+              // need) and 06 = 2 × |p1 − p0|. Its presence marks the encoding
+              // where the 03 scalar is a pure divisor: ratio = field06 / 03.
+              if (st === 0x01 || st === 0x02 || st === 0x04 || st === 0x05) { zfloat(); continue; }
+              if (st === 0x06) { g.majorLen2 = zfloat(); continue; }
               return null;
             }
             continue;
@@ -533,9 +539,16 @@
         // top-to-bottom orientation.
         const p0 = gradient.p0 || { x: 0.5, y: 0 };
         const p1 = gradient.p1 || { x: 0.5, y: 1 };
+        // Extended 06 sub-object (majorLen2 present): the 03 scalar is a pure
+        // divisor, ratio = majorLen2 / scalar exactly (known-answer verified
+        // against the 测试集 0710-2 baseline transforms). Single-03 records
+        // keep the min() disambiguation heuristic.
+        const axisRatio = (gradient.majorLen2 > 0 && gradient.ratio > 0)
+          ? gradient.majorLen2 / gradient.ratio
+          : mgRadialAxisRatio(p0, p1, gradient.ratio);
         const transform = kind === 1
           ? mgLinearGradientTransform(p0, p1)
-          : mgRadialGradientTransform(p0, p1, mgRadialAxisRatio(p0, p1, gradient.ratio));
+          : mgRadialGradientTransform(p0, p1, axisRatio);
         const paint = {
           type: MG_GRADIENT_TYPE[kind],
           visible: visible,
@@ -1057,6 +1070,14 @@
         // editor exports, "all 0" in share exports.
         if (padCount === 0) meta.paddingsMissing = true;
         else meta.paddings = { top: pads[1] || 0, right: pads[2] || 0, bottom: pads[3] || 0, left: pads[4] || 0 };
+      } else {
+        // A wholly absent 0a object follows the same omitted-field default as
+        // the empty one (mirror of the 09/itemSpacing rule above). Verified on
+        // both spellings: 测试集 0710-2 (full export, absent 0a on plain
+        // GROUP/BOOLEAN records) restores the editor default 10; 0710-1's
+        // absent-0a nodes are all template/instance children whose share-mode
+        // missingDefault stays 0.
+        meta.paddingsMissing = true;
       }
       if (bytes[p] === 0x0d) { meta.primaryAlign = MG_ALIGN_ITEMS[bytes[p + 1]] || "MIN"; p += 2; }
       if (bytes[p] === 0x0e) { meta.counterAlign = MG_ALIGN_ITEMS[bytes[p + 1]] || "MIN"; p += 2; }
@@ -1093,15 +1114,22 @@
     //   02 <n>  segment records:  01 <count=4:[start,c1,c2,end]> 02 <index> 00
     //           c1/c2 index the control-point table; -1 = straight (no tangent)
     //   03 <n>  region records:   01 <len:[segment indices]>… 02 <index> [03 <winding: 1=EVENODD>] 00
-    //   04 <n>  control points:   01 <x float4> 02 <y float4> 03 <index> 00   (0 fields omitted)
+    //   04 <n>  control points:   01 <x float> 02 <y float> 03 <index> 00
     //   05 <n>  vertex records:   01 <x> 02 <y> 03 <flag> [04 <cornerRadius>] 05 <index> [07 <strokeCap: 1=ROUND>] 00
     //   06 …    trailer
+    // Point floats are ZERO-COMPRESSED like every other .mg float: a leading
+    // 00 byte means 0.0 and occupies one byte, otherwise 4 twisted-float
+    // bytes follow (see mgReadZeroFloat). Some exporters omit zero fields
+    // entirely instead; both spellings decode identically here. Reading a
+    // fixed 4 bytes used to swallow the 3 bytes after a compressed zero and
+    // derail every later record in the blob (测试集 0710-2: 126/133 blobs
+    // failed, all 431 VECTORs lost or corrupted their vectorNetwork).
     // tangentStart = cp[c1] - vertex[start]; tangentEnd = cp[c2] - vertex[end].
     function mgDecodeGeometryBlob(bytes, pos) {
       const segments = [], regions = [], controls = [], vertices = [];
       let p = pos;
       function varint() { const r = mgReadVarint(bytes, p); p = r.next; return r.value; }
-      function float4() { const v = mgDecFloat(bytes, p); p += 4; return v; }
+      function zeroFloat() { const r = mgReadZeroFloat(bytes, p); p = r.next; return r.value; }
       function intArray() {
         const n = varint();
         if (!(n >= 0) || n > 100000) return null;
@@ -1150,19 +1178,21 @@
           if (p >= bytes.length) return null;
           const t = bytes[p++];
           if (t === 0x00) return rec;
-          if (t === 0x01) { rec.x = float4(); continue; }
-          if (t === 0x02) { rec.y = float4(); continue; }
+          if (t === 0x01) { rec.x = zeroFloat(); continue; }
+          if (t === 0x02) { rec.y = zeroFloat(); continue; }
           if (t === 0x03) { if (isVertex) rec.flag = varint(); else rec.index = varint(); continue; }
-          if (t === 0x04) { rec.cornerRadius = float4(); continue; }
+          if (t === 0x04) { rec.cornerRadius = zeroFloat(); continue; }
           if (t === 0x05) { rec.index = varint(); continue; }
           if (t === 0x07) { rec.cap = varint(); continue; }
           return null;
         }
       }
+      let sections = 0;
       while (p < bytes.length) {
         const tag = bytes[p];
         if (tag !== 0x02 && tag !== 0x03 && tag !== 0x04 && tag !== 0x05) break;
         p++;
+        sections++;
         const n = varint();
         if (!(n >= 0) || n > 100000) return null;
         for (let i = 0; i < n; i++) {
@@ -1173,7 +1203,16 @@
           if (!rec) return null;
         }
       }
-      if (!vertices.length || !segments.length) return null;
+      // Share exports store one canonical empty blob (its hash is MD5 of "")
+      // for flattened Boolean-result leaves: all four sections present with
+      // zero records, ending cleanly at the 06 trailer. That is a real EMPTY
+      // vector network (the ZIP baseline carries {[],[],[]} for those nodes),
+      // not a decode failure — only a derailed parse returns null.
+      if (!vertices.length || !segments.length) {
+        const cleanEmpty = sections === 4 && !vertices.length && !segments.length &&
+          !controls.length && !regions.length && bytes[p] === 0x06;
+        return cleanEmpty ? { segments: [], vertices: [], regions: [] } : null;
+      }
 
       const vmap = [], cmap = [], smap = [];
       vertices.forEach(v => { vmap[v.index >= 0 ? v.index : vmap.length] = v; });
@@ -3327,6 +3366,8 @@
       resolveInstanceVisibility: mgResolveInstanceVisibility,
       shouldInheritStroke: mgShouldInheritStroke,
       decodeNativeNodes: mgDecodeNativeNodes,
+      decodeGeometryBlob: mgDecodeGeometryBlob,
+      parseContainerMeta: mgParseContainerMeta,
       walkScalarFields: mgWalkScalarFields,
       normalizeRotation: mgNormalizeRotation,
       parseTextRuns: mgParseTextRuns,

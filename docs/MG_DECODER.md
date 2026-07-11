@@ -153,9 +153,15 @@ Sub-field stream after `1c 07` (ascending ids):
     instance-override hacks, not done yet);
   - **`08 <b>` = layoutMode** (1=HORIZONTAL 2=VERTICAL; omitted=NONE);
   - **`09 <f>` = itemSpacing**, **`0a <obj>` = paddings** (sub-fields `01`=top `02`=right
-    `03`=bottom `04`=left, zero-compressed). **Default-10 rule**: a missing `09` field or an
-    EMPTY `0a` object means the MasterGo runtime default **10**; explicit zeros are written as
+    `03`=bottom `04`=left, zero-compressed). **Default-10 rule**: a missing `09` field, an
+    EMPTY `0a` object, or a **wholly absent `0a` object** all mean the omitted-field default —
+    MasterGo runtime default **10** in full editor exports, **0** on share-export
+    template/instance nodes (`missingDefault` in `mgNativeProps`). Explicit zeros are written as
     `09 00` / four zero sub-fields. (This is why groups/booleans export padding 10.)
+    Cross-set evidence for the absent-`0a` spelling: 0710-2 (full export) plain GROUP/BOOLEAN
+    records omit `0a` and the baseline says 10 (269 nodes); 0710-1's absent-`0a` nodes are all
+    template/instance children and the baseline says 0 — both fall out of the same
+    `paddingsMissing` funnel. Before 2026-07-10 the absent case wrote nothing (restored as 0).
   - **`0d <b>` / `0e <b>` = primary/counterAxisAlignItems** (2=CENTER; omitted=MIN);
   - `14 …` component property / override definition table (not walked);
   - `17 <b>` container kind enum near the end: `01` observed only on SECTION.
@@ -193,6 +199,22 @@ blob table (`mgScanGeometryBlobs`, 318 blobs in the fixture). Blob grammar
 against all 24 baseline vectorNetworks. Native VN always wins over embedded-JSON VN (embedded
 copies lack fill regions).
 
+**Point floats are zero-compressed — the code must NOT read fixed 4 bytes.** The grammar note
+above always said so, but `mgDecodeGeometryBlob` read `float4()` until 2026-07-10: any vertex or
+control point with x/y/cornerRadius = 0 (`00`, one byte) made the reader swallow the next 3 bytes
+and derail the rest of the blob. 测试集 0710-2 decoded only 7/133 blobs that way — all 431
+VECTORs lost (420) or corrupted (11, garbage tangents) their vectorNetwork; with zero-compressed
+reads all 133 decode. The two sets that "worked" (插件测试/0710-1: 468+94 blobs) never hit the
+bug because their exporter omits zero-valued point fields entirely instead of writing `00`;
+both spellings decode identically under the zero-compressed reader (A/B verified byte-for-byte).
+
+**The canonical empty blob is a real value, not a failure.** Full exports store one blob whose
+hash is `D41D8CD98F00B204E9800998ECF8427E` (MD5 of "") with all four sections present and empty
+(`02 00 03 00 04 00 05 00 06 01 00`). Flattened Boolean-result leaves (Union/Subtract/Intersect
+names, 0.0049×0.0049 size) reference it, and the ZIP baseline carries an empty
+`{segments:[],vertices:[],regions:[]}` for them — `mgDecodeGeometryBlob` returns that empty VN
+for a clean four-section-zero parse ending at the `06` trailer. Only a derailed parse is null.
+
 ## Paints — CRACKED ✓ (paint table, refs via node tags 15/16)
 Paint child record body (after `01 <id> 00 02 <ref> 00 03 <sort> 00`), see `mgParsePaintRecord`:
 - `05 <kind>` 1=LINEAR 2=RADIAL 3=ANGULAR 4=DIAMOND 5=IMAGE (absent = SOLID).
@@ -200,16 +222,25 @@ Paint child record body (after `01 <id> 00 02 <ref> 00 03 <sort> 00`), see `mgPa
   SOLID #979797 0.592 with this flag).
 - `07 <b>` unknown flag. `08 <a><r><g><b>` solid / gradient-fallback color (zero-compressed).
   `09 <float>` unknown.
-- `0a { 01 <kind> 03 <p0.x p0.y> 04 <p1.x p1.y> 05 <n stops> 06 { 03 <ratio> } } 00` —
+- `0a { 01 <kind> 03 <p0.x p0.y> 04 <p1.x p1.y> 05 <n stops> 06 { … } } 00` —
   gradient geometry. Stop record: `[01 <position>] 02 <argb> 00`. p0/p1 are the gradient handles
-  in node-normalized space. **`06/03` encodes the Figma minor/major handle ratio in one of two
-  observed forms**: stored directly (2026-07-10 `插件测试.mg`: handles (0.5,0.5)→(1,0.5),
-  scalar < 1, needed ratio == scalar exactly — cross-tabled by inverting the baseline-zip
-  `gradientTransform` per sample) or as `2 × |p1 − p0| / ratio` (the older non-square samples
-  frozen in `tools/tests/mgPackage.test.js`: |p1−p0| ≠ 0.5, scalar > 1). `mgRadialAxisRatio`
-  takes `min(scalar, 2 × |p1 − p0| / scalar)`, which reproduces all seven known answers; both
-  forms agree on the circular scalar=1 case. Absent/0 = circular. A future sample with a true
-  ratio > 1 would be ambiguous under this rule — re-cross-table if one appears.
+  in node-normalized space. The `06` sub-object has **two spellings**:
+  - **Bare `06 { 03 <scalar> }`** (share exports): the scalar encodes the Figma minor/major
+    handle ratio in one of two observed forms — stored directly (2026-07-10 `插件测试.mg`:
+    handles (0.5,0.5)→(1,0.5), scalar < 1, needed ratio == scalar exactly — cross-tabled by
+    inverting the baseline-zip `gradientTransform` per sample) or as `2 × |p1 − p0| / ratio`
+    (the older non-square samples frozen in `tools/tests/mgPackage.test.js`: |p1−p0| ≠ 0.5,
+    scalar > 1). `mgRadialAxisRatio` takes `min(scalar, 2 × |p1 − p0| / scalar)`, which
+    reproduces all seven known answers; both forms agree on the circular scalar=1 case.
+    Absent/0 = circular. A future bare-03 sample with a true ratio > 1 would be ambiguous —
+    re-cross-table if one appears.
+  - **Extended `06 { 01 <f> 02 <f> 03 <scalar> 04 <f> 05 <f> 06 <f> }`** (测试集 0710-2 full
+    export): fields 01/02/04/05 are ellipse-frame floats (unused), field `06` numerically equals
+    `2 × |p1 − p0|`, and the ratio is the pure division **`field06 / field03`** — no min()
+    disambiguation (known-answer verified against all 16 baseline radial transforms; the min()
+    would have picked the wrong branch for every one, e.g. needed 3.5696 vs scalar 0.4117).
+    Before 2026-07-10 the parser rejected the unknown 01 tag and **dropped the whole paint**,
+    which is why 0710-2 radial fills vanished while linear gradients survived.
   Figma `gradientTransform` is computed with the exact SendToFigma math
   (`mgLinearGradientTransform` / `mgRadialGradientTransform`, ports of
   `SendToFigma/src/serializers/universal.ts`), so native decode is bit-compatible with real
@@ -335,8 +366,16 @@ paint/effect/text/font/vector-network mismatches. The remaining comparator outpu
   exportSettings (absent from node records; embedded-JSON twin only).
 - Unknown fields: trailer `1e/25/27/2b/37`, paint fields `07/0c/0d`, vertex flag `03` values,
   `0d/0e` align values for MAX/SPACE_BETWEEN (guessed 3/4), scalar `19` flag-bit meanings,
-  text-style entry fields `06/0b/13` (letterSpacing value likely in `0e`, -1 = default on all
-  samples), TEXT-object leading `08 <b>`, run glyph tables' float semantics (skipped, not used).
+  text-style entry fields `06/0b/13` (`13` observed as a `{02 <varint> 06 <varint>}` sub-object
+  with identical timestamp-like values across files — metadata, not style), TEXT-object leading
+  `08 <b>`, run glyph tables' float semantics (skipped, not used).
+- **`0e` is NOT letterSpacing — hypothesis disproven 2026-07-10.** 插件测试.mg carries `0e`
+  values 10–134 on full font entries while its baseline letterSpacing is `{0, PERCENT}` on every
+  text; 0710-2 carries `0e = -1` everywhere while its baseline is `{0, PIXELS}`. The
+  letterSpacing *unit* has no per-entry or per-node discriminator in any known sample (style
+  entries byte-identical across the two expectations); the residual 142 unit-only diffs on
+  0710-2 are visually nil (0% ≡ 0px) and are left unfixed rather than keyed on a file-level
+  version guess.
 
 ### 2026-07-10 — text/gradient parity pass (插件测试.mg fixture)
 `插件测试.mg` vs `mastergo2figma-partial-pages-2026-07-10T10-06-04-636Z.zip`: **all comparator
@@ -346,6 +385,22 @@ grammar (sortId/text/styleRef/fontString per run); generic styledTextSegments fr
 color-run boundary union (fixture fallback deleted); gradient `06/03` ratio unified as
 `min(scalar, 2×|p1−p0|/scalar)` across both observed encodings; explicit-zero hairline width;
 template-x-gated button centering shift.
+
+### 2026-07-10 — full-export vector/gradient/padding pass (测试集 0/1/2 harness)
+Three-set regression harness (`测试集/{0,1,2}` mg+zip pairs). Cracked this pass, all verified
+byte-identical on sets 0/1 before landing:
+- geometry-blob point floats are zero-compressed (fix: 7/133 → 132/133 blobs on 0710-2; sets
+  0/1 A/B-identical because their exporter omits zero fields instead);
+- canonical MD5-of-"" empty blob decodes to an empty vectorNetwork (the 43 flattened
+  Boolean-result leaves) — 0710-2 vectorNetwork mismatches 431 → 0;
+- radial-gradient extended `06` sub-object (fields 01–06, ratio = `06/03` exact) — paint
+  mismatches 16 → 0, radial fills no longer dropped;
+- wholly absent `0a` padding object funnels into the same `paddingsMissing` default rule —
+  1076 padding diffs → 0.
+Result: set 0 all-zero (unchanged), set 1 unchanged (45/32/299 pre-existing geometry/transform
+family), set 2 deep-prop 3572 → 151. The 151: 142 letterSpacing.unit (visually nil, see above)
++ 9 sub-pixel Group/Subtract/waypoint sizes from the documented live-font/Boolean runtime
+derivation family.
 
 ## Mirror
 Mirrors auto-memory `mg-binary-format.md`. Keep both updated as decoding progresses.

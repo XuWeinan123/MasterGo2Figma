@@ -2,3 +2,4 @@ mastergo2figma-relay-output/
 SendToFigma/.DS_Store
 .DS_Store
 mastergo2figma-*.zip
+!测试集/**/*.zip

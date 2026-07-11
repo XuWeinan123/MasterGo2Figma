@@ -1,81 +1,60 @@
 # MG / ZIP 导入一致性状态
 
-最后更新：2026-07-10（文本/渐变全对齐 pass）
+最后更新：2026-07-10（测试集 0/1/2 三集回归 harness + 全量导出矢量/渐变/padding pass）
 
-## 当前基准
+## 当前基准（三个测试集）
 
-- MG 文件：`插件测试.mg`（share/局部导出，191 条记录）
-- ZIP 基准：`mastergo2figma-partial-pages-2026-07-10T10-06-04-636Z.zip`
-- MG / ZIP 记录数：`191 / 191`
-- **所有比较类别全部为 0**：Missing、Extra、Type、Parent、Index、Child Order、
-  Geometry、Transform、Effect、Text、Font、Paint、Vector Network、Deep Property。
-- comparator 退出码 0；`ReceiveFromMasterGo` `npm run build` 通过。
+| 集 | MG 文件 | 记录数 | 导出形态 | 状态 |
+|---|---|---|---|---|
+| `测试集/0` | `插件测试.mg` | 191/191 | share（194 component-root 标记） | **全类别 0** |
+| `测试集/1` | `测试集 0710-1.mg` | —/— | share（62 标记） | 45 geometry / 32 transform / 299 deep（既有运行时派生族，本轮未变） |
+| `测试集/2` | `测试集 0710-2.mg` | 1357/1357 | **完整导出**（0 标记，无 share 模式） | deep 3572 → **151**，其余类别 0 |
 
-MG 解码 canonical digest：`fnv1a32:a7bb1237`（ZIP 基准 `fnv1a32:a66b7422`；
-digest 含页名 `_mg` 后缀等预期差异，不要求相等）。
-
-## 本轮（2026-07-10 文本/渐变 pass）修复
-
-- 样式表条目 `0c`/`12`（psName/styleName）与 decoration 字节：Bold/SemiBold
-  不再退化为 Regular；下划线条目不再被 scanner 正则漏掉。
-- `lineHeight -1` = AUTO 哨兵；letterSpacing 单位改为 `{0, PERCENT}`。
-- font-run 列表破解：characters 按 sortId 拼接；styledTextSegments 由
-  font-run × color-run 边界并集生成，`mgFidelityStyledTextSegments`
-  名字硬编码删除。
-- 渐变 `06/03` ratio 统一为 `min(scalar, 2×|p1−p0|/scalar)`，覆盖直存与倒数两种编码。
-- 显式零宽细线不再被 vn-bounds 推导抬成 1（`hasExplicitW/H` 门）。
-- 按钮实例居中平移只作用于仍在模板 x 的子节点，浅记录坐标不再双重平移。
-
-## 历史（1388 记录旧 fixture，文件已删，仅存档）
-
-## 已完成的修复
-
-- 顺序解析标量 `0x05..0x1b`，保留字段存在性、LEB128 override mask 和 transform 子字段。
-- MG 页面统一添加一个 `_mg` 后缀，普通 ZIP 页面名称不变。
-- 精确识别 43 个 childless Boolean VECTOR 叶并删除 94 个 operand 后代。
-- 修复实例可见性、浅层 transform/matrix 继承和 `+180 → -180` 规范化。
-- 修复径向渐变 `06/03` axis-scale 转换、paint replace/clear/merge、effect、arc、text case 和 styled runs。
-- 按可见子节点、mask 和已验证约束重算合成 GROUP；隐藏子节点同步反向平移。
-- 修复 quarter-stroke Boolean、`UNION(EXCLUDE, VECTOR)` 和双 EXCLUDE 等结构族的原点与尺寸。
-- 为 v2 包增加共享校验和 canonical digest；无效包在创建页面前终止，关键还原失败触发回滚。
-- 文本核心属性与可选格式分离，单个不支持的格式不再删除整个文本节点。
-
-## 剩余差异分类
-
-- 23 个 TEXT：`WIDTH_AND_HEIGHT` Montserrat 的实时字体度量与 Node 侧模板缩放盒不同。
-- 9 个 GROUP/FRAME：位置或 bounds 由上述实时文本尺寸派生。
-- 1 个 GROUP：小幅文本派生尺寸差异。
-- 7 个 BOOLEAN_OPERATION：同一个空 vector / 1×1 Boolean fallback 原点族。
-
-这些残差没有使用图层名或节点 ID 硬编码。下一轮以 Figma 手动导入后的运行时页面为准，因为 Figma 会重新计算原生文本和 Boolean 容器，包级 layout 差异不一定会成为最终视觉差异。
-
-## 历史审计结论
-
-修复前的 Figma ZIP/MG 扫描曾识别以下问题族：
-
-- 几何与局部 transform；
-- 13 个 instance visibility override；
-- paint precedence 与 gradient transform；
-- blur/shadow effect 参数；
-- text case、rich text runs 与 Montserrat 字体；
-- arc sweep；
-- runtime vector 表示差异；
-- GROUP/Boolean 派生 bounds。
-
-旧的逐层 Markdown/JSON 明细对应已删除的 Figma 页面和修复前代码，已不再作为当前测试依据。当前权威机器结果来自：
+比较命令（每集）：
 
 ```bash
-node tools/compare_mg_import.js \
-  新文件.mg \
-  mastergo2figma-partial-pages-2026-07-10T02-21-12-362Z.zip \
-  --json
+node tools/compare_mg_import.js 测试集/<i>/<file>.mg 测试集/<i>/<baseline>.zip --json
 ```
+
+任何解码改动必须三集全跑：目标集改善、另两集 diff **逐条 byte-identical**（不只是计数相同）。
+
+## 本轮（2026-07-10 测试集 2 全量导出 pass）修复
+
+1. **几何 blob 点记录零压缩浮点**（`mgDecodeGeometryBlob`）：`float4()` 定长读法在
+   x/y/cornerRadius 为 0（单字节 `00`）时多吞 3 字节导致整个 blob 崩溃。修复后 0710-2 的
+   blob 解码 7/133 → 132/133，vectorNetwork 缺失 420 → 0、错值 11 → 0。集 0/1 的导出器
+   对零值走"省略字段"路线，两种读法逐字节等价（A/B 实证 468+94 个 blob 全一致）。
+2. **MD5("") 空 blob = 空 vectorNetwork**：`D41D8CD9…` 四区段全空、止于 `06` trailer,
+   是 43 个拍平布尔叶的真实几何（基准即空 VN），不再判为解码失败。
+3. **径向渐变扩展 `06` 子对象**（字段 01–06）：ratio = `field06 / field03` 精确除法
+   （16 个已知答案全中，min() 启发式只用于裸 `03` 旧形式）。此前解析器遇到未知字段 01
+   直接丢掉整条 paint——0710-2 的径向渐变填充全部消失而线性渐变幸存的根因。
+4. **完全缺失的 `0a` padding 对象**并入 `paddingsMissing` 缺省规则（完整导出=10、
+   share 模板节点=0）：1076 项 padding diff → 0，集 1 的 194 个 absent-`0a` 模板子节点
+   走 md=0 分支不受影响。
+
+新增回归测试 4 个（`tools/tests/mgPackage.test.js`，共 18 个全过）：零压缩点浮点、
+空 blob、扩展渐变 `06`、padding 三种拼写。
+
+## 测试集 2 剩余 151 项（有意不修）
+
+- **142 × letterSpacing.unit**（`{0,PERCENT}` vs `{0,PIXELS}`）：视觉完全等价。
+  样式条目字节级无区分位（0e 假说已证伪，见 `MG_DECODER.md`），仅剩文件级版本猜测,
+  不值得引入脆弱启发式。
+- **9 × 亚像素宽高**（2 Group、2 Subtract、3 connector waypoints ±1px、文本派生）：
+  文档已记录的 live-font / Boolean 运行时派生族,Figma 导入时自行重算。
+
+## 历史
+
+- 2026-07-10 文本/渐变 pass（插件测试.mg 全类别归零）：样式表 `0c/12`、decoration、
+  lineHeight `-1=AUTO`、font-run 列表、渐变裸 `03` ratio `min()` 规则、零宽细线、
+  按钮实例居中平移。
+- 更早（1388 记录旧 fixture,文件已删）：顺序标量解析、`_mg` 页名后缀、Boolean 叶裁剪、
+  实例可见性/浅 transform、radial axis-scale、GROUP 重算、quarter-stroke Boolean、
+  v2 包校验和回滚。
 
 ## 验证
 
-- `node --test tools/tests/*.test.js`：14 项通过。
-- `ReceiveFromMasterGo npm run build`：通过，`ui.html` 由构建脚本生成。
-- `SendToFigma npm run build`：通过。
-- Python CLI v2 包校验与 canonical digest：通过。
-- 文档中提到的旧版 MG/ZIP 回归对当前不在工作区，未执行该组回归。
-
+- `node --test tools/tests/*.test.js`：18 项通过。
+- `ReceiveFromMasterGo` / `SendToFigma` `npm run build`：均通过（`ui.html` 由构建生成）。
+- 三集 comparator：集 0 全零、集 1 diff 逐条与修前 byte-identical、集 2 如上。
