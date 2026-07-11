@@ -78,20 +78,26 @@ test("only an exact full-bleed GROUP inherits the resized parent box", () => {
   }, parent), false);
 });
 
-test("radial-gradient axis scalar resolves the Figma minor-axis ratio", () => {
+test("radial-gradient axis scalar IS the Figma minor-axis ratio", () => {
+  // The scalar is the render-truth ratio, stored directly. Baseline ZIPs carry
+  // min(scalar, 2|major|/scalar) instead — MasterGo's plugin API folds the
+  // ratio when building the gradient transform SendToFigma reads (settled
+  // 2026-07-11 against the Tesla vignette screenshots: scalar 3.5696 renders
+  // as the wide flat ellipse, not the folded 0.4117). Do NOT re-fit these
+  // expectations to a ZIP baseline.
   const cases = [
-    // 2 × |p1 − p0| / scalar form (old non-square fixture, scalar > 1)
-    [{ x: 0.49358985, y: 0.43939397 }, { x: 0.49358985, y: 1.1742425 }, 3.5695839, 0.4117249],
-    [{ x: 0.49425292, y: 0.30769229 }, { x: 0.49425292, y: 0.76923078 }, 1.6498741, 0.559487],
-    [{ x: 0.50000006, y: 0.54166669 }, { x: 0.5, y: 1 }, 1.19762015, 0.765407],
-    // direct-ratio form (2026-07-10 插件测试.mg, |p1 − p0| = 0.5, scalar < 1)
-    [{ x: 0.5, y: 0.5 }, { x: 1, y: 0.5 }, 0.3265306055545807, 0.3265306055545807],
-    [{ x: 0.5, y: 0.5 }, { x: 1, y: 0.5 }, 0.5714285969734192, 0.5714285969734192]
+    // scalar > fold bound: ZIPs fold these to 0.4117249 / 0.559487 / 0.765407
+    [{ x: 0.49358985, y: 0.43939397 }, { x: 0.49358985, y: 1.1742425 }, 3.5695839],
+    [{ x: 0.49425292, y: 0.30769229 }, { x: 0.49425292, y: 0.76923078 }, 1.6498741],
+    [{ x: 0.50000006, y: 0.54166669 }, { x: 0.5, y: 1 }, 1.19762015],
+    // scalar below the fold bound: ZIP and render truth agree
+    [{ x: 0.5, y: 0.5 }, { x: 1, y: 0.5 }, 0.3265306055545807],
+    [{ x: 0.5, y: 0.5 }, { x: 1, y: 0.5 }, 0.5714285969734192]
   ];
-  for (const [p0, p1, scalar, expected] of cases) {
-    assert.ok(Math.abs(__test.radialAxisRatio(p0, p1, scalar) - expected) < 0.00002);
+  for (const [p0, p1, scalar] of cases) {
+    assert.ok(Math.abs(__test.radialAxisRatio(p0, p1, scalar) - scalar) < 0.00002);
   }
-  assert.equal(__test.radialAxisRatio({ x: 0, y: 0 }, { x: 0, y: 0 }, 3), 1);
+  assert.equal(__test.radialAxisRatio({ x: 0, y: 0 }, { x: 0, y: 0 }, 0), 1);
 });
 
 test("Boolean anchor rebasing preserves absolute child positions", () => {
@@ -167,8 +173,10 @@ test("clean four-section empty geometry blob is an empty vector network", () => 
 });
 
 test("radial gradient extended 06 sub-object encodes the exact axis ratio", () => {
-  // 测试集 0710-2 form: 06 carries floats 01/02/04/05 plus 06 = 2×|p1−p0|;
-  // ratio = field06 / field03 (min() disambiguation is only for bare-03 records).
+  // Extended form: 06 carries floats 01/02/04/05 plus 06 = 2×|p1−p0|. The 03
+  // scalar and field06 form the ratio branch pair {scalar, field06/scalar};
+  // render truth is the LARGER branch (same-design fixtures store opposite
+  // branches: 0710-2 scalar 0.4117 ÷→ 3.5696, 0711-1 scalar 3.5696 direct).
   const record = Uint8Array.from([
     0x05, 0x02, // kind RADIAL
     0x0a,
@@ -191,7 +199,7 @@ test("radial gradient extended 06 sub-object encodes the exact axis ratio", () =
   const paints = __test.scanPaints(doc, new TextDecoder("latin1").decode(doc));
   const paint = paints["2:8"] && paints["2:8"][0];
   assert.ok(paint && paint.type === "GRADIENT_RADIAL", "extended 06 record must still decode");
-  // ratio = 1.0 / 0.4 = 2.5; u = (0, 0.5) → a10 = -1/(2·|u|·ratio) = -0.4
+  // ratio = max(0.4, 1.0/0.4) = 2.5; u = (0, 0.5) → a10 = -1/(2·|u|·ratio) = -0.4
   assert.ok(Math.abs(paint.gradientTransform[1][0] - (-0.4)) < 1e-6);
   assert.ok(Math.abs(paint.gradientTransform[0][1] - 1) < 1e-6);
 });

@@ -169,6 +169,44 @@ function normalizeComparableEffects(effects) {
   });
 }
 
+// MasterGo's plugin API folds the radial/angular/diamond minor-axis ratio to
+// min(ratio, 2·|major|/ratio) when it builds the transform SendToFigma reads,
+// so ZIP baselines carry the folded ratio while the native .mg decoder emits
+// the render-truth value. Canonicalize both sides to the folded form so the
+// known exporter-side information loss doesn't read as a decoder regression.
+function foldGradientTransform(transform) {
+  if (!Array.isArray(transform) || !transform[0] || !transform[1]) return transform;
+  const a00 = transform[0][0], a01 = transform[0][1], t0 = transform[0][2];
+  const a10 = transform[1][0], a11 = transform[1][1], t1 = transform[1][2];
+  const det = a00 * a11 - a01 * a10;
+  if (!isFinite(det) || Math.abs(det) < 1e-12) return transform;
+  // Node-space ellipse axes: A⁻¹·(0.5,0) = major radius, A⁻¹·(0,0.5) = minor.
+  const majX = (a11 * 0.5) / det, majY = (-a10 * 0.5) / det;
+  const minX = (-a01 * 0.5) / det, minY = (a00 * 0.5) / det;
+  const major = Math.hypot(majX, majY);
+  const minor = Math.hypot(minX, minY);
+  if (!(major > 0) || !(minor > 0)) return transform;
+  const ratio = minor / major;
+  const folded = Math.min(ratio, 2 * major / ratio);
+  if (Math.abs(folded - ratio) < 1e-6) return transform;
+  // Rebuild with the folded minor length; center = A⁻¹·((0.5,0.5) − t).
+  // majX/minX are already the RADIUS vectors (gradient-space offset 0.5).
+  const scale = folded / ratio;
+  const ux = majX, uy = majY;
+  const vx = minX * scale, vy = minY * scale;
+  const cgx = 0.5 - t0, cgy = 0.5 - t1;
+  const p0 = { x: (a11 * cgx - a01 * cgy) / det, y: (-a10 * cgx + a00 * cgy) / det };
+  const det2 = ux * vy - vx * uy;
+  if (!isFinite(det2) || Math.abs(det2) < 1e-12) return transform;
+  const inv = 0.5 / det2;
+  const b00 = vy * inv, b01 = -vx * inv;
+  const b10 = -uy * inv, b11 = ux * inv;
+  return [
+    [b00, b01, 0.5 - (b00 * p0.x + b01 * p0.y)],
+    [b10, b11, 0.5 - (b10 * p0.x + b11 * p0.y)]
+  ];
+}
+
 function normalizeComparablePaints(paints, resolveImageRef) {
   if (!Array.isArray(paints)) return [];
   return paints.map(paint => {
@@ -176,6 +214,9 @@ function normalizeComparablePaints(paints, resolveImageRef) {
     const copy = JSON.parse(JSON.stringify(paint));
     if (copy.blendMode === "NORMAL") copy.blendMode = "PASS_THROUGH";
     if (copy.type === "IMAGE" && resolveImageRef) copy.imageRef = resolveImageRef(copy.imageRef);
+    if ((copy.type === "GRADIENT_RADIAL" || copy.type === "GRADIENT_ANGULAR" || copy.type === "GRADIENT_DIAMOND") && copy.gradientTransform) {
+      copy.gradientTransform = foldGradientTransform(copy.gradientTransform);
+    }
     normalizeTinyNumbers(copy);
     return copy;
   });
@@ -275,11 +316,28 @@ function compareRecords(actual, expected) {
   const paintMismatches = [];
   const deepPropMismatches = [];
 
+  // Apply the gradient-ratio fold to every paint list a record can carry so
+  // the strict deep-diff sees the same canonical form the paint check uses.
+  function cloneWithFoldedGradients(props) {
+    const copy = JSON.parse(JSON.stringify(props));
+    const foldList = paints => {
+      if (!Array.isArray(paints)) return;
+      for (const paint of paints) {
+        if (paint && (paint.type === "GRADIENT_RADIAL" || paint.type === "GRADIENT_ANGULAR" || paint.type === "GRADIENT_DIAMOND") && paint.gradientTransform) {
+          paint.gradientTransform = foldGradientTransform(paint.gradientTransform);
+        }
+      }
+    };
+    if (copy.geometry) { foldList(copy.geometry.fills); foldList(copy.geometry.strokes); }
+    if (Array.isArray(copy.styledTextSegments)) for (const segment of copy.styledTextSegments) foldList(segment.fills);
+    return copy;
+  }
+
   for (const expectedRecord of expected.records) {
     const actualRecord = actualById.get(expectedRecord.id);
     if (!actualRecord) continue;
-    const expectedProps = expectedRecord.props || {};
-    const actualProps = actualRecord.props || {};
+    const expectedProps = cloneWithFoldedGradients(expectedRecord.props || {});
+    const actualProps = cloneWithFoldedGradients(actualRecord.props || {});
     deepDiffProps("", actualProps, expectedProps, deepPropMismatches, expectedRecord.id, expectedRecord.name);
     if (actualProps.type !== expectedProps.type) {
       typeMismatches.push([expectedRecord.id, actualProps.type, expectedProps.type, expectedRecord.name]);

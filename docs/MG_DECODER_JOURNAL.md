@@ -355,3 +355,44 @@ transform 1、text 1。终点：**全部 0**（含递归 deep-diff），`npm run
 - 文档里的「Verified ✓」不等于判别性验证：本轮新 fixture 里旧公式的“通过样本”
   全是两种假设同值的退化圆形；而旧公式真正的判别样本冻结在测试里，差点被当作
   “已删 fixture 的过拟合”推翻。交叉表必须新旧判别样本同桌，测试是最好的存档。
+
+## 2026-07-11 — letterSpacing 破解 + 渐变 ratio 的"视觉真值"翻案（测试集 0711-1）
+
+基准对：`测试集/0711-1/测试集 0711-1.mg` × 同目录 zip（23/23）。用户报告两问题：
+部分文本 4px 字距导入后变 0%；Tesla 车身 Vector 3 径向渐变 zip/mg 双双还原过暗。
+
+### letterSpacing（快速收口）
+
+样式条目 flag 直方图交叉表（新旧两个 fixture 全量条目）拆出三个字段：
+`08 <f>` = 字距值（twisted float，负值=压缩字距）、`0b 01` = 字距单位 PIXELS
+（缺省=PERCENT）、`06 01` = 行高单位 PIXELS（缺省+正值待定、-1=AUTO）。
+`{0,PIXELS}` 与 `{4,PIXELS}` 条目都带 `0b`，全 PERCENT 的旧 fixture 条目都不带 —
+06/0b 的归属由 tag 邻接 + 直方图里的单独出现行（f06 无 f0b / f0b 无 f06）判定。
+
+### 渐变 ratio：zip 基准本身是错的
+
+视觉截图（MasterGo 宽扁光晕 vs Figma 两侧全黑）证明车身真 ratio = 3.5696 =
+.mg 里的 scalar 直存值；而本轮 zip 携带 0.4117 = `min(ratio, 2|major|/ratio)`。
+结论链：
+
+1. MasterGo 插件 API 只暴露两个 handle + 一个 transform（typings 实锤），该
+   transform 用**折叠后**的 ratio 构建 — API 与自家渲染器在 `ratio² > 2|major|`
+   时不一致，且折叠不可逆 → SendToFigma 从 API 无法恢复真值。
+2. 昨天的 min() 规则、前天的倒数规则、扩展形式的 field06/field03 除法 —
+   全部是"对着折叠 zip 验证"的产物。**已知答案交叉表的已知答案本身可以是错的**：
+   zip 只有在其生成链无损时才是 ground truth，渲染类字段要用截图/肉眼终审。
+3. 扩展 06 子对象的两个数构成分支对 `{scalar, field06/scalar}`，真值取较大者：
+   同一设计两次导出存了相反分支（0710-2 存 0.4117 除法得 3.5696；0711-1 直存
+   3.5696），max() 同时满足两个文件全部样本；全部已见扩展样本 ratio>1。
+4. 比较器新增 fold 归一化（`foldGradientTransform`）：mg 携带渲染真值、zip 携带
+   API 折叠值属已知导出端缺陷，归一化后不再误报 decoder 回归。
+5. SendToFigma 端：改为优先信运行时可能提供的真实第 3 个 handle（typings 声明
+   两个但保守），否则维持 transform 恢复 — 若用户重导出仍折叠，则 API 端确无
+   真值来源，zip 路径保持近似并以 .mg 路径为准。
+
+### 其余
+
+- SECTION 恒 FIXED/FIXED（trailer 21/22 对 SECTION 无意义）。
+- 0:50 Subtract 尺寸（67.25 vs 65.57）：.mg 存 MasterGo 自身包围盒，zip 存 API
+  重算的布尔结果盒；无路径求值器无法在包级复现，导入端 figma.subtract 会重算，
+  记为已知残差（同"空布尔 1×1 fallback"家族）。

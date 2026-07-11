@@ -1,14 +1,15 @@
 # MG / ZIP 导入一致性状态
 
-最后更新：2026-07-10（测试集 0/1/2 三集回归 harness + 全量导出矢量/渐变/padding pass）
+最后更新：2026-07-11（letterSpacing 破解 + 渐变 ratio 视觉真值 pass）
 
-## 当前基准（三个测试集）
+## 当前基准（四个测试集）
 
 | 集 | MG 文件 | 记录数 | 导出形态 | 状态 |
 |---|---|---|---|---|
 | `测试集/0` | `插件测试.mg` | 191/191 | share（194 component-root 标记） | **全类别 0** |
-| `测试集/1` | `测试集 0710-1.mg` | —/— | share（62 标记） | 45 geometry / 32 transform / 299 deep（既有运行时派生族，本轮未变） |
-| `测试集/2` | `测试集 0710-2.mg` | 1357/1357 | **完整导出**（0 标记，无 share 模式） | deep 3572 → **151**，其余类别 0 |
+| `测试集/1` | `测试集 0710-1.mg` | —/— | share（62 标记） | 45 geometry / 32 transform / 157 deep（既有运行时派生族） |
+| `测试集/2` | `测试集 0710-2.mg` | 1357/1357 | **完整导出**（0 标记，无 share 模式） | 7 geometry / **9 deep**（同一运行时派生族，见下） |
+| `测试集/0711-1` | `测试集 0711-1.mg` | 23/23 | share | 除 `0:50 Subtract` 宽高（1 geometry / 2 deep，布尔结果盒族）外全 0 |
 
 比较命令（每集）：
 
@@ -16,39 +17,40 @@
 node tools/compare_mg_import.js 测试集/<i>/<file>.mg 测试集/<i>/<baseline>.zip --json
 ```
 
-任何解码改动必须三集全跑：目标集改善、另两集 diff **逐条 byte-identical**（不只是计数相同）。
+任何解码改动必须四集全跑：目标集改善、其余集 diff **逐条 byte-identical**（不只是计数相同）。
+本轮实测方法：worktree 取 HEAD 双跑 `--json`，按 JSON 行做集合差 —— added 必须为 0，
+removed 必须全部属于本轮目标字段。
 
-## 本轮（2026-07-10 测试集 2 全量导出 pass）修复
+## 本轮（2026-07-11 letterSpacing + 渐变视觉真值 pass）修复
 
-1. **几何 blob 点记录零压缩浮点**（`mgDecodeGeometryBlob`）：`float4()` 定长读法在
-   x/y/cornerRadius 为 0（单字节 `00`）时多吞 3 字节导致整个 blob 崩溃。修复后 0710-2 的
-   blob 解码 7/133 → 132/133，vectorNetwork 缺失 420 → 0、错值 11 → 0。集 0/1 的导出器
-   对零值走"省略字段"路线，两种读法逐字节等价（A/B 实证 468+94 个 blob 全一致）。
-2. **MD5("") 空 blob = 空 vectorNetwork**：`D41D8CD9…` 四区段全空、止于 `06` trailer,
-   是 43 个拍平布尔叶的真实几何（基准即空 VN），不再判为解码失败。
-3. **径向渐变扩展 `06` 子对象**（字段 01–06）：ratio = `field06 / field03` 精确除法
-   （16 个已知答案全中，min() 启发式只用于裸 `03` 旧形式）。此前解析器遇到未知字段 01
-   直接丢掉整条 paint——0710-2 的径向渐变填充全部消失而线性渐变幸存的根因。
-4. **完全缺失的 `0a` padding 对象**并入 `paddingsMissing` 缺省规则（完整导出=10、
-   share 模板节点=0）：1076 项 padding diff → 0，集 1 的 194 个 absent-`0a` 模板子节点
-   走 md=0 分支不受影响。
+1. **letterSpacing 破解**（样式条目 `08`/`0b`，另 `06` = 行高单位旗标）：
+   `08 <f>` = 字距值（负值=压缩字距）、`0b 01` = 单位 PIXELS（缺省=PERCENT）。
+   测试集/1 与 /2 各消掉 142 条 unit-only 残差（上一轮"字节级无区分位"的结论被
+   `0b` 推翻）；0711-1 的 4px 字距样本逐值命中。
+2. **渐变 ratio 视觉真值翻案**：ZIP 基准对该字段**不是 ground truth** ——
+   MasterGo 插件 API 的 transform 用折叠值 `min(r, 2|major|/r)` 构建，与自家渲染器在
+   `r² > 2|major|` 时不一致且不可逆（Tesla 车身截图实锤，见 `MG_DECODER.md`）。
+   - 裸 `03`：scalar 直存 ratio（不再 min()）。
+   - 扩展 `06` 子对象：`{scalar, field06/scalar}` 分支对取**较大者**（同一设计两次
+     导出存相反分支：0710-2 存 0.4117 除法得真值、0711-1 直存 3.5696）。
+   - 比较器新增 `foldGradientTransform` 归一化：已知导出端折叠不再误报 decoder 回归。
+   - SendToFigma：优先信运行时可能提供的真实第 3 个 handle（typings 只声明 2 个）。
+3. **SECTION 恒 FIXED/FIXED**（trailer 21/22 对 SECTION 无意义）。
 
-新增回归测试 4 个（`tools/tests/mgPackage.test.js`，共 18 个全过）：零压缩点浮点、
-空 blob、扩展渐变 `06`、padding 三种拼写。
+## 剩余项（有意不修，运行时派生族）
 
-## 测试集 2 剩余 151 项（有意不修）
-
-- **142 × letterSpacing.unit**（`{0,PERCENT}` vs `{0,PIXELS}`）：视觉完全等价。
-  样式条目字节级无区分位（0e 假说已证伪，见 `MG_DECODER.md`），仅剩文件级版本猜测,
-  不值得引入脆弱启发式。
-- **9 × 亚像素宽高**（2 Group、2 Subtract、3 connector waypoints ±1px、文本派生）：
-  文档已记录的 live-font / Boolean 运行时派生族,Figma 导入时自行重算。
+- 测试集/2 的 9 deep + 7 geometry 与 0711-1 的 Subtract 宽高同族：2 Group / 2 Subtract
+  （布尔结果盒需路径求值，.mg 存 MasterGo 自身包围盒）、3 connector waypoints ±1px、
+  文本派生尺寸。Figma 导入时 figma.subtract / 实时字体会自行重算。
+- 测试集/1 的 45/32/157：文档已记录的 live-font / Boolean 运行时派生族。
 
 ## 历史
 
+- 2026-07-10 测试集 2 全量导出 pass：几何 blob 零压缩浮点、MD5("") 空 blob、
+  扩展渐变 `06` 解析（除法规则本轮已被 max() 取代）、absent-`0a` padding 缺省。
 - 2026-07-10 文本/渐变 pass（插件测试.mg 全类别归零）：样式表 `0c/12`、decoration、
-  lineHeight `-1=AUTO`、font-run 列表、渐变裸 `03` ratio `min()` 规则、零宽细线、
-  按钮实例居中平移。
+  lineHeight `-1=AUTO`、font-run 列表、渐变裸 `03` ratio min() 规则（本轮已改直存）、
+  零宽细线、按钮实例居中平移。
 - 更早（1388 记录旧 fixture,文件已删）：顺序标量解析、`_mg` 页名后缀、Boolean 叶裁剪、
   实例可见性/浅 transform、radial axis-scale、GROUP 重算、quarter-stroke Boolean、
   v2 包校验和回滚。
@@ -57,4 +59,5 @@ node tools/compare_mg_import.js 测试集/<i>/<file>.mg 测试集/<i>/<baseline>
 
 - `node --test tools/tests/*.test.js`：18 项通过。
 - `ReceiveFromMasterGo` / `SendToFigma` `npm run build`：均通过（`ui.html` 由构建生成）。
-- 三集 comparator：集 0 全零、集 1 diff 逐条与修前 byte-identical、集 2 如上。
+- 四集 comparator：集 0 全零；集 1/2 严格差集 added=0、removed 全为 letterSpacing；
+  0711-1 仅剩 Subtract 族。

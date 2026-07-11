@@ -710,6 +710,9 @@
     if (paint && paint.type === "GRADIENT_LINEAR") {
       return getResultArrayByTwoPoint(points);
     }
+    if (points.length >= 3) {
+      return getResultArrayByThreePoints(points);
+    }
     if (points.length >= 2 && isFiniteTransform(paint && paint.transform)) {
       const p0 = cloneVector2(points[0]);
       const p1 = cloneVector2(points[1]);

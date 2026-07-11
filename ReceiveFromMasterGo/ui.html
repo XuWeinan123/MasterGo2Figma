@@ -2149,19 +2149,17 @@
       return [[nz(a00), nz(a01), nz(t0)], [nz(a10), nz(a11), nz(t1)]];
     }
 
-    // The gradient sub-object's tag 03 encodes the Figma minor/major handle
-    // ratio in one of two observed forms: stored directly (2026-07-10
-    // 插件测试.mg: |p1−p0| = 0.5, scalar < 1, needed ratio == scalar exactly)
-    // or as `2 × |p1 − p0| / ratio` (the older non-square samples frozen in
-    // tools/tests/mgPackage.test.js: |p1−p0| ≠ 0.5, scalar > 1). Taking the
-    // smaller of the two interpretations reproduces all seven known answers;
-    // both agree on the circular scalar=1 case. Absent/0 = circular.
+    // The gradient sub-object's tag 03 IS the Figma minor/major handle ratio,
+    // stored directly (absent/0 = circular). Settled 2026-07-11 against visual
+    // truth: the Tesla vignette (scalar 3.5696) renders in MasterGo as a wide
+    // flat ellipse — the direct reading — while the baseline ZIPs carry
+    // `min(scalar, 2|major|/scalar)` because MasterGo's plugin API exposes a
+    // gradient transform built from that FOLDED ratio (API disagrees with the
+    // renderer whenever scalar² > 2|major|; the fold is not invertible, so
+    // SendToFigma exports cannot recover the true value). The 2026-07-10
+    // min() rule reproduced the fold, i.e. the exporter bug, not the render.
     function mgRadialAxisRatio(p0, p1, axisScale) {
-      if (!isFinite(axisScale) || axisScale <= 0) return 1;
-      const dx = p1.x - p0.x, dy = p1.y - p0.y;
-      const majorLength = Math.sqrt(dx * dx + dy * dy);
-      if (!isFinite(majorLength) || majorLength <= 0) return 1;
-      return Math.min(axisScale, 2 * majorLength / axisScale);
+      return (isFinite(axisScale) && axisScale > 0) ? axisScale : 1;
     }
 
     function mgBasename(path) {
@@ -2575,12 +2573,18 @@
         // top-to-bottom orientation.
         const p0 = gradient.p0 || { x: 0.5, y: 0 };
         const p1 = gradient.p1 || { x: 0.5, y: 1 };
-        // Extended 06 sub-object (majorLen2 present): the 03 scalar is a pure
-        // divisor, ratio = majorLen2 / scalar exactly (known-answer verified
-        // against the 测试集 0710-2 baseline transforms). Single-03 records
-        // keep the min() disambiguation heuristic.
+        // Extended 06 sub-object: the 03 scalar and majorLen2 (= 2·|p1−p0|)
+        // give the ratio BRANCH PAIR {scalar, majorLen2/scalar}; the render
+        // truth is the LARGER branch. Two same-design fixtures store opposite
+        // branches for the identical Tesla vignette — 测试集 0710-2 stored
+        // scalar 0.4117 (division 3.5696 correct), 测试集 0711-1 stores scalar
+        // 3.5696 (direct correct, screenshots 2026-07-11) — so neither "always
+        // divide" nor "always direct" survives both; max() does. All observed
+        // extended-form gradients are wide (ratio > 1); a genuinely narrow
+        // extended sample would need a new discriminator. Bare-03 records
+        // store the ratio directly (mgRadialAxisRatio).
         const axisRatio = (gradient.majorLen2 > 0 && gradient.ratio > 0)
-          ? gradient.majorLen2 / gradient.ratio
+          ? Math.max(gradient.ratio, gradient.majorLen2 / gradient.ratio)
           : mgRadialAxisRatio(p0, p1, gradient.ratio);
         const transform = kind === 1
           ? mgLinearGradientTransform(p0, p1)
@@ -3320,7 +3324,8 @@
         let p = m.index + m[0].length;
         const entry = {
           psName: null, family: null, styleName: null, decoration: null,
-          fontSize: null, lineHeight: null, textCase: null
+          fontSize: null, lineHeight: null, textCase: null,
+          lineHeightPx: false, letterSpacing: 0, letterSpacingPx: false
         };
         if (bytes[p] === 0x01) {
           entry.decoration = bytes[p + 1] === 2 ? "STRIKETHROUGH" : "UNDERLINE";
@@ -3338,12 +3343,18 @@
         if (bytes[p] === 0x05) { const r = mgReadZeroFloat(bytes, p + 1); entry.lineHeight = r.value; p = r.next; }
         // Remaining fields: one-byte enums/flags plus the psName/styleName
         // strings. Tag 0a is textCase: 1=UPPER, 2=LOWER (omitted=ORIGINAL).
-        // Tags 06/0b are independent one-byte flags. 0e is a float (-1 =
-        // default; suspected letterSpacing). Unknown tags stop the walk —
-        // sequential consumption only, never tag-regex inside float payloads.
+        // `06 01` = lineHeight unit PIXELS, `0b 01` = letterSpacing unit
+        // PIXELS (omitted = PERCENT / AUTO), `08 <f>` = letterSpacing value —
+        // cross-tabled 2026-07-11: {0,PIXELS}/{4,PIXELS} entries carry 0b
+        // (and 08 for the 4px one); the all-PERCENT fixture's entries carry
+        // neither. 0e is a float (-1 = default; unknown). Unknown tags stop
+        // the walk — sequential consumption only, never tag-regex inside
+        // float payloads.
         while (p + 1 < bytes.length) {
           const tag = bytes[p];
-          if (tag === 0x06 || tag === 0x0b) { p += 2; continue; }
+          if (tag === 0x06) { entry.lineHeightPx = bytes[p + 1] === 1; p += 2; continue; }
+          if (tag === 0x0b) { entry.letterSpacingPx = bytes[p + 1] === 1; p += 2; continue; }
+          if (tag === 0x08) { const r = mgReadZeroFloat(bytes, p + 1); entry.letterSpacing = r.value; p = r.next; continue; }
           if (tag === 0x0a) {
             entry.textCase = bytes[p + 1] === 1 ? "UPPER" : (bytes[p + 1] === 2 ? "LOWER" : null);
             p += 2;
@@ -3363,6 +3374,16 @@
         if (styles[m[1]] === undefined) styles[m[1]] = entry;
       }
       return styles;
+    }
+
+    // letterSpacing from a style entry: `08` value + `0b` PIXELS flag
+    // (omitted = PERCENT). Pixel values scale with the instance like
+    // fontSize/lineHeight; percent values are relative and do not.
+    function mgLetterSpacingFromStyleEntry(entry, scale) {
+      if (!entry) return { value: 0, unit: "PERCENT" };
+      const value = entry.letterSpacing || 0;
+      if (entry.letterSpacingPx) return { value: value * (scale || 1), unit: "PIXELS" };
+      return { value: value, unit: "PERCENT" };
     }
 
     // Resolve a fontName from a style-table entry. Preference order: explicit
@@ -4091,12 +4112,10 @@
         props.textAlignHorizontal = MG_TEXT_ALIGN_H[n.textAlignH] || "LEFT";
         props.textAlignVertical = MG_TEXT_ALIGN_V[n.textAlignV] || "TOP";
         props.textAutoResize = n.textAutoResize || "NONE";
-        // letterSpacing: value not decoded from records yet (style-entry field
-        // 0e is -1 = default on every observed sample); the exporter emits
-        // { 0, PERCENT }, applied by mgApplyTextFallbacks.
-        // Font family/size/line-height come from the text style table (values
-        // are final — instance scale already applied); fall back to the
-        // box-height guess otherwise.
+        // Font family/size/line-height/letter-spacing come from the text style
+        // table (values are final — instance scale already applied); fall back
+        // to the box-height guess otherwise (letterSpacing default {0,PERCENT}
+        // via mgApplyTextFallbacks).
         const style = n.textStyleRef && fontStyles ? fontStyles[n.textStyleRef] : null;
         if (style) {
           // Own entries carry final values; entries inherited from the
@@ -4107,6 +4126,7 @@
             mgNormalizeFontName(mgFontNameFromPostScript(style.psName));
           props.textCase = style.textCase || "ORIGINAL";
           if (style.decoration) props.textDecoration = style.decoration;
+          props.letterSpacing = mgLetterSpacingFromStyleEntry(style, styleScale);
           // lineHeight -1 is MasterGo's AUTO sentinel, not a pixel value.
           props.lineHeight = (style.lineHeight !== null && style.lineHeight > 0)
             ? { value: style.lineHeight * styleScale, unit: "PIXELS" }
@@ -4179,7 +4199,12 @@
         if (meta.counterAlign) props.layout.counterAxisAlignItems = meta.counterAlign;
         // Sizing modes live in the record trailer: field 21/22 present = FIXED,
         // omitted = AUTO. Instances inherit their component's trailer.
-        if (types.sourceType === "INSTANCE") {
+        // SECTIONs have no auto-layout; the exporter always emits FIXED/FIXED
+        // for them regardless of trailer fields.
+        if (types.type === "SECTION") {
+          props.layout.primaryAxisSizingMode = "FIXED";
+          props.layout.counterAxisSizingMode = "FIXED";
+        } else if (types.sourceType === "INSTANCE") {
           if (n.inheritedTrailer) {
             props.layout.primaryAxisSizingMode = inheritedTrailer.has21 ? "FIXED" : "AUTO";
             props.layout.counterAxisSizingMode = inheritedTrailer.has22 ? "FIXED" : "AUTO";
@@ -4232,7 +4257,9 @@
               fontWeight: mgFontWeightFromStyle(segFont && segFont.style),
               textCase: entry && entry.textCase ? entry.textCase : "ORIGINAL",
               textDecoration: entry && entry.decoration ? entry.decoration : "NONE",
-              letterSpacing: { value: 0, unit: "PERCENT" },
+              letterSpacing: entry
+                ? mgLetterSpacingFromStyleEntry(entry, 1)
+                : mgCloneJsonValue(props.letterSpacing || { value: 0, unit: "PERCENT" }),
               lineHeight: entry
                 ? ((entry.lineHeight !== null && entry.lineHeight > 0)
                   ? { value: entry.lineHeight, unit: "PIXELS" }

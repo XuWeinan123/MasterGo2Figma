@@ -240,6 +240,16 @@ export function resolveGradientTransform(paint: any): number[][] {
     if (paint && paint.type === "GRADIENT_LINEAR") {
         return getResultArrayByTwoPoint(points);
     }
+    // A real third handle is authoritative: the typings declare only two, but
+    // if the runtime provides the minor-axis handle it carries the true ratio.
+    // paint.transform is built by MasterGo from a FOLDED ratio
+    // (min(ratio, 2·|major|/ratio)) that disagrees with the renderer whenever
+    // ratio² > 2·|major| — e.g. wide flat vignettes import too dark/narrow
+    // (Tesla Vector 3, 2026-07-11). The fold is not invertible, so the
+    // transform-recovery below cannot fix those; only real handle data can.
+    if (points.length >= 3) {
+        return getResultArrayByThreePoints(points);
+    }
     if (points.length >= 2 && isFiniteTransform(paint && paint.transform)) {
         const p0 = cloneVector2(points[0]);
         const p1 = cloneVector2(points[1]);

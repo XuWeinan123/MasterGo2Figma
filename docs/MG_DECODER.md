@@ -225,22 +225,29 @@ Paint child record body (after `01 <id> 00 02 <ref> 00 03 <sort> 00`), see `mgPa
 - `0a { 01 <kind> 03 <p0.x p0.y> 04 <p1.x p1.y> 05 <n stops> 06 { … } } 00` —
   gradient geometry. Stop record: `[01 <position>] 02 <argb> 00`. p0/p1 are the gradient handles
   in node-normalized space. The `06` sub-object has **two spellings**:
-  - **Bare `06 { 03 <scalar> }`** (share exports): the scalar encodes the Figma minor/major
-    handle ratio in one of two observed forms — stored directly (2026-07-10 `插件测试.mg`:
-    handles (0.5,0.5)→(1,0.5), scalar < 1, needed ratio == scalar exactly — cross-tabled by
-    inverting the baseline-zip `gradientTransform` per sample) or as `2 × |p1 − p0| / ratio`
-    (the older non-square samples frozen in `tools/tests/mgPackage.test.js`: |p1−p0| ≠ 0.5,
-    scalar > 1). `mgRadialAxisRatio` takes `min(scalar, 2 × |p1 − p0| / scalar)`, which
-    reproduces all seven known answers; both forms agree on the circular scalar=1 case.
-    Absent/0 = circular. A future bare-03 sample with a true ratio > 1 would be ambiguous —
-    re-cross-table if one appears.
-  - **Extended `06 { 01 <f> 02 <f> 03 <scalar> 04 <f> 05 <f> 06 <f> }`** (测试集 0710-2 full
-    export): fields 01/02/04/05 are ellipse-frame floats (unused), field `06` numerically equals
-    `2 × |p1 − p0|`, and the ratio is the pure division **`field06 / field03`** — no min()
-    disambiguation (known-answer verified against all 16 baseline radial transforms; the min()
-    would have picked the wrong branch for every one, e.g. needed 3.5696 vs scalar 0.4117).
-    Before 2026-07-10 the parser rejected the unknown 01 tag and **dropped the whole paint**,
-    which is why 0710-2 radial fills vanished while linear gradients survived.
+  - **Bare `06 { 03 <scalar> }`** (share exports): the scalar IS the Figma minor/major handle
+    ratio, stored directly (`mgRadialAxisRatio`; absent/0 = circular). All observed bare samples
+    are ≤ 1 (0.3265/0.5714/1). The 2026-07-10 `min(scalar, 2|p1−p0|/scalar)` rule was a fit to
+    FOLDED ZIP baselines (see below), not to the render.
+  - **Extended `06 { 01 <f> 02 <f> 03 <scalar> 04 <f> 05 <f> 06 <f> }`**: fields 01/02/04/05 are
+    ellipse-frame floats (unused), field `06` = `2 × |p1 − p0|`. Scalar and field06 form the
+    ratio **branch pair `{scalar, field06/scalar}`; the render truth is the LARGER branch**
+    (`max()` in `mgParsePaintRecord`). Two same-design fixtures store OPPOSITE branches for the
+    identical Tesla vignette: `测试集 0710-2` stored scalar 0.4117 (division → 3.5696 correct,
+    16/16 baseline radials), `测试集 0711-1` stores scalar 3.5696 (direct correct — settled
+    2026-07-11 against MasterGo screenshots). Neither "always divide" nor "always direct"
+    survives both files. All observed extended-form gradients are wide (ratio > 1); a genuinely
+    narrow extended sample would need a new discriminator. Before 2026-07-10 the parser rejected
+    the unknown 01 tag and **dropped the whole paint**, which is why 0710-2 radial fills
+    vanished while linear gradients survived.
+  - **ZIP baselines are NOT ground truth for this ratio.** The 2026-07-11 ZIP carries 0.4117 for
+    the Tesla vignette — MasterGo's plugin API exposes only two handles plus a transform built
+    from the folded `min(ratio, 2|p1−p0|/ratio)`, which disagrees with MasterGo's own renderer
+    whenever `ratio² > 2|p1−p0|`; the fold is not invertible, so SendToFigma cannot recover the
+    true value (it now prefers a real third handle if the runtime ever provides one, and
+    `tools/compare_mg_import.js` canonicalizes both sides to the folded form so the known
+    exporter-side loss doesn't read as a decoder regression). The 0710-2 ZIP carried the TRUE
+    3.5696, so the API transform's provenance varies per document — trust the .mg + screenshots.
   Figma `gradientTransform` is computed with the exact SendToFigma math
   (`mgLinearGradientTransform` / `mgRadialGradientTransform`, ports of
   `SendToFigma/src/serializers/universal.ts`), so native decode is bit-compatible with real
@@ -294,10 +301,18 @@ Entries (interleaved with compact non-font shells `05 <b> 00 00`):
 ```
 01 <id> 00 05 <kind=3> [01 <decoration: 1=UNDERLINE, 2=STRIKETHROUGH?>]
 03 <family> 00 [04 <fontSize>] [05 <lineHeight, -1 = AUTO>]
-[06 <b>] [0b <b>] [0a <textCase: 1=UPPER 2=LOWER>]
-[0c <PostScript name> 00] [0e <float, -1 = default; suspected letterSpacing>]
+[06 <lineHeight unit: 1=PIXELS>] [08 <letterSpacing value>]
+[0a <textCase: 1=UPPER 2=LOWER>] [0b <letterSpacing unit: 1=PIXELS>]
+[0c <PostScript name> 00] [0e <float, -1 = default; unknown>]
 [12 <style name "Bold"/"SemiBold"/…> 00] [13 …] 00
 ```
+- **letterSpacing = `{ 08-value (default 0), 0b present → PIXELS else PERCENT }`** —
+  cross-tabled 2026-07-11 (`测试集 0711-1`): the {0,PIXELS} and {4,PIXELS} entries carry `0b 01`
+  (and `08` twisted-float 4.0 for the latter); the all-PERCENT fixture's entries carry neither.
+  `06`/`0b` assignment (lineHeight vs letterSpacing unit) is by tag adjacency plus the
+  `f06=1,f0b=null` / `f06=null,f0b=1` split rows in the flag histogram; pixel values scale with
+  the instance like fontSize/lineHeight. Old fixture also shows negative `08` values
+  (-2.8/-1.52/-0.52 = tightened tracking) on non-baseline pages.
 - **`0c`/`12` carry the real font style** — the `03` family alone ("Inter") is what made every
   share-export Bold/SemiBold header import as Regular. Resolution order in `mgNativeProps`
   (`mgFontNameFromStyleEntry`): entry styleName (`12`) → dash-style psName (`0c`, or the legacy
@@ -366,16 +381,16 @@ paint/effect/text/font/vector-network mismatches. The remaining comparator outpu
   exportSettings (absent from node records; embedded-JSON twin only).
 - Unknown fields: trailer `1e/25/27/2b/37`, paint fields `07/0c/0d`, vertex flag `03` values,
   `0d/0e` align values for MAX/SPACE_BETWEEN (guessed 3/4), scalar `19` flag-bit meanings,
-  text-style entry fields `06/0b/13` (`13` observed as a `{02 <varint> 06 <varint>}` sub-object
-  with identical timestamp-like values across files — metadata, not style), TEXT-object leading
-  `08 <b>`, run glyph tables' float semantics (skipped, not used).
+  text-style entry field `13` (`{02 <varint> 06 <varint>}` sub-object with identical
+  timestamp-like values across files — metadata, not style), TEXT-object leading `08 <b>`,
+  run glyph tables' float semantics (skipped, not used).
 - **`0e` is NOT letterSpacing — hypothesis disproven 2026-07-10.** 插件测试.mg carries `0e`
   values 10–134 on full font entries while its baseline letterSpacing is `{0, PERCENT}` on every
-  text; 0710-2 carries `0e = -1` everywhere while its baseline is `{0, PIXELS}`. The
-  letterSpacing *unit* has no per-entry or per-node discriminator in any known sample (style
-  entries byte-identical across the two expectations); the residual 142 unit-only diffs on
-  0710-2 are visually nil (0% ≡ 0px) and are left unfixed rather than keyed on a file-level
-  version guess.
+  text; 0710-2 carries `0e = -1` everywhere. The real letterSpacing is `08` (value) + `0b`
+  (PIXELS-unit flag) with `06` as the lineHeight-unit flag — cracked 2026-07-11 via the flag
+  histogram (the 2026-07-10 "no per-entry unit discriminator" conclusion missed `06/0b` because
+  the then-scanner consumed them blindly; the 142 unit-only residuals on each of 0710-1/0710-2
+  are now fixed).
 
 ### 2026-07-10 — text/gradient parity pass (插件测试.mg fixture)
 `插件测试.mg` vs `mastergo2figma-partial-pages-2026-07-10T10-06-04-636Z.zip`: **all comparator
@@ -401,6 +416,20 @@ Result: set 0 all-zero (unchanged), set 1 unchanged (45/32/299 pre-existing geom
 family), set 2 deep-prop 3572 → 151. The 151: 142 letterSpacing.unit (visually nil, see above)
 + 9 sub-pixel Group/Subtract/waypoint sizes from the documented live-font/Boolean runtime
 derivation family.
+
+### 2026-07-11 — letterSpacing + gradient render-truth pass (测试集 0711-1)
+New fixture `测试集/0711-1` (23/23). Cracked: letterSpacing = style-entry `08` value + `0b`
+PIXELS-unit flag, `06` = lineHeight-unit flag (flag-histogram cross-table over both fixtures;
+kills the 142 unit-only residuals on EACH of 0710-1/0710-2 — strict set-diff vs HEAD: added 0,
+removed all-letterSpacing); SECTION always FIXED/FIXED. Gradient ratio OVERTURNED by visual
+truth: ZIP baselines carry MasterGo's API fold `min(r, 2|major|/r)` (irreversible, disagrees
+with MasterGo's own renderer — Tesla vignette screenshots), so the 07-10 `min()` rule and the
+extended-form `field06/field03` division were both fits to the exporter bug. Now: bare `03` =
+ratio direct; extended = larger branch of `{scalar, field06/scalar}` (two same-design exports
+stored opposite branches); comparator canonicalizes both sides via `foldGradientTransform`;
+SendToFigma prefers a real 3rd gradient handle when the runtime provides one. Remaining
+0711-1 residual: the Tesla `Subtract` w/h (boolean result bounds need path evaluation; the
+importer's `figma.subtract` recomputes them live).
 
 ## Mirror
 Mirrors auto-memory `mg-binary-format.md`. Keep both updated as decoding progresses.
