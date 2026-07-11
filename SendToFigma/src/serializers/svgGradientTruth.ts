@@ -179,36 +179,71 @@ export function svgStopsMatchPaintStops(
 
 // Minor/major ratio of the gradient ellipse relative to the handle axis, in
 // node-normalized space. `u` is the major-axis handle vector p1 − p0
-// (normalized coordinates). Returns null when the SVG matrix is singular.
+// (normalized coordinates). Returns null when the SVG matrix is singular or
+// the ellipse is inconsistent with the handles.
+//
+// MasterGo's SVG exporter writes the two ellipse radii into SWAPPED slots
+// (the along-handle radius lands on the perpendicular axis and vice versa) —
+// verified on the 0711-1 Tesla fixture where the as-written reading yields
+// 0.2006 while the swapped reading yields the render-true 3.5696 (and 1.1976
+// for Rectangle 5, matching the .mg scalar exactly). Rather than hard-coding
+// the swap, both readings are computed and arbitrated by the gradient-model
+// invariant "along-axis radius == |p1 − p0|": whichever reading satisfies it
+// wins, so a spec-conforming SVG (should MasterGo ever fix their exporter)
+// resolves identically. If neither reading is consistent (e.g. a scaled
+// viewport), return null and let the caller keep the folded API transform.
 export function svgRadialAxisRatio(
     gradient: SvgRadialGradient,
     nodeWidth: number,
     nodeHeight: number,
     u: { x: number; y: number }
 ): number | null {
-    const len = Math.sqrt(u.x * u.x + u.y * u.y);
-    if (!(len > 0) || !(nodeWidth > 0) || !(nodeHeight > 0)) return null;
+    const uLen = Math.sqrt(u.x * u.x + u.y * u.y);
+    if (!(uLen > 0) || !(nodeWidth > 0) || !(nodeHeight > 0)) return null;
     const g = gradient.matrix;
     const det = g[0][0] * g[1][1] - g[0][1] * g[1][0];
     if (!Number.isFinite(det) || Math.abs(det) < 1e-12) return null;
-    // inv(G_lin), then compose with norm→gradient-space mapping. userSpaceOnUse
-    // coordinates are node pixels, objectBoundingBox coordinates are already
-    // bbox fractions (== node-normalized for a leaf shape).
+    // A = inv(G_lin) maps gradient-viewport space → unit-circle space.
+    // userSpaceOnUse coordinates are node pixels, objectBoundingBox
+    // coordinates are already bbox fractions (== node-normalized for a leaf
+    // shape), so the viewport axis scales are (w,h) or (1,1) respectively.
     const ia = g[1][1] / det, ib = -g[0][1] / det;
     const ic = -g[1][0] / det, id = g[0][0] / det;
-    const sx = gradient.objectBoundingBox ? 1 : nodeWidth;
-    const sy = gradient.objectBoundingBox ? 1 : nodeHeight;
-    const b00 = ia * sx, b01 = ib * sy;
-    const b10 = ic * sx, b11 = id * sy;
-    const quad = (dx: number, dy: number) => {
-        const qx = b00 * dx + b01 * dy;
-        const qy = b10 * dx + b11 * dy;
-        return qx * qx + qy * qy;
+    const w = gradient.objectBoundingBox ? 1 : nodeWidth;
+    const h = gradient.objectBoundingBox ? 1 : nodeHeight;
+    // Handle direction in viewport space (handles are normalized coords).
+    let dx = u.x * w, dy = u.y * h;
+    const dLen = Math.sqrt(dx * dx + dy * dy);
+    if (!(dLen > 0)) return null;
+    dx /= dLen; dy /= dLen;
+    const px = -dy, py = dx; // perpendicular unit direction (viewport space)
+    // Ellipse radius along a viewport unit direction: 1 / |A·d̂|. This is the
+    // principal radius when d̂ is a principal axis — true for consistent
+    // emissions and for the swapped emission (the axes stay put, only the
+    // radii trade places).
+    const radiusAlong = (vx: number, vy: number) => {
+        const qx = ia * vx + ib * vy;
+        const qy = ic * vx + id * vy;
+        const q = Math.sqrt(qx * qx + qy * qy);
+        return q > 0 ? 1 / q : NaN;
     };
-    const ux = u.x / len, uy = u.y / len;
-    const along = quad(ux, uy);
-    const perpendicular = quad(-uy, ux);
-    if (!(along > 0) || !(perpendicular > 0)) return null;
-    const ratio = Math.sqrt(along / perpendicular);
-    return Number.isFinite(ratio) && ratio > 0 ? ratio : null;
+    // Normalized length of a viewport-space radius along direction (vx,vy).
+    const normalizedLength = (radius: number, vx: number, vy: number) => {
+        return radius * Math.sqrt((vx / w) * (vx / w) + (vy / h) * (vy / h));
+    };
+    const alongRadius = radiusAlong(dx, dy);
+    const perpRadius = radiusAlong(px, py);
+    if (!Number.isFinite(alongRadius) || !Number.isFinite(perpRadius)) return null;
+    const candidates = [
+        { along: normalizedLength(alongRadius, dx, dy), perp: normalizedLength(perpRadius, px, py) },
+        { along: normalizedLength(perpRadius, dx, dy), perp: normalizedLength(alongRadius, px, py) } // swapped slots
+    ];
+    for (const candidate of candidates) {
+        if (!(candidate.along > 0) || !Number.isFinite(candidate.perp)) continue;
+        if (Math.abs(candidate.along - uLen) <= 0.05 * uLen) {
+            const ratio = candidate.perp / candidate.along;
+            return Number.isFinite(ratio) && ratio > 0 ? ratio : null;
+        }
+    }
+    return null;
 }

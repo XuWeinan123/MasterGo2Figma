@@ -249,14 +249,22 @@ Paint child record body (after `01 <id> 00 02 <ref> 00 03 <sort> 00`), see `mgPa
     sides to the folded form so the known exporter-side loss doesn't read as a decoder
     regression.
   - **SendToFigma escape hatch (2026-07-11)**: for nodes carrying radial-gradient paints the
-    exporter now probes `node.exportAsync({format:"SVG"})` — the SVG comes from the renderer
-    and its `<radialGradient gradientTransform>` carries the true ellipse. The minor/major
-    ratio extracted from it is invariant to viewBox padding and uniform export scale (only the
-    matrix, unit mode, and node aspect matter); paints are matched by gradient stops, and the
-    rebuilt transform stays anchored to the API handles (`enrichRadialGradientTruth` in
-    `nodeSerializer.ts`, pure math in `serializers/svgGradientTruth.ts`). Angular/diamond
-    gradients have no SVG equivalent and still export the folded transform; a real third
-    gradient handle is preferred if the runtime ever provides one.
+    exporter now probes `node.exportAsync({format:"SVG"})` — the SVG carries the true ellipse
+    radii. Paints are matched by gradient stops and the rebuilt transform stays anchored to
+    the API handles (`enrichRadialGradientTruth` in `nodeSerializer.ts`, pure math in
+    `serializers/svgGradientTruth.ts`). Angular/diamond gradients have no SVG equivalent and
+    still export the folded transform; a real third gradient handle is preferred if the
+    runtime ever provides one.
+  - **MasterGo's SVG exporter swaps the radius slots** (found via the first re-export attempt,
+    which imported a THIRD wrong ratio 0.2006): the along-handle radius lands on the
+    perpendicular axis and vice versa, so the SVG read as written renders the ellipse rotated
+    90° from MasterGo's own canvas. Both true radii are still present — `svgRadialAxisRatio`
+    computes both the as-written and slot-swapped readings and arbitrates with the
+    gradient-model invariant *along-axis radius == |p1 − p0|* (5% tolerance): the consistent
+    reading wins, a spec-conforming emission resolves identically, and if neither reading is
+    consistent (scaled viewport, unexpected form) it returns null and the folded API transform
+    is kept. Verified on both fixture nodes: Tesla vignette 0.2006 → 3.5696, Rectangle 5
+    0.042 → 1.1976 (== the .mg scalar).
   Figma `gradientTransform` is computed with the exact SendToFigma math
   (`mgLinearGradientTransform` / `mgRadialGradientTransform`, ports of
   `SendToFigma/src/serializers/universal.ts`), so native decode is bit-compatible with real

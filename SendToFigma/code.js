@@ -1143,28 +1143,46 @@
     return true;
   }
   function svgRadialAxisRatio(gradient, nodeWidth, nodeHeight, u) {
-    const len = Math.sqrt(u.x * u.x + u.y * u.y);
-    if (!(len > 0) || !(nodeWidth > 0) || !(nodeHeight > 0)) return null;
+    const uLen = Math.sqrt(u.x * u.x + u.y * u.y);
+    if (!(uLen > 0) || !(nodeWidth > 0) || !(nodeHeight > 0)) return null;
     const g = gradient.matrix;
     const det = g[0][0] * g[1][1] - g[0][1] * g[1][0];
     if (!Number.isFinite(det) || Math.abs(det) < 1e-12) return null;
     const ia = g[1][1] / det, ib = -g[0][1] / det;
     const ic = -g[1][0] / det, id = g[0][0] / det;
-    const sx = gradient.objectBoundingBox ? 1 : nodeWidth;
-    const sy = gradient.objectBoundingBox ? 1 : nodeHeight;
-    const b00 = ia * sx, b01 = ib * sy;
-    const b10 = ic * sx, b11 = id * sy;
-    const quad = (dx, dy) => {
-      const qx = b00 * dx + b01 * dy;
-      const qy = b10 * dx + b11 * dy;
-      return qx * qx + qy * qy;
+    const w = gradient.objectBoundingBox ? 1 : nodeWidth;
+    const h = gradient.objectBoundingBox ? 1 : nodeHeight;
+    let dx = u.x * w, dy = u.y * h;
+    const dLen = Math.sqrt(dx * dx + dy * dy);
+    if (!(dLen > 0)) return null;
+    dx /= dLen;
+    dy /= dLen;
+    const px = -dy, py = dx;
+    const radiusAlong = (vx, vy) => {
+      const qx = ia * vx + ib * vy;
+      const qy = ic * vx + id * vy;
+      const q = Math.sqrt(qx * qx + qy * qy);
+      return q > 0 ? 1 / q : NaN;
     };
-    const ux = u.x / len, uy = u.y / len;
-    const along = quad(ux, uy);
-    const perpendicular = quad(-uy, ux);
-    if (!(along > 0) || !(perpendicular > 0)) return null;
-    const ratio = Math.sqrt(along / perpendicular);
-    return Number.isFinite(ratio) && ratio > 0 ? ratio : null;
+    const normalizedLength = (radius, vx, vy) => {
+      return radius * Math.sqrt(vx / w * (vx / w) + vy / h * (vy / h));
+    };
+    const alongRadius = radiusAlong(dx, dy);
+    const perpRadius = radiusAlong(px, py);
+    if (!Number.isFinite(alongRadius) || !Number.isFinite(perpRadius)) return null;
+    const candidates = [
+      { along: normalizedLength(alongRadius, dx, dy), perp: normalizedLength(perpRadius, px, py) },
+      { along: normalizedLength(perpRadius, dx, dy), perp: normalizedLength(alongRadius, px, py) }
+      // swapped slots
+    ];
+    for (const candidate of candidates) {
+      if (!(candidate.along > 0) || !Number.isFinite(candidate.perp)) continue;
+      if (Math.abs(candidate.along - uLen) <= 0.05 * uLen) {
+        const ratio = candidate.perp / candidate.along;
+        return Number.isFinite(ratio) && ratio > 0 ? ratio : null;
+      }
+    }
+    return null;
   }
 
   // ../shared/vectorUtils.ts

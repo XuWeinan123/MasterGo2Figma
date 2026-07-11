@@ -37,10 +37,9 @@ const STOPS = `
   <stop offset="1" stop-color="black"/>
 `;
 
-test("userSpaceOnUse radial SVG yields the render-truth ratio", () => {
-  // Ellipse axes in px: horizontal minor·|u|·W? No — axes given directly:
-  // vertical (major) radius = 0.7348·H = 40.77px, horizontal = 2.6231·W... in
-  // px the x-radius is ratio·|u| normalized units × W = 2.6231·65.5677 = 172.0.
+test("spec-conforming radial SVG yields the render-truth ratio", () => {
+  // Ellipse axes in px: vertical (along-handle) radius = 0.7348·H = 40.77px,
+  // horizontal = ratio·|u| normalized units × W = 2.6231·65.5677 = 172.0px.
   const rx = TRUE_RATIO * 0.7348485 * NODE_W;
   const ry = 0.7348485 * NODE_H;
   const svg = `<svg><defs>
@@ -53,6 +52,40 @@ test("userSpaceOnUse radial SVG yields the render-truth ratio", () => {
   assert.ok(Math.abs(ratio - TRUE_RATIO) < 1e-4, `ratio ${ratio} != ${TRUE_RATIO}`);
 });
 
+test("MasterGo swapped-slot emission still yields the render-truth ratio", () => {
+  // Observed real emission family (2026-07-11 re-export): the along-handle
+  // radius (40.77px) and perpendicular radius (172.0px) land in SWAPPED
+  // matrix slots — read as written the ellipse is rotated 90° from the
+  // renderer. rotate(90)·scale(a,b) == matrix(0 a -b 0 tx ty).
+  const along = 0.7348485 * NODE_H;           // 40.77
+  const perp = TRUE_RATIO * 0.7348485 * NODE_W; // 172.0
+  const svg = `<svg><defs>
+    <radialGradient id="g" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse"
+      gradientTransform="matrix(0 ${perp} -${along} 0 32.363 24.381)">${STOPS}</radialGradient>
+  </defs></svg>`;
+  const grads = svgTruth.parseSvgRadialGradients(svg);
+  assert.equal(grads.length, 1);
+  const ratio = svgTruth.svgRadialAxisRatio(grads[0], NODE_W, NODE_H, U);
+  assert.ok(ratio !== null && Math.abs(ratio - TRUE_RATIO) < 1e-4, `ratio ${ratio} != ${TRUE_RATIO}`);
+});
+
+test("Rectangle 5 swapped emission resolves to the .mg scalar", () => {
+  // Second real-world node from the same fixture: node 48.756×10.928,
+  // vertical handle |u| = 0.4583, true ratio 1.19762 (.mg scalar).
+  const w = 48.75624465942383, h = 10.928125381469727;
+  const u = { x: 0, y: 0.4583333 };
+  const trueRatio = 1.19762015;
+  const along = 0.4583333 * h;            // 5.008px
+  const perp = trueRatio * 0.4583333 * w; // 26.76px
+  const svg = `<svg>
+    <radialGradient id="g" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse"
+      gradientTransform="matrix(0 ${perp} -${along} 0 24 5.9)">${STOPS}</radialGradient>
+  </svg>`;
+  const grads = svgTruth.parseSvgRadialGradients(svg);
+  const ratio = svgTruth.svgRadialAxisRatio(grads[0], w, h, u);
+  assert.ok(ratio !== null && Math.abs(ratio - trueRatio) < 1e-4, `ratio ${ratio} != ${trueRatio}`);
+});
+
 test("objectBoundingBox radial SVG yields the same ratio", () => {
   const rx = TRUE_RATIO * 0.7348485;
   const ry = 0.7348485;
@@ -63,6 +96,18 @@ test("objectBoundingBox radial SVG yields the same ratio", () => {
   assert.equal(grads.length, 1);
   const ratio = svgTruth.svgRadialAxisRatio(grads[0], NODE_W, NODE_H, U);
   assert.ok(Math.abs(ratio - TRUE_RATIO) < 1e-4, `ratio ${ratio} != ${TRUE_RATIO}`);
+});
+
+test("inconsistent ellipse (scaled viewport) returns null → caller keeps fold", () => {
+  // Both radii doubled: neither reading matches |u| within 5% → bail out.
+  const rx = 2 * TRUE_RATIO * 0.7348485 * NODE_W;
+  const ry = 2 * 0.7348485 * NODE_H;
+  const svg = `<svg>
+    <radialGradient id="g" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse"
+      gradientTransform="matrix(${rx} 0 0 ${ry} 32.363 24.381)">${STOPS}</radialGradient>
+  </svg>`;
+  const grads = svgTruth.parseSvgRadialGradients(svg);
+  assert.equal(svgTruth.svgRadialAxisRatio(grads[0], NODE_W, NODE_H, U), null);
 });
 
 test("stop matching pairs SVG gradients with serialized paints", () => {

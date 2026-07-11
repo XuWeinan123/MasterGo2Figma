@@ -41,7 +41,9 @@ removed 必须全部属于本轮目标字段。
      折叠；**需重新导出 zip 生效**。ratio 对 viewBox 平移/统一缩放不变；按 stops 匹配
      paint；门槛子树 ≤40 节点、SVG ≤2MB，失败静默回退。角向/菱形无 SVG 等价物，
      仍为折叠近似。测试 `svgGradientTruth.test.js` 4 项（合成 Tesla 用例 + 跨插件
-     transform 一致性断言）。
+     transform 一致性断言）。**第一次重导出实测翻车**：MasterGo 的 SVG 导出器把
+     半径写反槽位（沿轴/垂直互换），产出第三个错误值 0.2006；已改为双候选读取 +
+     「沿轴半径==|p1−p0|」不变量仲裁（两节点实测命中真值），需**再次重导出** zip。
 3. **SECTION 恒 FIXED/FIXED**（trailer 21/22 对 SECTION 无意义）。
 
 ## 剩余项（有意不修，运行时派生族）
@@ -64,7 +66,7 @@ removed 必须全部属于本轮目标字段。
 
 ## 验证
 
-- `node --test tools/tests/*.test.js`：18 项通过。
+- `node --test tools/tests/*.test.js`：25 项通过。
 - `ReceiveFromMasterGo` / `SendToFigma` `npm run build`：均通过（`ui.html` 由构建生成）。
 - 四集 comparator：集 0 全零；集 1/2 严格差集 added=0、removed 全为 letterSpacing；
   0711-1 仅剩 Subtract 族。
