@@ -289,6 +289,14 @@ export type ImportLayerRecord = {
     // are geometry-locked to the component, so the importer replays this via
     // InstanceNode.rescale().
     instanceScale?: number;
+    // Library style references (native .mg imports only): prefixed .mg style
+    // record ids resolved against the styles.json payload. Values are always
+    // materialized inline too — bindings are additive, losing one only loses
+    // the style link, never the visual.
+    fillStyleRef?: string;
+    strokeStyleRef?: string;
+    effectStyleRef?: string;
+    textStyleRef?: string;
 };
 
 export type ImportManifestPage = {

@@ -1538,6 +1538,9 @@ ${style}`;
     if (paint.rotation !== void 0) result.rotation = paint.rotation;
     if (paint.imageTransform) result.imageTransform = paint.imageTransform;
     if (paint.scalingFactor !== void 0) result.scalingFactor = paint.scalingFactor;
+    else if (result.scaleMode === "TILE" && typeof paint.ratio === "number" && paint.ratio > 0) {
+      result.scalingFactor = paint.ratio;
+    }
     return normalizePaintForFigma(result);
   }
   function normalizeImageFills(fills, node, layout) {
@@ -1648,8 +1651,10 @@ ${style}`;
       if (copy.visible === void 0 && effect.isVisible !== void 0) copy.visible = effect.isVisible;
       if (copy.visible === void 0) copy.visible = true;
       if (copy.blendMode === "PASS_THROUGH") copy.blendMode = "NORMAL";
-      if (copy.type === "DROP_SHADOW" || copy.type === "INNER_SHADOW") {
+      if (copy.type === "DROP_SHADOW") {
         if (copy.showShadowBehindNode === void 0) copy.showShadowBehindNode = true;
+      } else if (copy.showShadowBehindNode !== void 0) {
+        delete copy.showShadowBehindNode;
       }
       return copy;
     });
@@ -1745,6 +1750,9 @@ ${style}`;
     }
     if (copy.type === "IMAGE") {
       if (!copy.imageHash) return null;
+      if (copy.scaleMode === "TILE" && copy.scalingFactor === void 0 && typeof copy.ratio === "number" && copy.ratio > 0) {
+        copy.scalingFactor = copy.ratio;
+      }
       return pickDefined(copy, ["type", "visible", "opacity", "blendMode", "scaleMode", "imageHash", "imageTransform", "scalingFactor", "rotation", "filters", "gifRef", "boundVariables"]);
     }
     if (copy.type === "VIDEO") {
@@ -2426,6 +2434,10 @@ ${style}`;
         yield handleImportRequest(message, () => startImportSession(message));
         return;
       }
+      if (message.type === "import-styles") {
+        yield handleImportRequest(message, () => importSessionStyles(message));
+        return;
+      }
       if (message.type === "import-asset-start") {
         yield handleImportRequest(message, () => startImportAsset(message));
         return;
@@ -2568,7 +2580,8 @@ ${style}`;
         timings: {},
         timingCounts: {},
         clientTimings: message.clientTimings || null,
-        restoredNodeById: {}
+        restoredNodeById: {},
+        figmaStyleIdByRef: {}
       };
       figma.ui.postMessage({
         type: "progress",
@@ -2578,6 +2591,134 @@ ${style}`;
         total: totalNodes,
         label: "\u6B63\u5728\u63A5\u6536\u5BFC\u5165\u6570\u636E..."
       });
+    });
+  }
+  function importSessionStyles(message) {
+    return __async(this, null, function* () {
+      const session = requireImportSession(message.transferId);
+      const styles = Array.isArray(message.styles) ? message.styles : [];
+      let created = 0;
+      for (const style of styles) {
+        if (!style || typeof style.id !== "string" || !style.name) continue;
+        try {
+          if (style.styleType === "PAINT" && Array.isArray(style.paints) && style.paints.length > 0) {
+            const paintStyle = figma.createPaintStyle();
+            paintStyle.name = String(style.name);
+            try {
+              paintStyle.paints = sanitizeStylePaints(style.paints);
+            } catch (error) {
+              paintStyle.remove();
+              throw error;
+            }
+            session.figmaStyleIdByRef[style.id] = paintStyle.id;
+          } else if (style.styleType === "EFFECT" && Array.isArray(style.effects) && style.effects.length > 0) {
+            const effectStyle = figma.createEffectStyle();
+            effectStyle.name = String(style.name);
+            try {
+              effectStyle.effects = style.effects.map((effect) => {
+                const clone = __spreadValues({}, effect);
+                if (clone.blendMode === "PASS_THROUGH") clone.blendMode = "NORMAL";
+                return clone;
+              });
+            } catch (error) {
+              effectStyle.remove();
+              throw error;
+            }
+            session.figmaStyleIdByRef[style.id] = effectStyle.id;
+          } else if (style.styleType === "TEXT" && style.fontName) {
+            const fontName = { family: String(style.fontName.family || "Inter"), style: String(style.fontName.style || "Regular") };
+            yield loadFontCached(fontName);
+            const textStyle = figma.createTextStyle();
+            textStyle.name = String(style.name);
+            try {
+              textStyle.fontName = fontName;
+              if (typeof style.fontSize === "number" && style.fontSize > 0) textStyle.fontSize = style.fontSize;
+              if (style.lineHeight && style.lineHeight.unit === "PIXELS" && typeof style.lineHeight.value === "number") {
+                textStyle.lineHeight = { unit: "PIXELS", value: style.lineHeight.value };
+              } else {
+                textStyle.lineHeight = { unit: "AUTO" };
+              }
+              if (style.letterSpacing && typeof style.letterSpacing.value === "number") {
+                textStyle.letterSpacing = {
+                  unit: style.letterSpacing.unit === "PIXELS" ? "PIXELS" : "PERCENT",
+                  value: style.letterSpacing.value
+                };
+              }
+              if (style.textCase && style.textCase !== "ORIGINAL") textStyle.textCase = style.textCase;
+              if (style.textDecoration && style.textDecoration !== "NONE") textStyle.textDecoration = style.textDecoration;
+            } catch (error) {
+              textStyle.remove();
+              throw error;
+            }
+            session.figmaStyleIdByRef[style.id] = textStyle.id;
+          } else {
+            continue;
+          }
+          created++;
+        } catch (error) {
+          console.warn("[mg-style] \u6837\u5F0F\u521B\u5EFA\u5931\u8D25(\u8DF3\u8FC7):", style && style.name, error);
+        }
+      }
+      console.info("[mg-style] created", created, "/", styles.length, "library styles");
+    });
+  }
+  function sanitizeStylePaints(paints) {
+    const out = [];
+    for (const paint of paints) {
+      if (!paint || typeof paint !== "object") continue;
+      const visible = paint.visible !== false;
+      const opacity = typeof paint.opacity === "number" ? paint.opacity : 1;
+      if (paint.type === "SOLID" && paint.color) {
+        out.push({ type: "SOLID", visible, opacity, color: { r: paint.color.r || 0, g: paint.color.g || 0, b: paint.color.b || 0 } });
+        continue;
+      }
+      if (typeof paint.type === "string" && paint.type.indexOf("GRADIENT_") === 0 && Array.isArray(paint.gradientStops)) {
+        out.push({
+          type: paint.type,
+          visible,
+          opacity,
+          gradientTransform: Array.isArray(paint.gradientTransform) ? paint.gradientTransform : [[1, 0, 0], [0, 1, 0]],
+          gradientStops: paint.gradientStops.map((stop) => {
+            var _a, _b, _c, _d;
+            return {
+              position: stop.position || 0,
+              color: { r: ((_a = stop.color) == null ? void 0 : _a.r) || 0, g: ((_b = stop.color) == null ? void 0 : _b.g) || 0, b: ((_c = stop.color) == null ? void 0 : _c.b) || 0, a: ((_d = stop.color) == null ? void 0 : _d.a) === void 0 ? 1 : stop.color.a }
+            };
+          })
+        });
+        continue;
+      }
+    }
+    return out;
+  }
+  function applyImportedStyleBindings(node, layerRecord) {
+    return __async(this, null, function* () {
+      const session = activeImportSession;
+      if (!session) return;
+      const map = session.figmaStyleIdByRef;
+      const fillRef = layerRecord.fillStyleRef;
+      const strokeRef = layerRecord.strokeStyleRef;
+      const effectRef = layerRecord.effectStyleRef;
+      const textRef = layerRecord.textStyleRef;
+      if (!fillRef && !strokeRef && !effectRef && !textRef) return;
+      try {
+        if (fillRef && map[fillRef] && "setFillStyleIdAsync" in node) yield node.setFillStyleIdAsync(map[fillRef]);
+      } catch (error) {
+      }
+      try {
+        if (strokeRef && map[strokeRef] && "setStrokeStyleIdAsync" in node) yield node.setStrokeStyleIdAsync(map[strokeRef]);
+      } catch (error) {
+      }
+      try {
+        if (effectRef && map[effectRef] && "setEffectStyleIdAsync" in node) yield node.setEffectStyleIdAsync(map[effectRef]);
+      } catch (error) {
+      }
+      try {
+        if (textRef && map[textRef] && node.type === "TEXT" && "setTextStyleIdAsync" in node) {
+          yield node.setTextStyleIdAsync(map[textRef]);
+        }
+      } catch (error) {
+      }
     });
   }
   function startImportAsset(message) {
@@ -2713,7 +2854,37 @@ ${style}`;
         const type = record && record.props ? record.props.type : null;
         return type === "COMPONENT" || type === "COMPONENT_SET";
       };
-      const restoreOrder = [...rootIds.filter(isComponentRoot), ...rootIds.filter((id) => !isComponentRoot(id))];
+      const rootOfRecord = {};
+      for (const rootId of rootIds) {
+        const stack = [rootId];
+        while (stack.length > 0) {
+          const cur = stack.pop();
+          if (rootOfRecord[cur] !== void 0) continue;
+          rootOfRecord[cur] = rootId;
+          const rec = layers[cur];
+          for (const cid of rec && rec.childIds || []) stack.push(cid);
+        }
+      }
+      const dependsOn = {};
+      for (const rootId of rootIds) dependsOn[rootId] = {};
+      for (const id in rootOfRecord) {
+        const rec = layers[id];
+        const target = rec ? rec.mainComponentId : void 0;
+        if (!target) continue;
+        const fromRoot = rootOfRecord[id];
+        const toRoot = rootOfRecord[target];
+        if (toRoot !== void 0 && toRoot !== fromRoot && dependsOn[fromRoot]) dependsOn[fromRoot][toRoot] = true;
+      }
+      const baseOrder = [...rootIds.filter(isComponentRoot), ...rootIds.filter((id) => !isComponentRoot(id))];
+      const restoreOrder = [];
+      const rootVisitState = {};
+      const visitRoot = (rootId) => {
+        if (rootVisitState[rootId]) return;
+        rootVisitState[rootId] = 1;
+        for (const dep in dependsOn[rootId]) visitRoot(dep);
+        restoreOrder.push(rootId);
+      };
+      for (const rootId of baseOrder) visitRoot(rootId);
       const restoredRootNodes = {};
       for (const rootId of restoreOrder) {
         const childCountBefore = restoredPage.children.length;
@@ -3125,6 +3296,7 @@ ${style}`;
         throw error;
       }
       if (activeImportSession) activeImportSession.restoredNodeById[nodeId] = newNode;
+      yield applyImportedStyleBindings(newNode, layerRecord);
       let restoredCount = 1;
       const currentCount = restoredBefore + restoredCount;
       const progressStartedAt = Date.now();

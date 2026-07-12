@@ -57,6 +57,12 @@ export function normalizeImagePaint(paint: any, context?: ImagePaintContext): an
     if (paint.rotation !== undefined) result.rotation = paint.rotation;
     if (paint.imageTransform) result.imageTransform = paint.imageTransform;
     if (paint.scalingFactor !== undefined) result.scalingFactor = paint.scalingFactor;
+    // MasterGo spells the tile scale `ratio`; Figma's field is scalingFactor.
+    // This rebuild-the-paint path is the one image fills actually take — a
+    // mapping in normalizePaintForFigma alone never sees the source field.
+    else if (result.scaleMode === "TILE" && typeof paint.ratio === "number" && paint.ratio > 0) {
+        result.scalingFactor = paint.ratio;
+    }
 
     return normalizePaintForFigma(result);
 }
@@ -214,8 +220,15 @@ export function normalizeEffectsForNode(node: any, effects: any[]): any[] {
         if (copy.visible === undefined && effect.isVisible !== undefined) copy.visible = effect.isVisible;
         if (copy.visible === undefined) copy.visible = true;
         if (copy.blendMode === "PASS_THROUGH") copy.blendMode = "NORMAL";
-        if (copy.type === "DROP_SHADOW" || copy.type === "INNER_SHADOW") {
+        // showShadowBehindNode is ONLY valid on DROP_SHADOW — putting it on an
+        // INNER_SHADOW makes the effects setter throw, and the spread-less
+        // retry still carries it, so the WHOLE effects array was silently
+        // dropped for any node with an inner shadow (0712-3: "inner shadow"
+        // and "drop + inner" cards lost all effects on BOTH import paths).
+        if (copy.type === "DROP_SHADOW") {
             if (copy.showShadowBehindNode === undefined) copy.showShadowBehindNode = true;
+        } else if (copy.showShadowBehindNode !== undefined) {
+            delete copy.showShadowBehindNode;
         }
         return copy;
     });
@@ -341,6 +354,12 @@ export function normalizePaintForFigma(paint: any): any {
     }
     if (copy.type === "IMAGE") {
         if (!copy.imageHash) return null;
+        // MasterGo exports the tile scale as `ratio`; Figma's field is
+        // scalingFactor. Without the mapping every TILE paint rendered at the
+        // Figma default instead of the authored scale (both import paths).
+        if (copy.scaleMode === "TILE" && copy.scalingFactor === undefined && typeof copy.ratio === "number" && copy.ratio > 0) {
+            copy.scalingFactor = copy.ratio;
+        }
         return pickDefined(copy, ["type", "visible", "opacity", "blendMode", "scaleMode", "imageHash", "imageTransform", "scalingFactor", "rotation", "filters", "gifRef", "boundVariables"]);
     }
     if (copy.type === "VIDEO") {

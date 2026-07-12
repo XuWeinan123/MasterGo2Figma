@@ -824,3 +824,157 @@ extra 302 / index 15 / childOrder 11 收到全零(652/652),deep 450→212。五�
 怪癖也能用合成试件矩阵钉成规律,和逆向二进制字段是同一套方法论;(c) 实例内
 "盒位置"永远锁死,能动的只有可覆盖属性——修复要找的是"哪个可覆盖属性能把
 几何逼回真值",本轮答案是 textAutoResize。**
+
+## 2026-07-12 — 特斯拉 mg 导入触发 Figma 标签页崩溃:22 万条实例后代的内存悬崖
+
+`06 01`=INSTANCE 修复找回漏发的 70% 内容后,0711-3 的 Page 1 发射从 6.5 万涨到
+21.97 万条、转换产物 477MB JSON——用户导入时 Figma 整页崩溃("Something went
+wrong")。本地量化(probe29/30):
+
+- **零病态值**(无 NaN/Infinity,236 个 instanceScale 全部 0.8406)——排除几何炸弹;
+- **221,119 条记录里 219,383 条(99.2%,455MB/458MB)是实例展开的后代**,其中
+  vectorNetwork 一项 136.5MB、fills 65MB;
+- 而导入端对这些记录**只读 5 个字段**(visible/opacity/characters/fills/strokes,
+  `applyInstanceChildOverrides` 的位置配对),节点本体全部来自
+  `createInstance()`,全量 props 是白扛的。
+
+修复三件套:
+
+1. **转换器瘦身模式**:`convertMgPackageToV2Entries` 第三参
+   `options.slimInstanceDescendants`(仅插件 UI 传入)。以**发射出的
+   `mainComponentId` 为门**(不是 slash id!share 导出无可达组件、实例走
+   Frame 壳还原,那些记录就是还原源,不能瘦),对其后代把 props 换成白名单:
+   type 族/visible/opacity/characters/fills/strokes/booleanOperation/瘦 layout。
+   477MB→167MB(-65%),比较器与 pythonParser 不传参数、输出逐字节不变
+   (0711-3 回归 deep 575/geometry 112、0712-2 全平 84 验证)。
+2. **UI 端发完即弃**:import-page-chunk 发出后立刻置空
+   `pageData.layerChunks[chunkIndex]`——主线程恰在此时构建自己的副本,20 万条
+   的页两侧同时攥满副本是峰值元凶(UI 端每页惰性准备已是既有机制,主线程
+   finishImportPage 的 finally 也已逐页释放)。
+3. 校验兼容:layerCount 一致性检查不受影响(瘦身不减记录数);
+   `prepareImportProps` 是通用递归,瘦身记录的 IMAGE imageRef 前缀照常。
+
+教训:**(a) 修复"漏发内容"类 bug 时要顺手量化发射量的数量级变化——3.4× 的
+记录膨胀在小测试集上无感,在 30MB 的真实文件上直接撞穿宿主内存;(b) "谁读这
+份数据、读哪几个字段"是瘦身的唯一依据,门控要用还原路径的真实分支条件
+(mainComponentId),不能用形态特征(slash id)替代;(c) 双端管线的内存峰值
+看"同一份数据同时存在几份"——发完即弃把 UI 副本的生命周期错峰到主线程副本
+之前结束。**
+
+## 2026-07-12 — 特斯拉保真度:实例的第四形态"完全物化",一门修千错
+
+OOM 修掉后用户报告 mg 版 cover 与 zip 版差异巨大。Figma MCP 全量对拍(逐路径):
+mg 版 3372 节点 vs zip 版 1382,**extra 2001**、pos 677、size 204、vis 21。cover 的
+包内记录与基准完全一致(extra=0)→ 差异全部来自 **Page 1 组件本体**(实例
+createInstance 克隆组件内容),而 Page 1 无 zip 基准 = 比较器盲区。
+
+**包内自洽性探针**(新方法):实例记录自己的 childIds 树(≈基准真值)vs 组件
+记录树逐层配对——11,482 个顶层实例 **11,480 个结构失配**,实例侧 childIds 双份:
+`[0:112/0:48(展开存根), 0:113(裸id), 0:112/0:89, 0:134]`。裸孩子带 templateRef
+精确指向组件子、可见性是真值(Light=1/Dark=0,与 zip 一致;存根反而是错的)。
+
+**第四种实例形态:完全物化**(编辑器原生完整导出,区别于浅存根/稀疏镜像/share
+slash 覆盖)——实例把全部子树以裸 id 完整记录入档。0712-2 基准早已给出铁证:
+组件内 dragme 实例的孩子在基准里就是 `0:77 Union`(裸 id!)——**物化子就是
+API 画布节点本身**。正确处理=一条门:实例的 childIds 里存在**带类型的裸 id 子**
+→ 整个跳过模板展开,直接发射裸子树(数据完整,无需继承)。
+
+弯路记录(全部证伪回退):①"认领镜像+发射存根"方向——0712-2 立刻 Missing 302
+(裸孩子本来就该发射);②认领标志被合成器整体克隆继承→嵌套子树整棵消失
+(21.8k 记录假象);③tplRef 队列兜底复活死 job;④slash 前缀门把特斯拉自己
+搞坏(组件树内合法 slash 覆盖记录误伤)。**set1 "回归"是幽灵**:45/32/157 本就
+是当日起点值,拿错了旧世代存档(17/17/99)当基线——教训:回归锚点必须取
+当日会话起点的实测,不能凭记忆翻旧档。
+
+连锁解释:childIds 双份 → 导入端覆盖应用的数量一致性门静默跳过 → Light/Dark
+与导航图标可见性全灭;嵌套组件依赖无拓扑序 → createInstance 查空回退 Frame 壳
+→ 把(瘦身后的)双份记录实体化 → cover 实况 +2001 节点。导入端补拓扑排序
+(mainComponentId 依赖图,环退回原序)。
+
+终态:特斯拉发射 221,119 → **70,086**(zip 时代真值 ≈70.1k),自洽性失配
+11,480 → **3**;八集回归对当日起点全平(0711-3 deep 577±2 在既有残差族内);
+瘦身模式在新发射量下产物 167MB → 约 45MB 量级。
+
+## 2026-07-12 — 0712-3 特性样本往返:一晚破解七字段族 + 样式库还原落地
+
+用 Figma MCP 手搭特性样本(见 `TESTSET_0712-2_FIGMA_SPECIMEN.md`,落盘为测试集
+0712-3)→ MasterGo 往返 → mg/zip 对比。初始 deep 153、Effect 5、Font 36、Paint 3,
+一晚全清(终态 deep 5,余者皆 MasterGo 侧怪癖)。破解清单:
+
+1. **effect kind 枚举修正**:0=INNER_SHADOW(零压缩→`05` 字段整体省略,旧解析器
+   要求首字节必须 05,不是就跳过整条)、3=BACKGROUND_BLUR(旧映射 3=INNER 是错的);
+   **新字段 `0f <float>` = spread**(spread 1/−2/−4 都走 0f,旧解析器遇 0f 弃整条
+   ——drop+inner 组合因此全灭)。
+2. **STAR/POLYGON**:`1c 06`/`1c 05` 字段 `01` = **zigzag varint pointCount**
+   (3→06、5→0a、8→10;省略=星 5/多边形 3),星形字段 `02` = innerRadius 浮点
+   (省略=0.5)。
+3. **image scaleMode 4=TILE**(此文件形态;旧 2=TILE 保留),字段 `02`=ratio/
+   scalingFactor 两侧语义一致。
+4. **容器 0d/0e 对齐枚举 1=MAX**(`0e 01` 实测;旧表只有 2=CENTER/3=MAX/4=SPACE_BETWEEN)。
+5. **decoration 字节 4=STRIKETHROUGH**(旧证据 2;取并集)。
+6. **strokeWeight 填充规则扩展到裸 templateRef 记录**(变体 `10 00`+`1a` 引用+
+   无 0x40000 → 沿链取默认 1;此前只对 slash 存根生效)。
+7. **混排文本节点级 fill = 首段 fill**(zip 导出器语义;记录自带的黑色是无意义默认)。
+
+**样式库破解 + 还原(用户点名的能力)**:样式定义 = **名字带 UTF-8 类别前缀、
+放在 02 槽位的具名记录**(`01 <id> 00 02 文字/Heading/H1 00 03 <code> 00 05 …`),
+类别前缀:`文字/`(text)、`填充/`(fill)、`特效/`(effect,**不是"效果"**)。
+值早已在按 id 键控的注册表里:fill=paints[styleId]、effect=effectTable[styleId]、
+text=fontStyles[styleId](给字体样式表扫描器加了第三拼写)。节点引用:fill/stroke
+经 tag 15/16、effect 经 tag 17、文本经 run 级 `03 <styleId>` ——全部直指样式记录
+id。发射:`styles.json`(mastergo2figma.styles.v1)+ 记录级 fillStyleRef/
+strokeStyleRef/effectStyleRef/textStyleRef(比较器不可见,同 mainComponentId);
+导入端 import-styles 消息 → createPaintStyle/createEffectStyle/createTextStyle
+(字体先 loadFontCached,effect blendMode PASS_THROUGH→NORMAL)→ 还原后
+setXxxStyleIdAsync 绑定(值已内联,绑定纯增量,失败只丢链接不丢视觉)。
+
+**证伪记录**:变体名规范化(`Size[a2]=Large`→`Size=Large`)被基准打脸回退——
+MasterGo 自己的 zip 导出对 12 个变体里 11 个保留括号原形,只洗了 1 个;归一化
+把 1 行差异变 11 行。教训重申:**基准说什么就是什么,别替 MasterGo 做美化**。
+
+已知残差(样本,5 行):变体名 12 选 1 被 MasterGo 洗(无信号)、Show icon=false
+隐藏 icon 的清零变换 4 行(视觉无影响)。八集回归逐项全平。
+
+陷阱新增:**probe 里用 TextDecoder("latin1") 搜中文是假阴性**——它实为
+windows-1252,高字节被重映射;定位用 w1252 offset(1 字节=1 字符,offset 一致),
+取名必须回 bytes 层 UTF-8 解码。
+
+## 2026-07-12 — 0712-3 实测三问题:一个边界、两类导入端 bug、一次超越 zip
+
+用户实测报三问题,比较器全绿(mg==基准)——即基准 zip 同样丢,分流结论:
+
+1. **Title Case = "MasterGo 不产出"边界**:UPPER 的样式条目带 `0a 01`,TITLE 的
+   条目**没有 `0a` 字段**——Figma→MasterGo 导入时 TITLE 就丢了,mg/zip 都无从还原。
+2. **内阴影全灭 = 导入端 applier bug**(zip 路径同样中招):
+   `normalizeEffectsForNode` 给 INNER_SHADOW 也塞 `showShadowBehindNode`(该属性仅
+   DROP_SHADOW 合法)→ effects setter 抛错 → 无 spread 重试仍带毒 → **整条 effects
+   数组静默丢弃**("inner shadow" 单卡和 "drop + inner" 组合卡全灭的共同根因)。
+   修:只给 DROP_SHADOW 设默认、其余类型剥除该字段。
+3. **TILE 比例 = 导入端映射缺失**:MasterGo 的 `ratio` 字段就是 Figma 的
+   `scalingFactor`,paint 转换从未映射 → TILE 一律按默认比例渲染(zip 同病)。
+   修:scaleMode TILE 且无 scalingFactor 时取 ratio。
+4. **CROP 裁剪窗还原(超越 zip)**:zip 导出器整个丢掉裁剪窗,但 `.mg` 的图像
+   对象 `04` 子对象完整保存——字段 01..04 = **图像显示矩形(节点本地坐标)**
+   (150×96 节点中心 50% 裁剪存 x=-75 y=-48 w=300 h=192)。imageTransform =
+   `[[nodeW/w, 0, -x/w], [0, nodeH/h, -y/h]]`,需节点尺寸,故 paint 带
+   `__mgCropRect` 原始矩形、`mgNativeProps` 收口计算。0712-3 逐位还原授权真值
+   `[[0.5,0,0.25],[0,0.5,0.25]]`。**恒等变换不发射**(老集 80 张"无裁剪的 CROP"
+   解出 [[1,0,0],[0,1,0]],发射只添基准噪声)。代价:每张真裁剪图 +1 已声明
+   deep 行(0712-3: deep 5→6)。
+
+教训:**比较器全绿≠视觉正确——mg 与 zip 可以一起错**(共享 applier 的 bug、
+MasterGo 导出端的共同丢失)。特性样本的 origin 页是第三真值源,zip 只是
+"MasterGo 能导出什么"的真值。
+
+## 2026-07-12 — 0712-3 三轮:TITLE=0a 03 + TILE 走错函数的教训
+
+1. **textCase 3=TITLE**:用户在 MasterGo 里手动补设 Title Case 后重导出
+   (`测试集 0712-3+Case.mg`),条目出现 `0a 03`(LOWER=`0a 02` 对照)——证实
+   上一轮"TITLE 缺失"确为 MasterGo 的 Figma 导入丢字段,MasterGo 本体支持。
+   枚举补全:1=UPPER 2=LOWER 3=TITLE。
+2. **TILE 修在了错的函数上**:图像填充的真实路径是 `normalizeImagePaint`
+   (**重建全新 paint 对象**,逐字段白名单透传)——上一轮把 ratio→scalingFactor
+   映射加进了 `normalizePaintForFigma` 家族,而那条路径根本收不到源字段。
+   imageTransform 恰好在白名单里所以 CROP 生效、TILE 不生效,形成了误导性的
+   "半成功"。教训:**修 applier 先找到字段被重建/白名单化的那一层**,在源对象
+   还在手里的地方做映射;"同一文件里改了个函数"不等于"改在了数据流上"。

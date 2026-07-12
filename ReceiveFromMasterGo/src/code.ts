@@ -50,6 +50,10 @@ type ImportSession = {
   // record id → restored node, for component/instance re-linking (native .mg
   // imports carry mainComponentId on instance records)
   restoredNodeById: { [id: string]: SceneNode };
+  // library style ref (prefixed .mg style record id) → created Figma style id
+  // (native .mg imports ship a styles.json payload; records reference styles
+  // via fillStyleRef/strokeStyleRef/effectStyleRef/textStyleRef)
+  figmaStyleIdByRef: { [ref: string]: string };
 };
 
 type PendingAsset = {
@@ -98,6 +102,11 @@ function showImportUI() {
 
     if (message.type === "import-session-start") {
       await handleImportRequest(message, () => startImportSession(message));
+      return;
+    }
+
+    if (message.type === "import-styles") {
+      await handleImportRequest(message, () => importSessionStyles(message));
       return;
     }
 
@@ -253,7 +262,8 @@ async function startImportSession(message: any) {
     timings: {},
     timingCounts: {},
     clientTimings: message.clientTimings || null,
-    restoredNodeById: {}
+    restoredNodeById: {},
+    figmaStyleIdByRef: {}
   };
 
   figma.ui.postMessage({
@@ -264,6 +274,138 @@ async function startImportSession(message: any) {
     total: totalNodes,
     label: "正在接收导入数据..."
   });
+}
+
+// Recreate the .mg package's library styles as local Figma styles. Values
+// were materialized inline by the converter, so a failed style creation only
+// loses the BINDING, never the visual. Effect blendMode arrives normalized to
+// PASS_THROUGH (layer semantics) — Figma effects only accept NORMAL there.
+async function importSessionStyles(message: any): Promise<void> {
+  const session = requireImportSession(message.transferId);
+  const styles = Array.isArray(message.styles) ? message.styles : [];
+  let created = 0;
+  for (const style of styles) {
+    if (!style || typeof style.id !== "string" || !style.name) continue;
+    try {
+      if (style.styleType === "PAINT" && Array.isArray(style.paints) && style.paints.length > 0) {
+        const paintStyle = figma.createPaintStyle();
+        paintStyle.name = String(style.name);
+        try {
+          paintStyle.paints = sanitizeStylePaints(style.paints);
+        } catch (error) {
+          paintStyle.remove();
+          throw error;
+        }
+        session.figmaStyleIdByRef[style.id] = paintStyle.id;
+      } else if (style.styleType === "EFFECT" && Array.isArray(style.effects) && style.effects.length > 0) {
+        const effectStyle = figma.createEffectStyle();
+        effectStyle.name = String(style.name);
+        try {
+          effectStyle.effects = style.effects.map((effect: any) => {
+            const clone = { ...effect };
+            if (clone.blendMode === "PASS_THROUGH") clone.blendMode = "NORMAL";
+            return clone;
+          });
+        } catch (error) {
+          effectStyle.remove();
+          throw error;
+        }
+        session.figmaStyleIdByRef[style.id] = effectStyle.id;
+      } else if (style.styleType === "TEXT" && style.fontName) {
+        const fontName = { family: String(style.fontName.family || "Inter"), style: String(style.fontName.style || "Regular") };
+        await loadFontCached(fontName);
+        const textStyle = figma.createTextStyle();
+        textStyle.name = String(style.name);
+        try {
+          textStyle.fontName = fontName;
+          if (typeof style.fontSize === "number" && style.fontSize > 0) textStyle.fontSize = style.fontSize;
+          if (style.lineHeight && style.lineHeight.unit === "PIXELS" && typeof style.lineHeight.value === "number") {
+            textStyle.lineHeight = { unit: "PIXELS", value: style.lineHeight.value };
+          } else {
+            textStyle.lineHeight = { unit: "AUTO" };
+          }
+          if (style.letterSpacing && typeof style.letterSpacing.value === "number") {
+            textStyle.letterSpacing = {
+              unit: style.letterSpacing.unit === "PIXELS" ? "PIXELS" : "PERCENT",
+              value: style.letterSpacing.value
+            };
+          }
+          if (style.textCase && style.textCase !== "ORIGINAL") textStyle.textCase = style.textCase;
+          if (style.textDecoration && style.textDecoration !== "NONE") textStyle.textDecoration = style.textDecoration;
+        } catch (error) {
+          textStyle.remove();
+          throw error;
+        }
+        session.figmaStyleIdByRef[style.id] = textStyle.id;
+      } else {
+        continue;
+      }
+      created++;
+    } catch (error) {
+      console.warn("[mg-style] 样式创建失败(跳过):", style && style.name, error);
+    }
+  }
+  console.info("[mg-style] created", created, "/", styles.length, "library styles");
+}
+
+// Solid/gradient paints from styles.json map 1:1 onto Figma Paint minus the
+// exporter-only fields; anything unrecognized is dropped (a style with zero
+// valid paints is skipped by the caller's try/catch via the setter throwing).
+function sanitizeStylePaints(paints: any[]): Paint[] {
+  const out: Paint[] = [];
+  for (const paint of paints) {
+    if (!paint || typeof paint !== "object") continue;
+    const visible = paint.visible !== false;
+    const opacity = typeof paint.opacity === "number" ? paint.opacity : 1;
+    if (paint.type === "SOLID" && paint.color) {
+      out.push({ type: "SOLID", visible, opacity, color: { r: paint.color.r || 0, g: paint.color.g || 0, b: paint.color.b || 0 } });
+      continue;
+    }
+    if (typeof paint.type === "string" && paint.type.indexOf("GRADIENT_") === 0 && Array.isArray(paint.gradientStops)) {
+      out.push({
+        type: paint.type,
+        visible,
+        opacity,
+        gradientTransform: Array.isArray(paint.gradientTransform) ? paint.gradientTransform : [[1, 0, 0], [0, 1, 0]],
+        gradientStops: paint.gradientStops.map((stop: any) => ({
+          position: stop.position || 0,
+          color: { r: stop.color?.r || 0, g: stop.color?.g || 0, b: stop.color?.b || 0, a: stop.color?.a === undefined ? 1 : stop.color.a }
+        }))
+      } as Paint);
+      continue;
+    }
+  }
+  return out;
+}
+
+// Re-bind restored nodes to the recreated library styles. Runs AFTER
+// applyProperties: the raw values are already applied, so binding only
+// attaches the style reference (mutating a bound property later would detach
+// it — nothing in the pipeline mutates these afterwards except deferred
+// layout, which touches geometry only).
+async function applyImportedStyleBindings(node: SceneNode, layerRecord: ImportLayerRecord): Promise<void> {
+  const session = activeImportSession;
+  if (!session) return;
+  const map = session.figmaStyleIdByRef;
+  const fillRef = (layerRecord as any).fillStyleRef;
+  const strokeRef = (layerRecord as any).strokeStyleRef;
+  const effectRef = (layerRecord as any).effectStyleRef;
+  const textRef = (layerRecord as any).textStyleRef;
+  if (!fillRef && !strokeRef && !effectRef && !textRef) return;
+  try {
+    if (fillRef && map[fillRef] && "setFillStyleIdAsync" in node) await (node as any).setFillStyleIdAsync(map[fillRef]);
+  } catch (error) { /* binding is cosmetic — values already applied */ }
+  try {
+    if (strokeRef && map[strokeRef] && "setStrokeStyleIdAsync" in node) await (node as any).setStrokeStyleIdAsync(map[strokeRef]);
+  } catch (error) { /* ignore */ }
+  try {
+    if (effectRef && map[effectRef] && "setEffectStyleIdAsync" in node) await (node as any).setEffectStyleIdAsync(map[effectRef]);
+  } catch (error) { /* ignore */ }
+  try {
+    if (textRef && map[textRef] && node.type === "TEXT" && "setTextStyleIdAsync" in node) {
+      await (node as any).setTextStyleIdAsync(map[textRef]);
+    }
+  } catch (error) { /* ignore */ }
 }
 
 function startImportAsset(message: any) {
@@ -410,7 +552,43 @@ async function restoreImportPageData(importPage: ImportPageIndex, layers: { [id:
     const type = record && record.props ? record.props.type : null;
     return type === "COMPONENT" || type === "COMPONENT_SET";
   };
-  const restoreOrder = [...rootIds.filter(isComponentRoot), ...rootIds.filter(id => !isComponentRoot(id))];
+  // Components before instances is not enough: components NEST instances of
+  // other components (Tesla: "map" instantiates "en route"). Order roots
+  // topologically by mainComponentId dependencies — restoring a dependent
+  // first makes createInstance miss and bakes a frame-shell fallback into
+  // the component, which every instance of it then clones. Cycles (or deps
+  // already satisfied on earlier pages) keep the base order.
+  const rootOfRecord: { [id: string]: string } = {};
+  for (const rootId of rootIds) {
+    const stack = [rootId];
+    while (stack.length > 0) {
+      const cur = stack.pop() as string;
+      if (rootOfRecord[cur] !== undefined) continue;
+      rootOfRecord[cur] = rootId;
+      const rec = layers[cur];
+      for (const cid of (rec && rec.childIds) || []) stack.push(cid);
+    }
+  }
+  const dependsOn: { [rootId: string]: { [dep: string]: true } } = {};
+  for (const rootId of rootIds) dependsOn[rootId] = {};
+  for (const id in rootOfRecord) {
+    const rec = layers[id];
+    const target = rec ? rec.mainComponentId : undefined;
+    if (!target) continue;
+    const fromRoot = rootOfRecord[id];
+    const toRoot = rootOfRecord[target];
+    if (toRoot !== undefined && toRoot !== fromRoot && dependsOn[fromRoot]) dependsOn[fromRoot][toRoot] = true;
+  }
+  const baseOrder = [...rootIds.filter(isComponentRoot), ...rootIds.filter(id => !isComponentRoot(id))];
+  const restoreOrder: string[] = [];
+  const rootVisitState: { [id: string]: number } = {};
+  const visitRoot = (rootId: string) => {
+    if (rootVisitState[rootId]) return;
+    rootVisitState[rootId] = 1;
+    for (const dep in dependsOn[rootId]) visitRoot(dep);
+    restoreOrder.push(rootId);
+  };
+  for (const rootId of baseOrder) visitRoot(rootId);
   const restoredRootNodes: { [id: string]: SceneNode } = {};
   for (const rootId of restoreOrder) {
     const childCountBefore = restoredPage.children.length;
@@ -885,6 +1063,7 @@ async function restoreImportedNode(
     throw error;
   }
   if (activeImportSession) activeImportSession.restoredNodeById[nodeId] = newNode;
+  await applyImportedStyleBindings(newNode, layerRecord);
 
   let restoredCount = 1;
   const currentCount = restoredBefore + restoredCount;

@@ -763,6 +763,7 @@
 
     let manifest = null;
     let entries = {};
+    let importLibraryStyles = [];
     let packageRoot = "";
     let pages = [];
     let isBusy = false;
@@ -1064,6 +1065,7 @@
         activeImportClientTimings = null;
 
         // Initialize merged manifest
+        importLibraryStyles = [];
         const mergedManifest = {
           schema: "mastergo2figma.package.v2",
           version: 2,
@@ -1104,7 +1106,11 @@
           // pipeline already understands, so nothing downstream has to change.
           if (window.MasterGoMg.isMgPackage(file.name, zipEntries)) {
             setProgress(0, 0, `正在解析 .mg (${i + 1}/${files.length}): ${file.name}...`);
-            zipEntries = window.MasterGoMg.convertMgPackageToV2Entries(zipEntries, file.name);
+            // slimInstanceDescendants: instance-descendant records are only
+            // read for override matching in the plugin — full props (455MB of
+            // vectorNetwork etc. on the Tesla fixture) OOM the Figma tab.
+            // CLI/compare-tool conversions stay full-fidelity (no options).
+            zipEntries = window.MasterGoMg.convertMgPackageToV2Entries(zipEntries, file.name, { slimInstanceDescendants: true });
           }
 
           const manifestPath = findManifestPath(zipEntries);
@@ -1132,6 +1138,21 @@
           // Copy entries into global entries with prefix "zip_${i}/"
           for (const path in zipEntries) {
             entries[`zip_${i}/${path}`] = zipEntries[path];
+          }
+
+          // Library styles payload (native .mg conversions emit styles.json).
+          // Style ids get the same per-zip prefix as record ids so the
+          // record-level style refs keep resolving after the merge.
+          const stylesBytes = zipEntries[`${zipPackageRoot}styles.json`] || zipEntries["styles.json"];
+          if (stylesBytes) {
+            try {
+              const parsedStyles = JSON.parse(decodeUtf8(stylesBytes));
+              if (parsedStyles && Array.isArray(parsedStyles.styles)) {
+                for (const style of parsedStyles.styles) {
+                  if (style && style.id) importLibraryStyles.push({ ...style, id: `zip_${i}_${style.id}` });
+                }
+              }
+            } catch (e) { /* styles are additive — ignore malformed payloads */ }
           }
 
           // Merge pages
@@ -1215,6 +1236,7 @@
     function resetZipState() {
       manifest = null;
       entries = {};
+      importLibraryStyles = [];
       packageRoot = "";
       pages = [];
       pendingImportClientTimings = null;
@@ -1369,6 +1391,11 @@
       // PREFIXED ids — an unprefixed ref silently misses and every instance
       // falls back to a frame shell.
       if (record.mainComponentId) record.mainComponentId = `${prefix}${record.mainComponentId}`;
+      // Library style refs resolve against the per-zip prefixed style ids.
+      if (record.fillStyleRef) record.fillStyleRef = `${prefix}${record.fillStyleRef}`;
+      if (record.strokeStyleRef) record.strokeStyleRef = `${prefix}${record.strokeStyleRef}`;
+      if (record.effectStyleRef) record.effectStyleRef = `${prefix}${record.effectStyleRef}`;
+      if (record.textStyleRef) record.textStyleRef = `${prefix}${record.textStyleRef}`;
       if (record.props) {
         prepareImportProps(record.props, prefix, assetKeys);
       }
@@ -1437,6 +1464,16 @@
       addClientTiming("ui.session.startAckMs", Date.now() - sessionStartStartedAt);
       setStatus("已建立导入会话", summary.textContent, false);
 
+      // Library styles go right after the session opens, before any page —
+      // node records reference them during restore.
+      if (importLibraryStyles.length > 0) {
+        await sendImportRequest({
+          type: "import-styles",
+          transferId,
+          styles: importLibraryStyles
+        }, 30000);
+      }
+
       // Pages are prepared lazily, one at a time, right before they are sent:
       // the UI's memory peak drops from "records of ALL selected pages at
       // once" to a single page. The on-the-wire message order is unchanged
@@ -1481,6 +1518,10 @@
             chunkIndex,
             records
           });
+          // Release the UI-side copy right away: the plugin main thread is
+          // building its own copy of these records while this loop runs, and
+          // on 200k-record pages holding both simultaneously OOMs the tab.
+          pageData.layerChunks[chunkIndex] = null;
           importPageRecordsDone = Math.min(importPageRecordsTotal, importPageRecordsDone + records.length);
           setStageProgress("pageSend", importPageRecordsDone, importPageRecordsTotal, `正在发送页面数据：${pageData.page.name || pageData.page.id}`);
           if ((chunkIndex + 1) % IMPORT_YIELD_EVERY_CHUNKS === 0) await waitForUIRelease();
@@ -2451,7 +2492,9 @@
       return { value: mgDecFloat(bytes, p), next: p + 4 };
     }
 
-    const MG_IMAGE_SCALE_MODE = { 0: "FILL", 1: "FIT", 2: "TILE", 3: "CROP" };
+    // 4=TILE observed on the 0712-3 specimen (round-tripped from Figma); the
+    // legacy 2=TILE mapping is kept for the older fixtures.
+    const MG_IMAGE_SCALE_MODE = { 0: "FILL", 1: "FIT", 2: "TILE", 3: "CROP", 4: "TILE" };
     // MasterGo's default #D8D8D8 fill: referenced by "default fill" paint
     // records that carry no explicit color of their own.
     const MG_DEFAULT_FILL_GRAY = Math.fround(216 / 255);
@@ -2539,17 +2582,32 @@
             continue;
           }
           if (t === 0x04) {
-            // crop/fit rect: sub-object of float fields, zero-terminated
+            // Crop rect sub-object (0712-3): fields 01..04 = x, y, w, h of
+            // the crop window (image-pixel units; normalize against the
+            // intrinsic size from fields 07/08). Fields 05/06 unobserved.
+            const rect = {};
             for (;;) {
               if (p >= end) return null;
               const st = bytes[p++];
               if (st === 0x00) break;
-              if (st >= 0x01 && st <= 0x06) { zfloat(); continue; }
+              if (st >= 0x01 && st <= 0x06) {
+                const v = zfloat();
+                if (st === 0x01) rect.x = v;
+                else if (st === 0x02) rect.y = v;
+                else if (st === 0x03) rect.w = v;
+                else if (st === 0x04) rect.h = v;
+                continue;
+              }
               return null;
             }
+            img.cropRect = rect;
             continue;
           }
-          if (t === 0x07 || t === 0x08) { zfloat(); continue; } // intrinsic image w/h
+          if (t === 0x07 || t === 0x08) {
+            const v = zfloat();
+            if (t === 0x07) img.intrinsicW = v; else img.intrinsicH = v;
+            continue;
+          }
           return null;
         }
       }
@@ -2573,6 +2631,23 @@
         const paint = mgMakeImagePaint(mgBasename(image.path), MG_IMAGE_SCALE_MODE[image.scaleMode] || "FILL", image.ratio);
         paint.visible = visible;
         paint.opacity = opacity;
+        // CROP placement rect (04 sub-object): the image's DISPLAY rect in
+        // node-local units (0712-3: node 150×96 with a centered 50% crop
+        // stores x=-75 y=-48 w=300 h=192). The Figma imageTransform needs the
+        // NODE size — carry the raw rect; mgNativeProps computes
+        // [[nodeW/w, 0, -x/w], [0, nodeH/h, -y/h]] and strips the temp field.
+        // (The zip exporter drops the crop window entirely — this exceeds
+        // baseline parity by one accepted deep-diff row per cropped image.)
+        if (paint.scaleMode === "CROP" && image.cropRect &&
+            isFinite(image.cropRect.w) && image.cropRect.w > 0 &&
+            isFinite(image.cropRect.h) && image.cropRect.h > 0) {
+          paint.__mgCropRect = {
+            x: image.cropRect.x || 0,
+            y: image.cropRect.y || 0,
+            w: image.cropRect.w,
+            h: image.cropRect.h
+          };
+        }
         return paint;
       }
       if (kind >= 1 && kind <= 4 && gradient && gradient.stops && gradient.stops.length >= 2) {
@@ -2647,10 +2722,15 @@
 
     // Effect registry (share exports): nodes reference it via tag 17. Child
     // records share the paint-table shape; fields (floats zero-compressed):
-    //   05 <kind>  1=DROP_SHADOW 2=LAYER_BLUR (3/4 unobserved)
+    //   05 <kind>  0=INNER_SHADOW (zero-compressed: the field is OMITTED)
+    //              1=DROP_SHADOW 2=LAYER_BLUR 3=BACKGROUND_BLUR
+    //              (0712-3 specimen: bg-blur glass carries explicit 05 03,
+    //               both inner shadows carry no 05 at all)
     //   08 <a><r><g><b>   09 <radius>   0a <offset.x, omitted=0>
     //   0b <offset.y, omitted=0>   0c <spread?>   0d/0e <flags>
-    const MG_EFFECT_TYPE = { 1: "DROP_SHADOW", 2: "LAYER_BLUR", 3: "INNER_SHADOW", 4: "BACKGROUND_BLUR" };
+    //   0f <float> = spread (0712-3: spread 1 / −2 / −4 all spell 0f; an
+    //   unknown-tag bail here used to drop the WHOLE effect list)
+    const MG_EFFECT_TYPE = { 0: "INNER_SHADOW", 1: "DROP_SHADOW", 2: "LAYER_BLUR", 3: "BACKGROUND_BLUR" };
     function mgScanEffects(bytes, str) {
       const effects = {};
       const ID = "[0-9]+:[0-9A-Za-z]+";
@@ -2662,10 +2742,20 @@
         const mk = marks[i];
         const end = (i + 1 < marks.length) ? marks[i + 1].start : Math.min(mk.start + 400, bytes.length);
         let p = mk.end;
-        if (bytes[p] !== 0x05) continue;
-        const kind = bytes[p + 1];
-        if (!MG_EFFECT_TYPE[kind]) continue;
-        p += 2;
+        // Kind 0 (INNER_SHADOW) is zero-compressed away — accept entries that
+        // open directly with an effect field tag. Entries opening with any
+        // other tag are not effect records (paint/geometry registries share
+        // the mark shape) and fall through the field walk's `ok` gate.
+        let kind = 0;
+        if (bytes[p] === 0x05) {
+          kind = bytes[p + 1];
+          p += 2;
+        } else if (bytes[p] !== 0x06 && bytes[p] !== 0x08 && bytes[p] !== 0x09 &&
+                   bytes[p] !== 0x0a && bytes[p] !== 0x0b && bytes[p] !== 0x0c &&
+                   bytes[p] !== 0x0d && bytes[p] !== 0x0e && bytes[p] !== 0x0f) {
+          continue;
+        }
+        if (MG_EFFECT_TYPE[kind] === undefined) continue;
         const type = MG_EFFECT_TYPE[kind];
         let color = null;
         let radius = (type === "DROP_SHADOW" || type === "INNER_SHADOW") ? 10 : 0;
@@ -2687,13 +2777,13 @@
             continue;
           }
           if (t === 0x06) { visible = bytes[p + 1] !== 0; p += 2; continue; }
-          if (t === 0x09 || t === 0x0a || t === 0x0b || t === 0x0c) {
+          if (t === 0x09 || t === 0x0a || t === 0x0b || t === 0x0c || t === 0x0f) {
             const r = mgReadZeroFloat(bytes, p + 1);
             if (!isFinite(r.value) || Math.abs(r.value) > 1e5) { ok = false; break; }
             if (t === 0x09) radius = r.value;
             if (t === 0x0a) offX = r.value;
             if (t === 0x0b) offY = r.value;
-            if (t === 0x0c) spread = r.value;
+            if (t === 0x0c || t === 0x0f) spread = r.value;
             p = r.next;
             continue;
           }
@@ -2721,6 +2811,51 @@
         byRef[ref] = effects[ref].map(e => e.fx);
       }
       return byRef;
+    }
+
+    // Library STYLE definition records (0712-3 round-trip specimen): a record
+    // whose 02 slot holds the style's DISPLAY NAME with a UTF-8 category
+    // prefix instead of a parent id — `01 <id> 00 02 文字/Heading/H1 00 03
+    // <code> 00 <payload>`. Values live in the registries already keyed by
+    // the style id: fills in the paint table, effects in the effect registry,
+    // text params in the font-style table (third spelling). Node references:
+    // fills/strokes via tags 15/16, effects via tag 17, text via the run's
+    // `03 <styleId>` field — all pointing straight at the style id.
+    const MG_STYLE_CATEGORY_PREFIXES = [
+      { bytes: [0xe6, 0x96, 0x87, 0xe5, 0xad, 0x97, 0x2f], category: "TEXT" },   // 文字/
+      { bytes: [0xe5, 0xa1, 0xab, 0xe5, 0x85, 0x85, 0x2f], category: "FILL" },   // 填充/
+      { bytes: [0xe7, 0x89, 0xb9, 0xe6, 0x95, 0x88, 0x2f], category: "EFFECT" }, // 特效/
+      { bytes: [0xe6, 0x8f, 0x8f, 0xe8, 0xbe, 0xb9, 0x2f], category: "STROKE" }  // 描边/
+    ];
+    function mgScanStyleDefs(bytes, str) {
+      const defs = {};
+      const ID = "[0-9]+:[0-9A-Za-z]+";
+      // The windows-1252 view keeps a 1:1 byte↔char offset mapping, so the
+      // regex only LOCATES candidates; the name itself is re-decoded as
+      // UTF-8 straight from the byte range.
+      const re = new RegExp("\\x01(" + ID + ")\\x00\\x02([^\\x00]{2,120})\\x00\\x03[0-9A-Za-z]+\\x00", "g");
+      const utf8 = new TextDecoder("utf-8");
+      let m;
+      while ((m = re.exec(str))) {
+        const nameStart = m.index + 1 + m[1].length + 2;
+        const nameEnd = nameStart + m[2].length;
+        let category = null;
+        for (const pref of MG_STYLE_CATEGORY_PREFIXES) {
+          let hit = true;
+          for (let i = 0; i < pref.bytes.length; i++) {
+            if (bytes[nameStart + i] !== pref.bytes[i]) { hit = false; break; }
+          }
+          if (hit) { category = pref; break; }
+        }
+        if (!category) continue;
+        let name = "";
+        try {
+          name = utf8.decode(bytes.subarray(nameStart + category.bytes.length, nameEnd));
+        } catch (e) { continue; }
+        if (!name) continue;
+        if (defs[m[1]] === undefined) defs[m[1]] = { id: m[1], category: category.category, name: name };
+      }
+      return defs;
     }
 
     // Node type = the byte right after the `1c` tag.
@@ -3055,7 +3190,9 @@
     //   14 …              component property / override table (not walked)
     //   17 <b>            container kind enum; 01 observed only on SECTION
     const MG_BOOL_OPS = ["UNION", "INTERSECT", "EXCLUDE", "SUBTRACT"];
-    const MG_ALIGN_ITEMS = { 2: "CENTER", 3: "MAX", 4: "SPACE_BETWEEN" };
+    // 1=MAX observed on the 0712-3 round-trip specimen (counterAxis "MAX"
+    // rows spell `0e 01`); 3=MAX kept from the older fixtures.
+    const MG_ALIGN_ITEMS = { 1: "MAX", 2: "CENTER", 3: "MAX", 4: "SPACE_BETWEEN" };
     function mgParseContainerMeta(bytes, off) {
       const meta = { subtype: "FRAME", booleanOperation: null };
       let p = off;
@@ -3424,10 +3561,17 @@
     function mgScanFontStyles(bytes, str) {
       const styles = {};
       const ID = "[0-9]+:[0-9A-Za-z]+(?:\\/[0-9]+:[0-9A-Za-z]+)*";
-      // Two entry spellings: the compact one (`01 <id> 00 05 <kind>`) and the
+      // Three entry spellings: the compact one (`01 <id> 00 05 <kind>`), the
       // 0711-3 style-library one with explicit-empty parent/sort/04 fields
-      // (`01 <id> 00 02 00 03 00 04 00 05 <kind>`).
-      const re = new RegExp("\\x01(" + ID + ")\\x00(?:\\x02\\x00\\x03\\x00\\x04\\x00)?\\x05[\\x01-\\x07]", "g");
+      // (`01 <id> 00 02 00 03 00 04 00 05 <kind>`), and the 0712-3 STYLE
+      // DEFINITION record (`01 <id> 00 02 <категория/name> 00 03 <code> 00
+      // 05 <kind>` — the library style's display name sits in the 02 slot,
+      // e.g. "文字/Heading/H1"; there is no 04 field). Text runs reference
+      // these records via their run-level `03 <styleId>` field. Node records
+      // never match the third spelling: they carry a 04 name field between
+      // the code and the scalars, and the `03 <family>` body check rejects
+      // any impostor.
+      const re = new RegExp("\\x01(" + ID + ")\\x00(?:\\x02\\x00\\x03\\x00\\x04\\x00|\\x02[^\\x00]+\\x00\\x03[0-9A-Za-z]+\\x00)?\\x05[\\x01-\\x07]", "g");
       let m;
       while ((m = re.exec(str))) {
         let p = m.index + m[0].length;
@@ -3437,7 +3581,9 @@
           lineHeightPx: false, letterSpacing: 0, letterSpacingPx: false
         };
         if (bytes[p] === 0x01) {
-          entry.decoration = bytes[p + 1] === 2 ? "STRIKETHROUGH" : "UNDERLINE";
+          // 2 = STRIKETHROUGH (legacy fixtures), 4 = STRIKETHROUGH (0712-3
+          // round-trip specimen); anything else observed decorated = UNDERLINE.
+          entry.decoration = (bytes[p + 1] === 2 || bytes[p + 1] === 4) ? "STRIKETHROUGH" : "UNDERLINE";
           p += 2;
         }
         // 0711-3 entries carry a `02 <varint>` stamp before the family field.
@@ -3471,7 +3617,12 @@
           if (tag === 0x0b) { entry.letterSpacingPx = bytes[p + 1] === 1; p += 2; continue; }
           if (tag === 0x08) { const r = mgReadZeroFloat(bytes, p + 1); entry.letterSpacing = r.value; p = r.next; continue; }
           if (tag === 0x0a) {
-            entry.textCase = bytes[p + 1] === 1 ? "UPPER" : (bytes[p + 1] === 2 ? "LOWER" : null);
+            // 1=UPPER 2=LOWER 3=TITLE (0712-3+Case: MasterGo's Figma import
+            // drops TITLE — the byte only appears after re-setting the case
+            // in MasterGo itself).
+            entry.textCase = bytes[p + 1] === 1 ? "UPPER"
+              : (bytes[p + 1] === 2 ? "LOWER"
+              : (bytes[p + 1] === 3 ? "TITLE" : null));
             p += 2;
             continue;
           }
@@ -3689,6 +3840,34 @@
             }
           }
         }
+        // POLYGON (`1c 05`) / STAR (`1c 06`) objects (0712-3 specimen):
+        // field 01 = pointCount as a ZIGZAG varint (3pt→06, 5pt→0a, 8pt→10),
+        // omitted = the shape default (polygon 3, star 5); STAR field 02 =
+        // innerRadius float, omitted = 0.5.
+        let shapePointCount = null;
+        let shapeInnerRadius = null;
+        if (typeByte === 5 || typeByte === 6) {
+          let ap = fb + jt + 2;
+          while (ap < end) {
+            const at = bytes[ap];
+            if (at === 0x00) break;
+            if (at === 0x01) {
+              const r = mgReadVarint(bytes, ap + 1);
+              if (!isFinite(r.value)) break;
+              shapePointCount = (r.value >>> 1) ^ -(r.value & 1);
+              ap = r.next;
+              continue;
+            }
+            if (at === 0x02 && typeByte === 6) {
+              const r = mgReadZeroFloat(bytes, ap + 1);
+              if (!isFinite(r.value)) break;
+              shapeInnerRadius = r.value;
+              ap = r.next;
+              continue;
+            }
+            break;
+          }
+        }
         const textDetails = type === "TEXT" ? mgDecodeTextDetails(bytes, str, fb, end, jt) : {};
         nodes[mk.recId] = {
           id: mk.recId, parent: mk.id2, owner: scalar.owner || null, type: type, rawType: type, isRawRecord: true, w: w, h: h, x: x, y: y,
@@ -3723,6 +3902,7 @@
           strokeJoinByte: scalar.t12, strokeAlignByte: scalar.t13,
           dashPattern: scalar.dashPattern || null,
           trailer: trailer, textAutoResize: textAutoResize, arcData: arcData,
+          shapePointCount: shapePointCount, shapeInnerRadius: shapeInnerRadius,
           textAlignH: textAlignH, textAlignV: textAlignV, textStyleRef: textStyleRef
         };
         // Structured font runs are authoritative: characters are the sorted-run
@@ -4106,10 +4286,11 @@
     function mgApplyShapeFallbacks(props) {
       if (!props || !props.name) return;
       if (props.type === "STAR") {
-        props.pointCount = 6;
-        props.innerRadius = 0.5;
+        // Native `1c 06` fields win (0712-3); these are last-resort defaults.
+        if (props.pointCount === undefined) props.pointCount = 5;
+        if (props.innerRadius === undefined) props.innerRadius = 0.5;
       } else if (props.type === "POLYGON") {
-        props.pointCount = 5;
+        if (props.pointCount === undefined) props.pointCount = 3;
       } else if (props.type === "LINE") {
         if (props.layout) {
           props.layout.height = 0;
@@ -4215,6 +4396,25 @@
       const strokeList = paints[n.strokeRef] || [];
       const fills = fillList.map(mgCloneJsonValue);
       const strokes = strokeList.map(mgCloneJsonValue);
+      // CROP placement rect → Figma imageTransform, now that the node size is
+      // known (rect = the image's display box in node-local units). An
+      // IDENTITY transform (rect == node box, older fixtures' "crop" without
+      // actual cropping) is omitted — it is a no-op and only adds baseline
+      // noise.
+      for (const paintEntry of fills) {
+        if (!paintEntry || !paintEntry.__mgCropRect) continue;
+        const rect = paintEntry.__mgCropRect;
+        delete paintEntry.__mgCropRect;
+        if (paintEntry.scaleMode !== "CROP" || !isFinite(n.w) || !isFinite(n.h) || n.w <= 0 || n.h <= 0) continue;
+        const sx = n.w / rect.w, sy = n.h / rect.h;
+        const tx = -rect.x / rect.w, ty = -rect.y / rect.h;
+        if (Math.abs(sx - 1) < 0.001 && Math.abs(sy - 1) < 0.001 &&
+            Math.abs(tx) < 0.001 && Math.abs(ty) < 0.001) continue;
+        paintEntry.imageTransform = [[sx, 0, tx], [0, sy, ty]];
+      }
+      for (const paintEntry of strokes) {
+        if (paintEntry && paintEntry.__mgCropRect) delete paintEntry.__mgCropRect;
+      }
       // Values read from the node's OWN record are final; template-inherited
       // and default values still need the instance scale.
       const ownFinal = !n.templateValues;
@@ -4332,6 +4532,14 @@
           startingAngle: ellipseArc.startingAngle,
           endingAngle: ellipseArc.endingAngle
         };
+      }
+      // STAR/POLYGON native fields (`1c 06`/`1c 05`): zigzag pointCount
+      // (omitted = star 5 / polygon 3) + star innerRadius (omitted = 0.5).
+      if (t === "STAR") {
+        props.pointCount = (n.shapePointCount != null && n.shapePointCount >= 3) ? n.shapePointCount : 5;
+        props.innerRadius = (n.shapeInnerRadius != null && isFinite(n.shapeInnerRadius)) ? n.shapeInnerRadius : 0.5;
+      } else if (t === "POLYGON") {
+        props.pointCount = (n.shapePointCount != null && n.shapePointCount >= 3) ? n.shapePointCount : 3;
       }
       if (types.sourceType === "BOOLEAN_OPERATION") {
         props.booleanOperation = (meta && meta.booleanOperation) ||
@@ -4459,7 +4667,18 @@
               fills: segFills
             });
           }
-          if (segments.length > 1) props.styledTextSegments = segments;
+          if (segments.length > 1) {
+            props.styledTextSegments = segments;
+            // Node-level fills on mixed text mirror the FIRST segment (the
+            // zip exporter's rule — Figma's node getter is `mixed` there);
+            // the record's own paint slot is a meaningless black default.
+            if (segments[0].fills && segments[0].fills.length > 0 && props.geometry) {
+              props.geometry.fills = segments[0].fills.map(mgCloneJsonValue);
+              for (const f of props.geometry.fills) {
+                if (f && f.blendMode === "NORMAL") f.blendMode = "PASS_THROUGH";
+              }
+            }
+          }
         }
       }
       return props;
@@ -5088,26 +5307,31 @@
         flatCache[scopeId] = flat;
         return flat;
       }
+      // Resolve a stub path against the transitive mirror scopes starting at
+      // `segs[anchor]`. A mirror's templateRef points at the SLOT for plain
+      // children but at the slot's COMPONENT for nested-instance slots
+      // (0712-2 icon mirrors carry tpl 0:795, the right-turn component, not
+      // the slot 0:59042) — try both keys per segment.
+      function resolvePath(segs, anchor) {
+        let scope = segs[anchor];
+        let mirror = null;
+        for (let i = anchor + 1; i < segs.length; i++) {
+          const flat = flatten(scope);
+          const seg = segs[i];
+          const segNode = nodes[seg];
+          const m = flat[seg] || (segNode && segNode.templateRef ? flat[segNode.templateRef] : null);
+          if (!m) return null;
+          mirror = m;
+          scope = m.id;
+        }
+        return mirror;
+      }
       for (const id of Object.keys(nodes)) {
         const n = nodes[id];
         if (!n || !n.isRawRecord || n.mirrorNode || id.indexOf("/") < 0) continue;
         const segs = id.split("/");
         if (segs.length < 3) continue; // direct instance children have no mirror layer
-        let scope = segs[1];
-        let mirror = null;
-        for (let i = 2; i < segs.length; i++) {
-          // A mirror's templateRef points at the SLOT for plain children but
-          // at the slot's COMPONENT for nested-instance slots (0712-2 icon
-          // mirrors carry tpl 0:795, the right-turn component, not the slot
-          // 0:59042) — try both keys.
-          const flat = flatten(scope);
-          const seg = segs[i];
-          const segNode = nodes[seg];
-          const m = flat[seg] || (segNode && segNode.templateRef ? flat[segNode.templateRef] : null);
-          if (!m) { mirror = null; break; }
-          mirror = m;
-          scope = m.id;
-        }
+        const mirror = resolvePath(segs, 1);
         if (mirror) n.mirrorNode = mirror.id;
       }
     }
@@ -5173,6 +5397,24 @@
         if (expanded[instId] || instId.split("/").length > 8) continue;
         expanded[instId] = true;
         const inst = nodes[instId];
+        // Fully-MATERIALIZED instances (editor-original full exports, Tesla
+        // Page 1) carry their real canvas children as TYPED bare-id record
+        // trees — and the 0712-2 baseline proves those bare ids ARE the API
+        // child ids (component-inner dragme emits `0:77 Union`, not a slash
+        // stub). Expanding such an instance would double every subtree; its
+        // raw children are complete records, so no stubs are needed. Sparse
+        // TYPELESS bare children (override mirrors) don't count — those
+        // instances still expand and the mirrors feed the stubs data.
+        if (!mgShareModeActive) {
+          const rawKids = childIds[instId];
+          let hasTypedRawChild = false;
+          if (rawKids) {
+            for (const cid of rawKids) {
+              if (cid.indexOf("/") < 0 && nodes[cid] && nodes[cid].type) { hasTypedRawChild = true; break; }
+            }
+          }
+          if (hasTypedRawChild) continue;
+        }
         let comp = nodes[inst.templateRef || inst.templateNode];
         // A nested-instance STUB's tag 1a points at its template SLOT, not at
         // the component; hop through the slot so the walk descends the real
@@ -5461,6 +5703,16 @@
             n.strokeWeightExplicit = true;
             n.strokeWeightInherited = true;
           }
+          // Explicit `10 00` is a FILLER on template-linked BARE records too,
+          // unless the 0x40000 stroke-override bit is set (0712-3 Secondary
+          // Button variants: `10 00` + 1a ref to the default variant, mask
+          // 0x80 — baseline strokeWeight is the chain default 1).
+          if (!mgShareModeActive && n.isRawRecord &&
+              n.strokeWeightExplicit && !n.strokeWeightInherited && n.strokeWeight === 0 &&
+              (n.overrideMask19 === undefined || (n.overrideMask19 & 0x40000) === 0)) {
+            n.strokeWeight = t.strokeWeightExplicit ? t.strokeWeight : 1;
+            n.strokeWeightInherited = true;
+          }
           // 0711-3: a stub with explicit strokeWeight 0 whose template leaves
           // the field missing (= default 1) still reports per-side weights of
           // 1 × scale in the baseline (48 album-cover rects). Remember the
@@ -5619,7 +5871,39 @@
       return true;
     }
 
-    function convertMgPackageToV2Entries(zipEntries, fileName) {
+    // Keep exactly what the importer reads off instance-descendant records
+    // (applyInstanceChildOverrides + a survivable frame-shell fallback):
+    // type family, visibility, opacity, characters, fills/strokes (paint
+    // override compare + IMAGE assetKey scan), boolean op, and a slim layout.
+    // Dropped: vectorNetwork/vectorPaths (the whale), text runs, effects
+    // details beyond blend, constraints/sizing, stroke geometry, arcData.
+    function mgSlimInstanceDescendantProps(props) {
+      if (!props) return props;
+      const slim = {};
+      if (props.type !== undefined) slim.type = props.type;
+      if (props.sourceType !== undefined) slim.sourceType = props.sourceType;
+      if (props.restoreType !== undefined) slim.restoreType = props.restoreType;
+      if (props.name !== undefined) slim.name = props.name;
+      if (props.characters !== undefined) slim.characters = props.characters;
+      if (props.booleanOperation !== undefined) slim.booleanOperation = props.booleanOperation;
+      if (props.shellPlaceholder !== undefined) slim.shellPlaceholder = props.shellPlaceholder;
+      if (props.scence) slim.scence = props.scence;
+      if (props.blend) slim.blend = props.blend;
+      if (props.geometry) {
+        slim.geometry = {};
+        if (props.geometry.fills !== undefined) slim.geometry.fills = props.geometry.fills;
+        if (props.geometry.strokes !== undefined) slim.geometry.strokes = props.geometry.strokes;
+      }
+      if (props.layout) {
+        const l = props.layout;
+        slim.layout = { x: l.x, y: l.y, width: l.width, height: l.height };
+        if (l.relativeTransform !== undefined) slim.layout.relativeTransform = l.relativeTransform;
+        if (l.rotation !== undefined) slim.layout.rotation = l.rotation;
+      }
+      return slim;
+    }
+
+    function convertMgPackageToV2Entries(zipEntries, fileName, options) {
       // One stamp per conversion run: "MMDD-HHmm".
       const mgImportStamp = (() => {
         const d = new Date();
@@ -5634,6 +5918,7 @@
       if (metaBytes) { try { meta = JSON.parse(decodeUtf8(metaBytes)); } catch (e) { /* ignore */ } }
 
       const { nodes, paints, geoms, fontStyles, effectTable } = mgDecodeNativeNodes(documentBytes);
+      const styleDefs = mgScanStyleDefs(documentBytes, new TextDecoder("latin1").decode(documentBytes));
       const embeddedProps = mgExtractEmbeddedProps(documentBytes);
       const embeddedIndex = mgBuildEmbeddedIndex(embeddedProps);
       const embeddedOverlayUsed = {};
@@ -5695,6 +5980,7 @@
       // A raw VECTOR overriding a Boolean template slot is already flattened.
       // Prune its template operands before computing page reachability/indexes.
       mgPruneInstanceBooleanLeaves(nodes, childIds);
+      const isEmittedChild = (cid) => nodes[cid] && nodes[cid].type;
       // Number siblings over the same filtered child list the records emit
       // (typeless raw stubs are dropped there); numbering the raw list would
       // shift every sibling after a dropped stub and fail INDEX_MISMATCH.
@@ -5702,7 +5988,7 @@
       for (const p in childIds) {
         let emittedIndex = 0;
         for (const cid of childIds[p]) {
-          if (nodes[cid] && nodes[cid].type) indexInParent[cid] = emittedIndex++;
+          if (isEmittedChild(cid)) indexInParent[cid] = emittedIndex++;
         }
       }
 
@@ -5759,6 +6045,11 @@
       }
       if (Object.keys(reachable).length === 0) throw new Error(`"${fileName}" 中没有可识别的页面图层`);
 
+      // NOTE on variant names: MasterGo spells them `Size[a2]=Large,Type[a0]=…`
+      // and its OWN zip exporter keeps that raw form for 11 of 12 specimen
+      // variants (only one came out normalized) — so the decoder emits the
+      // raw names untouched to match the zip baseline. Normalizing here
+      // traded 1 diff row for 11 (reverted 2026-07-12).
       // Layer records — reachable nodes only.
       const records = [];
       const nativeEmbeddedMatches = {};
@@ -5791,7 +6082,7 @@
         // would silently drop the whole subtree and fail the page count
         // check. These records carry no geometry or fills of their own (the
         // operands do), so restore them as a real Boolean combine instead.
-        const emittedChildIds = (childIds[id] || []).filter(c => nodes[c] && nodes[c].type);
+        const emittedChildIds = (childIds[id] || []).filter(isEmittedChild);
         if (props.type === "VECTOR" && emittedChildIds.length > 0) {
           props.type = "BOOLEAN_OPERATION";
           props.sourceType = "BOOLEAN_OPERATION";
@@ -5813,7 +6104,7 @@
           parentId: (nodes[n.parent] ? n.parent : null),
           index: rootIndexOverride[id] != null ? rootIndexOverride[id] : (indexInParent[id] || 0),
           name: n.name || id,
-          childIds: (childIds[id] || []).filter(c => nodes[c] && nodes[c].type),
+          childIds: (childIds[id] || []).filter(isEmittedChild),
           props: props
         };
         // Instance records remember their component (tag 1a template ref) so
@@ -5834,6 +6125,15 @@
             nodes[n.templateRef].containerMeta.subtype === "COMPONENT") {
           record.mainComponentId = n.templateRef;
         }
+        // Library-style references (record-level, invisible to the comparator
+        // like mainComponentId): the node's paint/effect refs and the text
+        // run's style ref point straight at style DEFINITION records. Values
+        // are already materialized into props; the importer re-binds them to
+        // the restored Figma styles.
+        if (n.paintRef && styleDefs[n.paintRef]) record.fillStyleRef = n.paintRef;
+        if (n.strokeRef && styleDefs[n.strokeRef]) record.strokeStyleRef = n.strokeRef;
+        if (n.cornerRef && styleDefs[n.cornerRef]) record.effectStyleRef = n.cornerRef;
+        if (n.textStyleRef && styleDefs[n.textStyleRef]) record.textStyleRef = n.textStyleRef;
         records.push(record);
       }
       // Children of a GROUP whose nearest non-group ancestor is an auto-layout
@@ -5855,6 +6155,43 @@
       }
       mgApplyButtonInstanceTextCentering(records);
       mgApplyCardInstanceOverrides(records);
+      // Plugin-runtime option: strip instance-DESCENDANT records down to the
+      // fields the importer actually reads from them (positional override
+      // matching: visible/opacity/characters/fills/strokes) plus a minimal
+      // fallback skeleton. These records are never restored as nodes — the
+      // instance children come from component.createInstance() — but on huge
+      // full exports they are nearly all of the output (Tesla 0711-3: 219k of
+      // 221k records, 455MB of 458MB JSON) and OOM-crash the Figma tab. Only
+      // descendants of records that DO carry mainComponentId are slimmed, so
+      // share-export instances (no reachable master → frame-shell restore
+      // from these very records) keep full fidelity. The compare tool and
+      // pythonParser call without options and keep byte-identical output.
+      if (options && options.slimInstanceDescendants) {
+        const recordById = {};
+        for (const record of records) recordById[record.id] = record;
+        const slimIds = {};
+        for (const record of records) {
+          if (!record.mainComponentId) continue;
+          const stack = (record.childIds || []).slice();
+          while (stack.length) {
+            const cid = stack.pop();
+            if (slimIds[cid]) continue;
+            const child = recordById[cid];
+            if (!child) continue;
+            slimIds[cid] = true;
+            for (const gid of child.childIds || []) stack.push(gid);
+          }
+        }
+        let slimmedCount = 0;
+        for (const record of records) {
+          if (!slimIds[record.id]) continue;
+          record.props = mgSlimInstanceDescendantProps(record.props);
+          slimmedCount++;
+        }
+        if (slimmedCount > 0 && typeof console !== "undefined") {
+          console.info("[mg] slimInstanceDescendants:", slimmedCount, "/", records.length, "records");
+        }
+      }
       const encoder = new TextEncoder();
       const out = {};
       const recordsById = {};
@@ -5981,6 +6318,46 @@
         totalLayerCount += pg.count;
       }
 
+      // Library styles payload: values pulled from the registries keyed by
+      // the style id (fills → paint table, effects → effect registry, text →
+      // font-style table third spelling). The zip baseline has no styles
+      // concept, so this entry is additive — comparator/pythonParser ignore it.
+      const emittedStyles = [];
+      for (const sid in styleDefs) {
+        const def = styleDefs[sid];
+        if (def.category === "FILL" || def.category === "STROKE") {
+          const fills = paints[sid];
+          if (fills && fills.length) {
+            emittedStyles.push({ id: sid, styleType: "PAINT", name: def.name, paints: fills.map(mgCloneJsonValue) });
+          }
+        } else if (def.category === "EFFECT") {
+          const fx = effectTable[sid];
+          if (fx && fx.length) {
+            emittedStyles.push({ id: sid, styleType: "EFFECT", name: def.name, effects: fx.map(mgCloneJsonValue) });
+          }
+        } else if (def.category === "TEXT") {
+          const entry = fontStyles[sid];
+          if (entry) {
+            emittedStyles.push({
+              id: sid, styleType: "TEXT", name: def.name,
+              fontName: mgFontNameFromStyleEntry(entry) || { family: "Inter", style: "Regular" },
+              fontSize: (entry.fontSize !== null && entry.fontSize > 0) ? entry.fontSize : 12,
+              lineHeight: (entry.lineHeight !== null && entry.lineHeight > 0)
+                ? { value: entry.lineHeight, unit: "PIXELS" } : { unit: "AUTO" },
+              letterSpacing: mgLetterSpacingFromStyleEntry(entry, 1),
+              textCase: entry.textCase || "ORIGINAL",
+              textDecoration: entry.decoration || "NONE"
+            });
+          }
+        }
+      }
+      if (emittedStyles.length > 0) {
+        out["styles.json"] = encoder.encode(JSON.stringify({
+          schema: "mastergo2figma.styles.v1",
+          version: 1,
+          styles: emittedStyles
+        }));
+      }
       out["manifest.json"] = encoder.encode(JSON.stringify({
         schema: "mastergo2figma.package.v2",
         version: 2,

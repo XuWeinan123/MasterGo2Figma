@@ -63,11 +63,15 @@ Fields cracked with this fixture (all in `mgWalkScalarFields` / record grammar b
   04 <fontSize> 05 <lineHeight px>` (`mgScanFontStyles`; PostScript name splits into
   family/style, style camel-case → spaced);
 - **effect registry** via node tag `17` (`mgScanEffects`): child records
-  `05 <kind: 1=DROP_SHADOW 2=LAYER_BLUR> 08 <argb> 09 <radius> 0a <offset.x> 0b <offset.y>
-  0c <spread> 0d/0e <flags>` (floats zero-compressed; omitted offset = 0). Tag 17 doubles as the
+  `05 <kind> 08 <argb> 09 <radius> 0a <offset.x> 0b <offset.y> 0c <spread> 0d/0e <flags>
+  0f <spread>` (floats zero-compressed; omitted offset = 0). Kind enum (0712-3):
+  **0=INNER_SHADOW (zero-compressed → the whole `05` field is OMITTED), 1=DROP_SHADOW,
+  2=LAYER_BLUR, 3=BACKGROUND_BLUR**; `0f` is a second spread spelling (spread 1/−2/−4 all
+  use it — an unknown-tag bail there used to drop whole effect lists). Tag 17 doubles as the
   legacy corner-style ref in full exports — only treat as corner when it resolves to no effects;
 - paint records: `09 <f>` = paint **opacity**; gradients may omit the handle fields
-  (default = vertical top→bottom); image scaleMode enum corrected to `2=TILE 3=CROP`;
+  (default = vertical top→bottom); image scaleMode enum `2=TILE 3=CROP` plus **4=TILE**
+  (0712-3 round-trip form); image object field `02` = ratio/scalingFactor;
 - geometry-blob region loops: ONE int array with `-1` (ff ff ff ff 0f) separating loops.
 
 ## Full-editor "explicit zero" export form — CRACKED ✓ (2026-07-11, 0711-3 Tesla fixture)
@@ -240,6 +244,19 @@ exports use slash-composed override records instead):
   scale). The converter emits it as `record.instanceScale` when ≠1; sizes of container stubs
   inside such instances are template-units × this factor unless the stub's own size already
   equals template×scale (final-copy rule).
+- **Fourth instance form — FULLY MATERIALIZED (2026-07-12, Tesla Page 1)**: editor-original
+  full exports store every instance child as a complete TYPED bare-id record tree hanging off
+  the instance (0:112 about → raw 0:113 Light, templateRef=0:48, override state baked in).
+  The 0712-2 baseline proves those bare ids ARE the API canvas ids (component-inner dragme
+  emits `0:77 Union`, not a slash stub). Rule: an instance whose childIds contain a TYPED
+  bare child skips template expansion entirely — the raw subtree is emitted as-is. Expanding
+  it anyway doubles every instance subtree (11,480 of 11,482 Tesla instances were doubled;
+  the doubled counts also tripped the importer's positional-override count gate, silently
+  killing every visibility/paint override). Sparse TYPELESS bare children (0712-2 mirrors)
+  do NOT trigger the skip — those instances still expand and mirrors feed the stubs.
+- Importer: page roots restore in TOPOLOGICAL order of mainComponentId dependencies
+  (components nest instances of other components — restoring a dependent first bakes a
+  frame-shell fallback into the component that every instance then clones).
 
 ### Import-side replay (Figma plugin, not a package field)
 - Figma instance children are geometry-locked to the component (`set_y` → "This property
@@ -379,13 +396,28 @@ Sub-field stream after `1c 07` (ascending ids):
     records omit `0a` and the baseline says 10 (269 nodes); 0710-1's absent-`0a` nodes are all
     template/instance children and the baseline says 0 — both fall out of the same
     `paddingsMissing` funnel. Before 2026-07-10 the absent case wrote nothing (restored as 0).
-  - **`0d <b>` / `0e <b>` = primary/counterAxisAlignItems** (2=CENTER; omitted=MIN);
+  - **`0d <b>` / `0e <b>` = primary/counterAxisAlignItems** (1=MAX [0712-3], 2=CENTER, 3=MAX, 4=SPACE_BETWEEN; omitted=MIN);
   - `14 …` component property / override definition table (not walked);
   - `17 <b>` container kind enum near the end: `01` observed only on SECTION.
 Boolean/group records also carry `09`/`0a` after their `01`/`02` flags — same rules apply
 (inert on import for groups, but kept for v2 parity).
 Name-based type heuristics remain only as fallback when no `1c 07`
 object is decodable, plus the narrow SECTION name fallback.
+
+## Library styles — CRACKED ✓ (2026-07-12, 0712-3 round-trip specimen)
+Style DEFINITIONS are named records whose 02 slot holds the display name with a UTF-8
+category prefix (no 04 field): `01 <id> 00 02 文字/Heading/H1 00 03 <code> 00 05 <payload>`.
+Prefixes: `文字/` = text, `填充/` = fill, `特效/` = effect (NOT 效果), `描边/` = stroke
+(unobserved). Values live in the id-keyed registries: fills in the paint table, effects in
+the effect registry, text params in the font-style table (third entry spelling). Node
+references point straight at the style id: fills/strokes via scalar tags 15/16, effects via
+tag 17, text via the run-level `03 <styleId>` field. The converter emits `styles.json`
+(schema mastergo2figma.styles.v1) plus record-level fillStyleRef/strokeStyleRef/
+effectStyleRef/textStyleRef (comparator-invisible like mainComponentId); the importer
+recreates them as local Figma styles and re-binds after applyProperties. Probe gotcha:
+TextDecoder("latin1") is actually windows-1252 — locating CJK prefixes needs byte-level
+matching, decoding names needs a UTF-8 pass over the raw byte range (w1252 keeps 1:1
+byte↔char offsets, so regex indexes stay valid).
 
 ## TEXT / ELLIPSE nested-object fields — CRACKED ✓
 - TEXT `1c 08`: leading field **`03 <b>` = textAutoResize** — `03 00` = WIDTH_AND_HEIGHT,
@@ -395,6 +427,12 @@ object is decodable, plus the narrow SECTION name fallback.
   (`-1` = clockwise full circle → −2π, omitted = +2π, `0.75` → 4.712…), field `02 <f>` =
   innerRadius (0.4 verified), field `03` (unobserved) presumed startingAngle fraction. Every
   ellipse gets arcData in v2.
+- **POLYGON (`1c 05`) / STAR (`1c 06`)** (0712-3): field `01` = pointCount as a **zigzag
+  varint** (3→06, 5→0a, 8→10; omitted = polygon 3 / star 5); STAR field `02 <f>` =
+  innerRadius (omitted = 0.5).
+- Font-style-entry decoration byte (`01 <b>` after the entry kind): 2 AND 4 =
+  STRIKETHROUGH (2 legacy, 4 on the 0712-3 round-trip form), other decorated values =
+  UNDERLINE.
 - Node-level `layoutPositioning=ABSOLUTE` is derived, not stored: children of a GROUP whose
   nearest non-group ancestor is an auto-layout frame (SLICE excluded).
 - TEXT `fontWeight` derives from the fontName style string (Semi Bold→600 map,
@@ -536,7 +574,7 @@ Entries (interleaved with compact non-font shells `05 <b> 00 00`):
 01 <id> 00 05 <kind=3> [01 <decoration: 1=UNDERLINE, 2=STRIKETHROUGH?>]
 03 <family> 00 [04 <fontSize>] [05 <lineHeight, -1 = AUTO>]
 [06 <lineHeight unit: 1=PIXELS>] [08 <letterSpacing value>]
-[0a <textCase: 1=UPPER 2=LOWER>] [0b <letterSpacing unit: 1=PIXELS>]
+[0a <textCase: 1=UPPER 2=LOWER 3=TITLE>] [0b <letterSpacing unit: 1=PIXELS>]
 [0c <PostScript name> 00] [0e <float, -1 = default; unknown>]
 [12 <style name "Bold"/"SemiBold"/…> 00] [13 …] 00
 ```
@@ -581,7 +619,16 @@ Explicit-zero sizes are respected during vector decode: a hairline VECTOR stores
 → embedded overlay (`mgApplyEmbeddedOverlay`) → instance expansion → per-page chunked v2 zip
 entries (`convertMgPackageToV2Entries`). Direct `.mg` conversion appends `_mg MMDD-HHmm` (one
 stamp per run) to every restored page name — an existing `_mg`/timestamp suffix is stripped
-first, so repeated imports stay distinguishable without stacking suffixes. `ui.html` is generated by `tools/build-ui.js`; the same
+first, so repeated imports stay distinguishable without stacking suffixes.
+`convertMgPackageToV2Entries(zipEntries, fileName, options?)` accepts
+`options.slimInstanceDescendants` (plugin UI only): descendants of records that carry
+`mainComponentId` are stripped to the override fields the importer reads (visible/opacity/
+characters/fills/strokes + slim layout/type skeleton). On the Tesla fixture that is 219k of
+221k records and cuts the converted package from 477MB to 167MB — without it the Figma tab
+OOM-crashes ("Something went wrong"). The compare tool and `pythonParser/mg_to_zip.py` call
+without options and keep byte-identical full-fidelity output, so comparator baselines are
+unaffected. Share-export instances (no reachable master → these records ARE the restore
+source) are never slimmed — the gate is the emitted `mainComponentId`, not the slash id. `ui.html` is generated by `tools/build-ui.js`; the same
 `mgPackage.js` is loaded at runtime by `pythonParser/mg_to_zip.py`.
 
 ## TODO (remaining gaps)
