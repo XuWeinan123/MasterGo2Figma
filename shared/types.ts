@@ -282,6 +282,13 @@ export type ImportLayerRecord = {
     name: string;
     childIds: string[];
     props: any;
+    // Record id of the component this record is an instance of (native .mg
+    // imports only). The importer re-links it via component.createInstance().
+    mainComponentId?: string;
+    // MasterGo instance uniform scale (trailer 26). Figma instance children
+    // are geometry-locked to the component, so the importer replays this via
+    // InstanceNode.rescale().
+    instanceScale?: number;
 };
 
 export type ImportManifestPage = {
@@ -308,6 +315,8 @@ export type ImportPageIndex = {
     rootNodeIds: string[];
     layerChunks: string[];
     layerCount: number;
+    // Page canvas color (native .mg imports only; the page record's `05` field).
+    background?: { r: number; g: number; b: number; a: number };
 };
 
 export type ImportManifest = {

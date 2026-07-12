@@ -490,6 +490,7 @@
           if (t === 0x01) { img.scaleMode = bytes[p++]; continue; } // 0=FILL 1=FIT 2=CROP 3=TILE
           if (t === 0x02) { img.ratio = zfloat(); continue; }
           if (t === 0x03) {
+            if (bytes[p] === 0x00) { p++; continue; } // explicit-empty path (0711-3)
             const c = mgReadCString(bytes, p, end);
             if (!c) return null;
             img.path = c.text;
@@ -515,6 +516,7 @@
       while (p < end) {
         const t = bytes[p++];
         if (t === 0x00) break;
+        if (t === 0x04) { p++; continue; } // leading flag, 0711-3 style-library paint children
         if (t === 0x05) { kind = bytes[p++]; continue; }
         if (t === 0x06) { visible = bytes[p++] !== 0x00; continue; }
         if (t === 0x07) { p++; continue; }
@@ -811,7 +813,12 @@
       const end = fb + scalEnd;
       while (p < end) {
         const t = bytes[p];
-        if (t === 0x05 || t === 0x07 || t === 0x08 || t === 0x09 || t === 0x0b || t === 0x0c || t === 0x0d ||
+        // 0x06 is a one-byte flag like its neighbors — first seen in the
+        // 0711-3 full editor export, which spells out explicit zeros
+        // (`05 00 06 00 07 01 …`); value census over that file is 0/1 only.
+        // Before it was known the walk broke here on 45k of 70k records,
+        // losing every field after it (paint/stroke refs, owner, constraints).
+        if (t === 0x05 || t === 0x06 || t === 0x07 || t === 0x08 || t === 0x09 || t === 0x0b || t === 0x0c || t === 0x0d ||
             t === 0x11 || t === 0x12 || t === 0x13) {
           if (p + 1 >= end) break;
           f.present[t] = true;
@@ -832,6 +839,9 @@
         }
         if (t === 0x14) {
           const count = bytes[p + 1];
+          // `14 00` = explicit empty dash pattern (0711-3 spells out empties);
+          // consume it so the fields after (paint refs, owner) stay reachable.
+          if (count === 0) { f.present[t] = true; p += 2; continue; }
           if (!(count >= 1 && count <= 8)) break;
           f.present[t] = true;
           const dash = [];
@@ -849,6 +859,9 @@
           continue;
         }
         if (t === 0x15 || t === 0x16 || t === 0x17 || t === 0x1a || t === 0x1b) {
+          // Explicit-empty reference (`1a 00`, 0711-3 spelling): consume the
+          // empty cstring and keep walking — an empty ref means "none".
+          if (bytes[p + 1] === 0x00) { f.present[t] = true; p += 2; continue; }
           const r = mgReadScalarCString(bytes, p + 1, end);
           if (!r) break;
           f.present[t] = true;
@@ -892,15 +905,13 @@
     //   2d <4×f>          per-side stroke weights
     // Text runs and floats can contain `1d 01`; candidates are validated by
     // parsing forward and requiring a clean 00-terminated field stream.
-    function mgParseTrailer(bytes, str, from, end) {
-      let idx = str.indexOf("\x1d\x01", from);
-      while (idx >= 0 && idx < end) {
+    function mgParseTrailer(bytes, str, from, end, anchoredStart) {
+      function walkTrailerFields(startPos) {
         const fields = { has21: false, has22: false, strokeCap: 0, sideWeights: null };
-        let p = idx + 2;
-        let ok = false;
+        let p = startPos;
         while (p < end) {
           const t = bytes[p];
-          if (t === 0x00) { ok = true; break; }
+          if (t === 0x00) return fields;
           if (t === 0x23 || t === 0x2a) {
             p++;
             while (p < end && bytes[p] !== 0x00) p++;
@@ -918,26 +929,24 @@
                 p += 2;
               }
             }
-            if (!valid) break;
+            if (!valid) return null;
             continue;
           }
           if (t === 0x2d) {
             p++;
             const w = [];
-            let valid = true;
             for (let i = 0; i < 4; i++) {
               const r = mgReadZeroFloat(bytes, p);
-              if (!isFinite(r.value) || Math.abs(r.value) > 1e5) { valid = false; break; }
+              if (!isFinite(r.value) || Math.abs(r.value) > 1e5) return null;
               w.push(r.value);
               p = r.next;
             }
-            if (!valid) break;
             fields.sideWeights = w;
             continue;
           }
           if (t === 0x26) { // instance scale factor (share exports), 0-compressed float
             const r = mgReadZeroFloat(bytes, p + 1);
-            if (!isFinite(r.value) || Math.abs(r.value) > 1e4) break;
+            if (!isFinite(r.value) || Math.abs(r.value) > 1e4) return null;
             fields.scaleFactor = r.value;
             p = r.next;
             continue;
@@ -949,9 +958,29 @@
             p += 2;
             continue;
           }
-          break;
+          return null;
         }
-        if (ok) return fields;
+        return null;
+      }
+      // Anchored spelling (0711-3 full exports): the trailer follows the `1c`
+      // object directly — after the object terminator and one record-level 00
+      // come either `1d 01 <fields>` or the ascending fields with NO `1d 01`
+      // introducer at all (`1e …` / `27 …`). With a known object end this is
+      // exact — no candidate scanning through float payloads.
+      if (anchoredStart != null) {
+        let p0 = anchoredStart;
+        if (bytes[p0] === 0x00) p0++;
+        let anchored = null;
+        if (bytes[p0] === 0x1d && bytes[p0 + 1] === 0x01) anchored = walkTrailerFields(p0 + 2);
+        else if (bytes[p0] >= 0x1e && bytes[p0] <= 0x3f) anchored = walkTrailerFields(p0);
+        if (anchored) return anchored;
+      }
+      // Legacy: scan for `1d 01` candidates and validate by forward-parsing to
+      // a clean terminator (floats/text runs can fake the introducer).
+      let idx = str.indexOf("\x1d\x01", from);
+      while (idx >= 0 && idx < end) {
+        const fields = walkTrailerFields(idx + 2);
+        if (fields) return fields;
         idx = str.indexOf("\x1d\x01", idx + 2);
       }
       return null;
@@ -989,17 +1018,31 @@
     function mgParseContainerMeta(bytes, off) {
       const meta = { subtype: "FRAME", booleanOperation: null };
       let p = off;
+      let sawStructural = false;
       if (bytes[p] === 0x01) {
+        // The `01` VALUE is the group discriminator: `01 00` = group-like
+        // (GROUP, or BOOLEAN_OPERATION when the `02 <kind>` field follows),
+        // `01 01` = FRAME family spelled with the flag (always followed by an
+        // explicit `03` clipsContent in 0711-3: 9897/9897; groups cannot clip
+        // and never write 03). Cross-tab over the 516 cover-verified
+        // containers has zero exceptions (144 GROUP + 135 BOOLEAN all `01
+        // 00`; the seven `01 01` containers are baseline FRAMEs). Page 1's
+        // top-level screens all use the `01 01` spelling — the old
+        // any-01-means-group rule turned every one of them into a GROUP.
+        const groupish = bytes[p + 1] === 0x00;
+        sawStructural = true;
         p += 2;
-        if (bytes[p] === 0x02 && bytes[p + 1] >= 1 && bytes[p + 1] <= 4) {
+        if (groupish && bytes[p] === 0x02 && bytes[p + 1] >= 1 && bytes[p + 1] <= 4) {
           meta.subtype = "BOOLEAN_OPERATION";
           meta.booleanOperation = MG_BOOL_OPS[bytes[p + 1] - 1];
           p += 2;
-        } else {
+        } else if (groupish) {
           meta.subtype = "GROUP";
+        } else {
+          meta.subtype = "FRAME";
         }
       }
-      if (bytes[p] === 0x03) { meta.clipsContent = bytes[p + 1] !== 0; p += 2; }
+      if (bytes[p] === 0x03) { meta.clipsContent = bytes[p + 1] !== 0; sawStructural = true; p += 2; }
       if (bytes[p] === 0x04 && bytes[p + 1] === 0x04) {
         p += 2;
         const corners = [];
@@ -1009,47 +1052,87 @@
           p = r.next;
         }
         meta.corners = corners;
+        sawStructural = true;
       }
-      if (bytes[p] === 0x05 && bytes[p + 1] === 0x01 && bytes[p + 2] === 0x07 && meta.subtype === "FRAME") {
-        meta.subtype = "COMPONENT";
-        p += 2;
+      if (bytes[p] === 0x05) {
+        if (bytes[p + 1] === 0x01 && meta.subtype === "FRAME") {
+          // `05 01` = COMPONENT. The key follows in field 07 — as a string in
+          // share/older exports (`05 01 07 <key>`), possibly EMPTY in the
+          // 0711-3 explicit-zero spelling (`05 01 06 00 07 00`, the Keyboard
+          // master). Census: all 95 `05 01` containers are components; every
+          // other container spells `05 00`.
+          meta.subtype = "COMPONENT";
+          sawStructural = true;
+          p += 2;
+        } else {
+          // 0711-3 full exports spell explicit zeros (`05 00`): plain flag.
+          p += 2;
+        }
+      }
+      // Container `06` is VALUE-semantic like field 01: `06 01` = INSTANCE,
+      // `06 00` = plain flag. Verified by block-bounded cross-tab against both
+      // baselined fixtures — 0711-3 cover slots: 06=1 ⟺ sourceType INSTANCE
+      // (224 with follower 09 + 12 with follower 0f, zero contradictions);
+      // 0712-1: the two root Keyboard instances are `06 01 09 …` (the earlier
+      // follower-whitelist rule misread them as FRAME, so their 412 template
+      // children were never expanded). After the flag, share exports carry the
+      // override ref (`0f <id>`) / override table (`15 …`) and stop; full
+      // exports continue with the instance's OWN layout fields (09/0a/…),
+      // which keep parsing below.
+      if (bytes[p] === 0x06) {
+        if (bytes[p + 1] === 0x01 && meta.subtype === "FRAME") {
+          meta.subtype = "INSTANCE";
+          p += 2;
+          if (bytes[p] === 0x0f) {
+            const c = mgReadCString(bytes, p + 1, Math.min(off + 256, p + 96));
+            if (c) meta.instanceRef = c.text;
+            return meta;
+          }
+          if (bytes[p] === 0x15) return meta; // override table (not walked yet)
+        } else {
+          p += 2;
+        }
       }
       if (bytes[p] === 0x07) {
-        if (meta.subtype === "FRAME") { meta.subtype = "COMPONENT_SET"; return meta; }
-        p++;
-        while (bytes[p] !== 0x00 && p < off + 256) p++;
-        p++;
-      }
-      // Share/partial exports append `04 <varint>` (version stamp?) and a
-      // `05 <b> 00` sub-object after the component key; skip both so the
-      // auto-layout fields that follow stay reachable.
-      if (meta.subtype === "COMPONENT" && bytes[p] === 0x04 && bytes[p + 1] !== 0x04) {
-        p++;
-        while ((bytes[p] & 0x80) !== 0 && p < off + 256) p++;
-        p++;
-        if (bytes[p] === 0x05) {
+        if (meta.subtype === "COMPONENT") {
+          p++;
+          while (bytes[p] !== 0x00 && p < off + 256) p++;
+          p++;
+          // Share/partial exports append `04 <varint>` (version stamp?) and a
+          // `05 <b> 00` sub-object after the component key; skip both so the
+          // auto-layout fields that follow stay reachable.
+          if (bytes[p] === 0x04 && bytes[p + 1] !== 0x04) {
+            p++;
+            while ((bytes[p] & 0x80) !== 0 && p < off + 256) p++;
+            p++;
+            if (bytes[p] === 0x05) {
+              p += 2;
+              if (bytes[p] === 0x00 && (bytes[p + 1] === 0x08 || bytes[p + 1] === 0x09 || bytes[p + 1] === 0x0a || bytes[p + 1] === 0x0d || bytes[p + 1] === 0x17)) p++;
+            }
+          }
+        } else if (bytes[p + 1] !== 0x00) {
+          // A non-zero field 07 = COMPONENT_SET (payload is a key string in
+          // share exports, a `04 <varint>` stamp object in full exports).
+          // `07 00` is the 0711-3 explicit-zero flag spelling.
+          if (meta.subtype === "FRAME") { meta.subtype = "COMPONENT_SET"; return meta; }
+          p++;
+          while (bytes[p] !== 0x00 && p < off + 256) p++;
+          p++;
+        } else {
           p += 2;
-          if (bytes[p] === 0x00 && (bytes[p + 1] === 0x08 || bytes[p + 1] === 0x09 || bytes[p + 1] === 0x0a || bytes[p + 1] === 0x0d || bytes[p + 1] === 0x17)) p++;
         }
-      }
-      if (bytes[p] === 0x06 && meta.subtype === "FRAME") {
-        meta.subtype = "INSTANCE";
-        p += 2;
-        // Share exports: `0f <template-child id>` names the component-tree node
-        // this record overrides.
-        if (bytes[p] === 0x0f) {
-          const c = mgReadCString(bytes, p + 1, Math.min(off + 256, p + 96));
-          if (c) meta.instanceRef = c.text;
-        }
-        return meta;
       }
       if (bytes[p] === 0x08 && (bytes[p + 1] === 1 || bytes[p + 1] === 2)) {
         meta.layoutMode = bytes[p + 1] === 1 ? "HORIZONTAL" : "VERTICAL";
+        sawStructural = true;
         p += 2;
+      } else if (bytes[p] === 0x08 && bytes[p + 1] === 0x00) {
+        p += 2; // explicit layoutMode NONE
       }
       if (bytes[p] === 0x09) {
         const r = mgReadZeroFloat(bytes, p + 1);
         meta.itemSpacing = r.value;
+        sawStructural = true;
         p = r.next;
       } else {
         // Full editor exports omit the field when the runtime default (10)
@@ -1073,7 +1156,7 @@
         // Same default rule: an empty padding object means "all 10" in full
         // editor exports, "all 0" in share exports.
         if (padCount === 0) meta.paddingsMissing = true;
-        else meta.paddings = { top: pads[1] || 0, right: pads[2] || 0, bottom: pads[3] || 0, left: pads[4] || 0 };
+        else { meta.paddings = { top: pads[1] || 0, right: pads[2] || 0, bottom: pads[3] || 0, left: pads[4] || 0 }; sawStructural = true; }
       } else {
         // A wholly absent 0a object follows the same omitted-field default as
         // the empty one (mirror of the 09/itemSpacing rule above). Verified on
@@ -1083,9 +1166,27 @@
         // missingDefault stays 0.
         meta.paddingsMissing = true;
       }
-      if (bytes[p] === 0x0d) { meta.primaryAlign = MG_ALIGN_ITEMS[bytes[p + 1]] || "MIN"; p += 2; }
-      if (bytes[p] === 0x0e) { meta.counterAlign = MG_ALIGN_ITEMS[bytes[p + 1]] || "MIN"; p += 2; }
-      if (bytes[p] === 0x17 && bytes[p + 1] === 0x01 && meta.subtype === "FRAME") meta.subtype = "SECTION";
+      // 0711-3 trailing container fields: `0b <b>` / `0c <b>` unknown flags,
+      // `0f <cstring>` node ref (empty on instance-child stubs), `10 <b>`
+      // unknown. Consume them so 0d/0e/17 stay reachable and the object's end
+      // offset is known (the record trailer anchors there).
+      if (bytes[p] === 0x0b) p += 2;
+      if (bytes[p] === 0x0c) p += 2;
+      if (bytes[p] === 0x0d) { meta.primaryAlign = MG_ALIGN_ITEMS[bytes[p + 1]] || "MIN"; sawStructural = true; p += 2; }
+      if (bytes[p] === 0x0e) { meta.counterAlign = MG_ALIGN_ITEMS[bytes[p + 1]] || "MIN"; sawStructural = true; p += 2; }
+      if (bytes[p] === 0x0f) {
+        const c = mgReadCString(bytes, p + 1, Math.min(off + 320, p + 96));
+        if (c) { meta.sourceRef = c.text || null; p = c.end + 1; }
+        else p += 2;
+      }
+      if (bytes[p] === 0x10) p += 2;
+      if (bytes[p] === 0x17) {
+        if (bytes[p + 1] === 0x01 && meta.subtype === "FRAME") meta.subtype = "SECTION";
+        sawStructural = true;
+        p += 2;
+      }
+      if (bytes[p] === 0x00) meta.endOffset = p + 1;
+      meta.bareStub = !sawStructural;
       return meta;
     }
 
@@ -1282,7 +1383,10 @@
     function mgScanFontStyles(bytes, str) {
       const styles = {};
       const ID = "[0-9]+:[0-9A-Za-z]+(?:\\/[0-9]+:[0-9A-Za-z]+)*";
-      const re = new RegExp("\\x01(" + ID + ")\\x00\\x05[\\x01-\\x07]", "g");
+      // Two entry spellings: the compact one (`01 <id> 00 05 <kind>`) and the
+      // 0711-3 style-library one with explicit-empty parent/sort/04 fields
+      // (`01 <id> 00 02 00 03 00 04 00 05 <kind>`).
+      const re = new RegExp("\\x01(" + ID + ")\\x00(?:\\x02\\x00\\x03\\x00\\x04\\x00)?\\x05[\\x01-\\x07]", "g");
       let m;
       while ((m = re.exec(str))) {
         let p = m.index + m[0].length;
@@ -1294,6 +1398,12 @@
         if (bytes[p] === 0x01) {
           entry.decoration = bytes[p + 1] === 2 ? "STRIKETHROUGH" : "UNDERLINE";
           p += 2;
+        }
+        // 0711-3 entries carry a `02 <varint>` stamp before the family field.
+        if (bytes[p] === 0x02) {
+          const r = mgReadVarint(bytes, p + 1);
+          if (!isFinite(r.value)) continue;
+          p = r.next;
         }
         if (bytes[p] !== 0x03) continue; // not a font entry
         let q = p + 1;
@@ -1332,7 +1442,15 @@
             p = c.end + 1;
             continue;
           }
+          if (tag === 0x07) { p += 2; continue; } // 0711-3 one-byte flag
           if (tag === 0x0e) { const r = mgReadZeroFloat(bytes, p + 1); p = r.next; continue; }
+          if (tag === 0x0f) { // font-file hash: marks a per-node COMPUTED entry
+            const c = mgReadCString(bytes, p + 1, Math.min(bytes.length, p + 40));
+            if (!c || !/^[0-9A-F]{16,32}$/i.test(c.text)) break;
+            entry.fontFileHash = c.text;
+            p = c.end + 1;
+            continue;
+          }
           break;
         }
         if (styles[m[1]] === undefined) styles[m[1]] = entry;
@@ -1377,6 +1495,28 @@
 
     const MG_TEXT_ALIGN_H = { 1: "RIGHT", 2: "CENTER", 3: "JUSTIFIED" };
     const MG_TEXT_ALIGN_V = { 1: "CENTER", 2: "BOTTOM" };
+
+    // Non-canvas registry-residue records (0711-2 fixture, ids allocated at the
+    // top of the file's id space): the body right after `03 <sortCode> 00` is
+    //   07 <b> 08 <node-id> 00 0b { 01 <varint 300> 02 … } 0d { 01 13 } 00
+    // i.e. tag 08 carries an ID STRING where a node record stores the one-byte
+    // constrainProportions flag, and the record has no name (04), no owner
+    // (1b), no type object (1c) and no trailer (1d 01). Exactly one sits at
+    // sortCode a0 under its parent (instance/template children), referencing a
+    // component-template node; none exist in any SendToFigma baseline. They
+    // must be skipped BEFORE node assembly: emitted stubs shift sibling
+    // indexes, template expansion clones them into instances
+    // (2:09860/2:30074), and the weak type-tag fallback can misread unrelated
+    // bytes after the record's ~40-byte body as a node type (2:30073 swallowed
+    // the font-table region and decoded as LINE).
+    const MG_RESIDUE_REF_RE = /^[0-9]+:[0-9A-Za-z]+(?:\/[0-9]+:[0-9A-Za-z]+)*$/;
+    function mgIsRegistryResidueRecord(bytes, str, fb, end) {
+      if (bytes[fb] !== 0x07 || (bytes[fb + 1] !== 0x00 && bytes[fb + 1] !== 0x01)) return false;
+      if (bytes[fb + 2] !== 0x08) return false;
+      const refEnd = str.indexOf("\x00", fb + 3);
+      if (refEnd < 0 || refEnd >= end || bytes[refEnd + 1] !== 0x0b) return false;
+      return MG_RESIDUE_REF_RE.test(str.slice(fb + 3, refEnd));
+    }
 
     function mgDecodeNativeNodes(bytes) {
       const str = new TextDecoder("latin1").decode(bytes);
@@ -1432,6 +1572,9 @@
         // contain later token/prototype JSON, so do not skip on any JSON-looking
         // text elsewhere in the block.
         if (full.indexOf("\x04[PROPS]") === 0 && full.indexOf("[{\"") >= 0) continue;
+        // Registry residue is not a canvas node — drop it before assembly so
+        // child lists, sibling indexes and template expansion never see it.
+        if (mgIsRegistryResidueRecord(bytes, str, fb, end)) continue;
         const jt = mgFindTypeTagPos(full, bytes, fb);
         const scalEnd = jt >= 0 ? jt : Math.min(120, full.length);
         const typeByte = jt >= 0 ? bytes[fb + jt + 1] : 0;
@@ -1463,7 +1606,9 @@
         const w = scalar.present[0x0e] ? scalar.width : fallbackW;
         const h = scalar.present[0x0f] ? scalar.height : fallbackH;
         const x = transform.x, y = transform.y;
-        const trailer = jt >= 0 ? mgParseTrailer(bytes, str, fb + jt, end) : null;
+        const trailer = jt >= 0
+          ? mgParseTrailer(bytes, str, fb + jt, end, containerMeta && containerMeta.endOffset ? containerMeta.endOffset : null)
+          : null;
         // TEXT object leading fields: 01 = textAlignHorizontal, 02 =
         // textAlignVertical, 03 = textAutoResize (0=WIDTH_AND_HEIGHT 1=HEIGHT;
         // omitted = NONE for full records / inherit for shallow overrides).
@@ -1521,6 +1666,12 @@
           hasExplicitY: !!(scalar.transform && scalar.transform.sawY),
           hasExplicitMatrix: !!(scalar.transform && scalar.transform.sawMatrix),
           overrideMask19: scalar.overrideMask,
+          // Scalar 05 on TEXT records = manual-name lock (autoRename off):
+          // 1 = keep the 04 layer name, 0/absent = the name follows the
+          // characters. Cross-tabbed over three fixtures with zero violations
+          // (05=1 → baseline name is NEVER the characters; 05=0/absent →
+          // never the record name).
+          nameLocked: scalar.t05,
           constrainProportions: scalar.t08 === 1,
           isMask: scalar.t09 === 1,
           visibleByte: scalar.t07,
@@ -1974,7 +2125,22 @@
       // Effective instance scale: size-like scalars in an instance subtree are
       // the template values times this factor (trailer tag 26).
       const scale = n.effScale || (n.trailer && n.trailer.scaleFactor) || 1;
-      let geomVn = (t === "VECTOR" && n.geomHash && geoms) ? geoms[n.geomHash] : null;
+      // Pen-edited ellipses keep their ELLIPSE type but carry a geometry hash
+      // and export a vectorNetwork (0712-2 "Ellipse 10" mirrors). A mirror's
+      // own hash may reference a blob that was never copied into the file —
+      // fall back to the template chain's blob (0712-2: 6 mirrors).
+      let vnHash = n.geomHash;
+      if (vnHash && geoms && !geoms[vnHash]) {
+        const altSources = [
+          n.mirrorNode && nodes[n.mirrorNode],
+          n.templateRef && nodes[n.templateRef],
+          n.templateNode && nodes[n.templateNode]
+        ];
+        for (const src of altSources) {
+          if (src && src.geomHash && geoms[src.geomHash]) { vnHash = src.geomHash; break; }
+        }
+      }
+      let geomVn = ((t === "VECTOR" || (t === "ELLIPSE" && vnHash)) && vnHash && geoms) ? geoms[vnHash] : null;
       if (geomVn) {
         // Instance vectors scale by their actual-vs-template size ratio
         // (compound across nested instances), falling back to the scale factor.
@@ -2023,14 +2189,19 @@
       // effect registry; only treat it as the legacy corner-style ref when it
       // does NOT resolve to effects.
       const refEffects = (effectTable && n.cornerRef && effectTable[n.cornerRef]) || null;
-      const cornerRadius = ((meta && meta.corners) ? 0 : (n.cornerRadius || (n.cornerRef && !refEffects && !mgShareModeActive ? 10 : 0))) * scale;
+      // A corner radius read from the node's OWN record is final (0711-3 stub
+      // rectangles store the scaled 5.04, template stores 6); only template-
+      // inherited/default corners still need the instance scale.
+      const cornerOwnFinal = ownFinal && n.cornerRadius && !n.cornerRadiusInherited;
+      const cornerRadius = ((meta && meta.corners) ? 0 : (n.cornerRadius || (n.cornerRef && !refEffects && !mgShareModeActive ? 10 : 0))) * (cornerOwnFinal ? 1 : scale);
       const trailer = n.trailer || {};
       const inheritedTrailer = n.inheritedTrailer || {};
+      const sideBase = n.tplSideWeightBase !== undefined ? n.tplSideWeightBase * scale : strokeWeight;
       const sideWeights = trailer.sideWeights
         ? (ownFinal ? trailer.sideWeights.slice() : trailer.sideWeights.map(v => v * scale))
         : (inheritedTrailer.sideWeights
           ? inheritedTrailer.sideWeights.map(v => v * scale)
-          : [strokeWeight, strokeWeight, strokeWeight, strokeWeight]);
+          : [sideBase, sideBase, sideBase, sideBase]);
       const props = {
         type: types.type, sourceType: types.sourceType, restoreType: types.restoreType, id: n.id, name: n.name || n.id,
         parentID: (nodes[n.parent] ? n.parent : null),
@@ -2091,8 +2262,12 @@
           props.textCase = style.textCase || "ORIGINAL";
           if (style.decoration) props.textDecoration = style.decoration;
           props.letterSpacing = mgLetterSpacingFromStyleEntry(style, styleScale);
-          // lineHeight -1 is MasterGo's AUTO sentinel, not a pixel value.
-          props.lineHeight = (style.lineHeight !== null && style.lineHeight > 0)
+          // lineHeight -1 is MasterGo's AUTO sentinel, not a pixel value. A
+          // per-node COMPUTED entry (0711-3, marked by the font-file hash)
+          // stores the RESOLVED line box even for AUTO text; there the `06 01`
+          // PIXELS flag is the only trustworthy unit signal.
+          const computedEntry = !mgShareModeActive && !!style.fontFileHash;
+          props.lineHeight = (style.lineHeight !== null && style.lineHeight > 0 && (!computedEntry || style.lineHeightPx))
             ? { value: style.lineHeight * styleScale, unit: "PIXELS" }
             : { unit: "AUTO" };
         } else {
@@ -2141,6 +2316,13 @@
         } else if (types.type === "GROUP") {
           props.clipsContent = false;
         } else if (types.sourceType === "INSTANCE") {
+          // Instances inherit clipsContent from their component (merged via
+          // inheritedMeta; explicit `03 00` on the component root is what made
+          // 0711-3's 53 covers false); default true when neither wrote field
+          // 03. Known residual: stubs whose component was never copied into
+          // the file AND whose slot lacks 03 have no package-side signal
+          // (0712-2: 6 rows) — a component-missing→false rule was tried and
+          // flipped 46 healthy instances, so the default stays true.
           props.clipsContent = meta.clipsContent === undefined ? true : meta.clipsContent;
         } else if (frameFamily) {
           props.clipsContent = meta.clipsContent === undefined ? true : meta.clipsContent;
@@ -2169,9 +2351,13 @@
           props.layout.primaryAxisSizingMode = "FIXED";
           props.layout.counterAxisSizingMode = "FIXED";
         } else if (types.sourceType === "INSTANCE") {
-          if (n.inheritedTrailer) {
-            props.layout.primaryAxisSizingMode = inheritedTrailer.has21 ? "FIXED" : "AUTO";
-            props.layout.counterAxisSizingMode = inheritedTrailer.has22 ? "FIXED" : "AUTO";
+          // Instances inherit sizing from their component; when the component
+          // record is absent from the file (0712-2 nested instances), the
+          // instance's OWN trailer carries the same 21/22 semantics.
+          const instTrailer = n.inheritedTrailer ? inheritedTrailer : (n.trailer ? trailer : null);
+          if (instTrailer) {
+            props.layout.primaryAxisSizingMode = instTrailer.has21 ? "FIXED" : "AUTO";
+            props.layout.counterAxisSizingMode = instTrailer.has22 ? "FIXED" : "AUTO";
           }
         } else if (n.trailer) {
           props.layout.primaryAxisSizingMode = trailer.has21 ? "FIXED" : "AUTO";
@@ -2767,8 +2953,12 @@
 
     function mgResolveInstanceVisibility(ownVisibleByte, overrideMask19, slotVisibleByte, isRawRecord) {
       if (ownVisibleByte !== undefined) return ownVisibleByte;
+      // Share-export shallow records default to visible when the 0x04 mask
+      // bit is set or the mask is absent. 0711-3 full-export stubs carry no
+      // mask at all; they inherit the template child's visibility (27 hidden
+      // template children were resurrected by the old always-visible rule).
       const shallowVisibleDefault = isRawRecord &&
-        (overrideMask19 === undefined || (overrideMask19 & 0x04) !== 0);
+        (overrideMask19 !== undefined ? (overrideMask19 & 0x04) !== 0 : mgShareModeActive);
       if (shallowVisibleDefault) return 1;
       return slotVisibleByte;
     }
@@ -2826,7 +3016,107 @@
     // component subtree; shallow override records that already exist keep their
     // own geometry, synthesized ones are constraint-scaled. Nested instances
     // re-queue with the accumulated path.
+    // Attach each full-export stub to its override MIRROR record, independent
+    // of template expansion (the referenced component may not even be present
+    // in the file — 0712-2's nav-row component 0:761 was never copied in; the
+    // mirror tree under the slot is the only template-side data). Stub ids
+    // flatten intermediate non-instance containers, so mirrors are resolved
+    // per path segment against the TRANSITIVE mirror set of the current scope
+    // (slot or parent mirror), keyed by the mirrored template id.
+    function mgAttachOverrideMirrors(nodes) {
+      if (mgShareModeActive) return;
+      const byParent = {};
+      for (const id of Object.keys(nodes)) {
+        const n = nodes[id];
+        if (!n || !n.templateRef || id.indexOf("/") >= 0 || n.parent == null) continue;
+        (byParent[n.parent] = byParent[n.parent] || []).push(n);
+      }
+      const flatCache = {};
+      function flatten(scopeId) {
+        if (flatCache[scopeId]) return flatCache[scopeId];
+        const flat = {};
+        const stack = [scopeId];
+        let guard = 0;
+        while (stack.length && guard++ < 4096) {
+          const pid = stack.pop();
+          for (const m of byParent[pid] || []) {
+            if (flat[m.templateRef] === undefined) flat[m.templateRef] = m;
+            stack.push(m.id);
+          }
+        }
+        flatCache[scopeId] = flat;
+        return flat;
+      }
+      for (const id of Object.keys(nodes)) {
+        const n = nodes[id];
+        if (!n || !n.isRawRecord || n.mirrorNode || id.indexOf("/") < 0) continue;
+        const segs = id.split("/");
+        if (segs.length < 3) continue; // direct instance children have no mirror layer
+        let scope = segs[1];
+        let mirror = null;
+        for (let i = 2; i < segs.length; i++) {
+          // A mirror's templateRef points at the SLOT for plain children but
+          // at the slot's COMPONENT for nested-instance slots (0712-2 icon
+          // mirrors carry tpl 0:795, the right-turn component, not the slot
+          // 0:59042) — try both keys.
+          const flat = flatten(scope);
+          const seg = segs[i];
+          const segNode = nodes[seg];
+          const m = flat[seg] || (segNode && segNode.templateRef ? flat[segNode.templateRef] : null);
+          if (!m) { mirror = null; break; }
+          mirror = m;
+          scope = m.id;
+        }
+        if (mirror) n.mirrorNode = mirror.id;
+      }
+    }
+
+    // Instance-child layers NEVER own their layer name or base box: both
+    // follow the main component's child (MasterGo, like Figma, forbids
+    // renaming inside instances; the API reports the component child's name
+    // and base geometry even when characters are overridden). Sync bare-id
+    // MIRROR records (on-canvas instance children) to their templateRef
+    // target AFTER auto-naming settles the component-side names — 0712-2:
+    // mirror chars "Highway 400" keeps, but name/w/h come from the component
+    // text "Exit 87" (48 name + 71 size rows).
+    function mgSyncMirrorIdentity(nodes) {
+      if (mgShareModeActive) return;
+      for (const id of Object.keys(nodes)) {
+        const n = nodes[id];
+        if (!n || !n.isRawRecord) continue;
+        // On-canvas mirror records (bare id, parent is an instance/mirror):
+        // name follows the templateRef target. Instance-child STUBS (slash
+        // id): name follows the path-segment slot. Sizes are NOT synced —
+        // hug boxes are live text metrics with no package-side truth.
+        let tgt = null;
+        if (id.indexOf("/") >= 0) {
+          const lastSeg = id.slice(id.lastIndexOf("/") + 1);
+          tgt = lastSeg !== id ? nodes[lastSeg] : null;
+        } else if (n.templateRef && n.parent != null) {
+          const parent = nodes[n.parent];
+          const parentIsInstanceLike = parent &&
+            ((parent.containerMeta && parent.containerMeta.subtype === "INSTANCE") || !!parent.templateRef);
+          if (parentIsInstanceLike) tgt = nodes[n.templateRef];
+        }
+        if (tgt && tgt !== n && tgt.name != null) n.name = tgt.name;
+      }
+    }
+
     function mgExpandTemplateInstances(nodes, childIds) {
+      // Full exports mirror nested-instance overrides as BARE-id record trees
+      // under the instance's template slot: mirror.parent = the slot (or the
+      // parent mirror), mirror.templateRef = the mirrored component child
+      // (0712-2: nav row slot 0:58430 carries mirrors 0:58431… for component
+      // 0:761's children 0:59022…). Index them once; share exports keep the
+      // slash-composed override-record convention instead.
+      const bareOverrideByParent = {};
+      if (!mgShareModeActive) {
+        for (const id of Object.keys(nodes)) {
+          const n = nodes[id];
+          if (!n || !n.templateRef || id.indexOf("/") >= 0 || n.parent == null) continue;
+          (bareOverrideByParent[n.parent] = bareOverrideByParent[n.parent] || {})[n.templateRef] = n;
+        }
+      }
       const queue = [];
       for (const id of Object.keys(nodes)) {
         const n = nodes[id];
@@ -2842,7 +3132,33 @@
         if (expanded[instId] || instId.split("/").length > 8) continue;
         expanded[instId] = true;
         const inst = nodes[instId];
-        const comp = nodes[inst.templateRef];
+        let comp = nodes[inst.templateRef || inst.templateNode];
+        // A nested-instance STUB's tag 1a points at its template SLOT, not at
+        // the component; hop through the slot so the walk descends the real
+        // component subtree (the slot's own childIds hold override mirrors,
+        // not template children). The slot doubles as the mirror-tree root.
+        // The component's OWN record can be absent from the file (0712-2: nav
+        // row's 0:761 was never copied into the document) while its subtree
+        // records survive as an orphan tree — walk it through a virtual root
+        // whose geometry comes from the slot (= the component's natural size).
+        let jobSlotId = job.slotId || null;
+        let virtualComp = null;
+        if (!mgShareModeActive && comp && comp.containerMeta &&
+            comp.containerMeta.subtype === "INSTANCE" && comp.templateRef) {
+          // Deep override chains hang off the parent MIRROR record, not off
+          // the template slot — keep a mirror id passed by the parent job and
+          // only fall back to the slot itself.
+          if (!jobSlotId) jobSlotId = comp.id;
+          const realComp = nodes[comp.templateRef];
+          if (realComp) {
+            comp = realComp;
+          } else if ((childIds[comp.templateRef] || []).length > 0) {
+            virtualComp = { id: comp.templateRef, w: comp.w, h: comp.h, virtual: true };
+            comp = virtualComp;
+          } else {
+            comp = null;
+          }
+        }
         if (!comp) continue;
         // instance scale factor (trailer tag 26) applies to every size-like
         // scalar in the subtree: stroke weights, corners, font sizes, vector
@@ -2854,10 +3170,10 @@
         // tplPath tracks the template-side path: component trees carry their
         // own nested-instance override records (e.g. `2:0748/2:0018`), which
         // take precedence over the raw template child as the clone source.
-        const walk = [{ tplId: comp.id, cloneId: instId, tplPath: job.tplSide }];
+        const walk = [{ tplId: comp.id, cloneId: instId, tplPath: job.tplSide, ovId: jobSlotId, tplNodeOverride: virtualComp }];
         while (walk.length) {
           const cur = walk.shift();
-          const tplNode = nodes[cur.tplId];
+          const tplNode = cur.tplNodeOverride || nodes[cur.tplId];
           const cloneNode = nodes[cur.cloneId];
           if (!tplNode || !cloneNode) continue;
           const tplChildren = (childIds[cur.tplId] || []);
@@ -2867,6 +3183,16 @@
             const lastSegId = childTplId.indexOf("/") >= 0 ? childTplId.slice(childTplId.lastIndexOf("/") + 1) : childTplId;
             const overrideKey = cur.tplPath + "/" + lastSegId;
             if (overrideKey !== childTplId && nodes[overrideKey]) t = nodes[overrideKey];
+            // Full-export bare override mirror: the record whose parent is the
+            // current mirror (or the job's slot) and whose templateRef is this
+            // template child overrides it, exactly like the share overrideKey.
+            let bareOv = null;
+            if (cur.ovId && bareOverrideByParent[cur.ovId]) {
+              const ovTable = bareOverrideByParent[cur.ovId];
+              const tplTarget = nodes[childTplId] && nodes[childTplId].templateRef;
+              bareOv = ovTable[childTplId] || (tplTarget ? ovTable[tplTarget] : null) || null;
+              if (bareOv) t = bareOv;
+            }
             const cloneId = instId + "/" + lastSegId;
             let child = nodes[cloneId];
             if (!child) {
@@ -2879,12 +3205,39 @@
               child.templateNode = childTplId;
               if (child.parent == null || child.parent === child.owner) child.parent = cur.cloneId;
             }
+            // Remember the override MIRROR so inheritance passes THROUGH it:
+            // raw stubs inherit stub → mirror → component child (the mirror
+            // holds the per-instance overrides: opacity 0.4, hidden, recolor,
+            // explicit-zero paddings — 0712-2 nav rows).
+            if (bareOv) child.mirrorNode = bareOv.id;
             child.effScale = (child.trailer && child.trailer.scaleFactor) || inst.effScale;
-            if (child.templateRef && nodes[child.templateRef] &&
-                child.containerMeta && child.containerMeta.subtype === "INSTANCE") {
-              queue.push({ instId: cloneId, tplSide: lastSegId });
+            // Nested-instance decision must consult the TEMPLATE child too: a
+            // raw stub for a nested instance carries only a bare `0f` container
+            // (subtype FRAME), and walking it would descend into the slot's
+            // override MIRRORS as if they were template children (0712-2: the
+            // resized "directions" emitted 288 bogus `8:04694/0:584xx` clones).
+            const tplChild = nodes[childTplId];
+            const tplChildIsInstance = !mgShareModeActive && tplChild &&
+              tplChild.containerMeta && tplChild.containerMeta.subtype === "INSTANCE" &&
+              !!tplChild.templateRef;
+            if ((child.templateRef && nodes[child.templateRef] &&
+                child.containerMeta && child.containerMeta.subtype === "INSTANCE") || tplChildIsInstance) {
+              // Prefer the MIRROR record as the child job's override root:
+              // deeper mirrors are parented under it, not under the template
+              // slot (0712-2: left turn's opacity/fills overrides live in the
+              // waypoints mirror's subtree).
+              queue.push({
+                instId: cloneId,
+                tplSide: lastSegId,
+                slotId: !mgShareModeActive ? (bareOv ? bareOv.id : childTplId) : undefined
+              });
             } else {
-              walk.push({ tplId: childTplId, cloneId: cloneId, tplPath: overrideKey !== childTplId && nodes[overrideKey] ? overrideKey : childTplId });
+              walk.push({
+                tplId: childTplId,
+                cloneId: cloneId,
+                tplPath: overrideKey !== childTplId && nodes[overrideKey] ? overrideKey : childTplId,
+                ovId: bareOv ? bareOv.id : null
+              });
             }
           }
         }
@@ -2892,25 +3245,52 @@
       return added;
     }
 
+    // MasterGo text layers auto-rename after their content unless the scalar
+    // 05 manual-name lock is set (1 = keep the 04 layer name). Runs BEFORE
+    // inheritance on the record's OWN characters only — inherited characters
+    // must not rename a mirror/override record whose lock lives on itself
+    // (0712-2 "Exit 87" mirrors hold no own chars). The lock falls back to
+    // the template slot for slash-id stubs.
+    function mgApplyTextAutoNames(nodes) {
+      if (mgShareModeActive) return;
+      for (const id of Object.keys(nodes)) {
+        const n = nodes[id];
+        if (!n || n.rawType !== "TEXT" || n.characters == null) continue;
+        let lock = n.nameLocked;
+        if (lock === undefined && id.indexOf("/") >= 0) {
+          const slot = nodes[id.slice(id.lastIndexOf("/") + 1)];
+          if (slot) lock = slot.nameLocked;
+        }
+        if (lock !== 1) n.name = String(n.characters).replace(/\n/g, " ");
+      }
+    }
+
     // Shallow instance records omit everything the component already defines
     // (name, paints, stroke fields, corner/layout meta). Fill those gaps from
-    // the template chain (tag 1a, followed transitively).
+    // the template chain (tag 1a, followed transitively; expansion-assigned
+    // templateNode is the fallback for stubs that omit the 1a field — 0712-2's
+    // resized nav rows).
     function mgInheritFromTemplate(nodes) {
       for (const id of Object.keys(nodes)) {
         const n = nodes[id];
-        if (!n || !n.templateRef) continue;
+        if (!n || (!n.templateRef && !n.templateNode)) continue;
         // Positional/slot fields (constraints, visibility) belong to the
         // template CHILD this record overrides — the last path segment — not
         // to the component the tag-1a chain leads to.
         const lastSeg = id.indexOf("/") >= 0 ? id.slice(id.lastIndexOf("/") + 1) : null;
         const slot = lastSeg && lastSeg !== id ? nodes[lastSeg] : null;
+        const mirror = n.mirrorNode ? nodes[n.mirrorNode] : null;
         if (slot && slot !== n) {
           if (n.constraintH === undefined && slot.constraintH !== undefined) n.constraintH = slot.constraintH;
           if (n.constraintV === undefined && slot.constraintV !== undefined) n.constraintV = slot.constraintV;
           n.visibleByte = mgResolveInstanceVisibility(
             n.visibleByte,
             n.overrideMask19,
-            slot.visibleByte,
+            // The mirror's visibility beats the template child's default; a
+            // mirror WITHOUT the 07 byte means visible (full records omit the
+            // default) — 0712-2 icon cross-tab: explicit `07 00` = hidden
+            // 18/18, omitted = visible 6/6.
+            mirror ? (mirror.visibleByte !== undefined ? mirror.visibleByte : 1) : slot.visibleByte,
             n.isRawRecord
           );
           // Translation inheritance is only evidenced for shallow FRAME
@@ -2932,6 +3312,36 @@
               if (!n.hasExplicitY) n.relativeTransform[1][2] = n.y;
             }
           }
+          // Full-export stubs omit non-overridden fields entirely: an absent
+          // transform axis inherits the template child's position (0712-1
+          // Keyboard: ENTER stub has no `18` field, baseline x/y = template's
+          // 20/18). Share stubs keep the omission-is-zero doctrine above, and
+          // so do boolean-leaf members (mask bit 0x4000) — their omitted axes
+          // really are 0 in the flattened-leaf coordinate space (43+84 cover
+          // vectors regressed when inherited).
+          if (!mgShareModeActive && n.isRawRecord &&
+              (n.overrideMask19 === undefined || (n.overrideMask19 & 0x4000) === 0)) {
+            const fullScale = Math.abs(n.effScale || (n.trailer && n.trailer.scaleFactor) || 1);
+            if (!n.hasExplicitX) {
+              n.x = (slot.x || 0) * fullScale;
+              if (n.relativeTransform) n.relativeTransform[0][2] = n.x;
+            }
+            if (!n.hasExplicitY) {
+              n.y = (slot.y || 0) * fullScale;
+              if (n.relativeTransform) n.relativeTransform[1][2] = n.y;
+            }
+            // Explicit stub strokeWeight is a FILLER unless the stroke
+            // override bit (0x40000) is set in the 19-mask — cross-tabbed on
+            // both full-export fixtures with zero violations (0712-1: 8 stubs
+            // `10 00` + no bit, baseline = template's default 1; 0711-3: 49
+            // stubs with the bit, baseline = own, incl. the album rects'
+            // genuine 0).
+            if (n.strokeWeightExplicit && !n.strokeWeightInherited &&
+                (n.overrideMask19 === undefined || (n.overrideMask19 & 0x40000) === 0)) {
+              n.strokeWeight = slot.strokeWeightExplicit ? slot.strokeWeight : 1;
+              n.strokeWeightInherited = true;
+            }
+          }
           if (!n.tplW && slot.w) { n.tplW = slot.w; n.tplH = slot.h; }
           if (!n.hasExplicitMatrix && slot.relativeTransform) {
             const own = n.relativeTransform;
@@ -2947,8 +3357,56 @@
               slot.containerMeta && slot.containerMeta.subtype === "BOOLEAN_OPERATION") {
             n.containerMeta = slot.containerMeta;
           }
+          // 0711-3 full exports store instance-child containers as bare stubs
+          // (`1c 07 0f 00 00`, no structural fields at all): the container
+          // KIND is positional and lives on the template child. Without this
+          // the stubs all present as FRAME (144 GROUP + 135 BOOLEAN type
+          // mismatches on the cover fixture).
+          if (n.containerMeta && n.containerMeta.bareStub && slot.containerMeta &&
+              (slot.containerMeta.subtype === "GROUP" || slot.containerMeta.subtype === "BOOLEAN_OPERATION" ||
+               slot.containerMeta.subtype === "INSTANCE")) {
+            n.containerMeta = slot.containerMeta;
+          }
+          // A bare stub with an override MIRROR takes the mirror's container
+          // meta wholesale (explicit-zero paddings/itemSpacing, clips) — the
+          // mirror is the per-instance truth (0712-2 "battery level").
+          if (n.containerMeta && n.containerMeta.bareStub && mirror && mirror.containerMeta &&
+              !mirror.containerMeta.bareStub) {
+            n.containerMeta = mirror.containerMeta;
+          }
         }
-        let t = nodes[n.templateRef];
+        // 0711-3 full exports: instance-child container stubs store their size
+        // in TEMPLATE units when the user overrode it (route: own 307, tpl
+        // 297, baseline 307×scale), but an UNMODIFIED size is written as the
+        // final scaled copy (pagination: own 487.56 == tpl 580 × 0.8406 ==
+        // baseline). So scale only values that do NOT already equal
+        // template×scale (268/276 cross-tab; the misfits are live-text hug
+        // frames). Share-export stubs store final sizes (2026-07 doctrine);
+        // leaf stubs (VECTOR/TEXT) are final in both forms; instance roots are
+        // always final.
+        if (!mgShareModeActive && n.isRawRecord && n.containerMeta &&
+            n.containerMeta.subtype !== "INSTANCE" &&
+            n.trailer && isFinite(n.trailer.scaleFactor) && n.trailer.scaleFactor > 0 &&
+            Math.abs(n.trailer.scaleFactor - 1) > 1e-9) {
+          const s = n.trailer.scaleFactor;
+          const tpl = nodes[n.templateRef];
+          const tol = v => Math.max(0.02, Math.abs(v) * 1e-4);
+          const wIsFinalCopy = tpl && isFinite(tpl.w) && Math.abs(n.w - tpl.w * s) < tol(tpl.w * s);
+          const hIsFinalCopy = tpl && isFinite(tpl.h) && Math.abs(n.h - tpl.h * s) < tol(tpl.h * s);
+          if (n.hasExplicitW && isFinite(n.w) && !wIsFinalCopy) n.w *= s;
+          if (n.hasExplicitH && isFinite(n.h) && !hIsFinalCopy) n.h *= s;
+        }
+        // TEXT naming is finalized by mgApplyTextAutoNames (scalar 05 = the
+        // manual-name lock) after inheritance fills characters.
+        // Inheritance passes THROUGH the override mirror when one exists:
+        // stub → mirror → component child (mirror.templateRef continues the
+        // chain to the mirrored template node). When the 1a target (the
+        // component) is absent from the file, fall back to the PATH-SEGMENT
+        // slot node — 0712-2 copies component subtrees without their roots
+        // (left turn's 0:773 missing, slot 0:59031 present with the
+        // instance-root invisible-white fill, opacity 0.4, clips…).
+        let t = (mirror || null) || nodes[n.templateRef || n.templateNode] || slot;
+        if (!t && n.templateNode) t = nodes[n.templateNode];
         let guard = 0;
         while (t && guard++ < 6) {
           if (n.name == null && t.name != null) n.name = t.name;
@@ -2961,6 +3419,15 @@
             n.strokeWeight = t.strokeWeight;
             n.strokeWeightExplicit = true;
             n.strokeWeightInherited = true;
+          }
+          // 0711-3: a stub with explicit strokeWeight 0 whose template leaves
+          // the field missing (= default 1) still reports per-side weights of
+          // 1 × scale in the baseline (48 album-cover rects). Remember the
+          // template's effective weight for the side-weight fallback.
+          if (!mgShareModeActive && n.isRawRecord && n.tplSideWeightBase === undefined &&
+              n.strokeWeightExplicit && !n.strokeWeightInherited && n.strokeWeight === 0 &&
+              !t.strokeWeightExplicit) {
+            n.tplSideWeightBase = 1;
           }
           if (n.strokeAlignByte === undefined && t.strokeAlignByte !== undefined) n.strokeAlignByte = t.strokeAlignByte;
           if (n.strokeJoinByte === undefined && t.strokeJoinByte !== undefined) n.strokeJoinByte = t.strokeJoinByte;
@@ -2985,7 +3452,7 @@
             n.textStyleRef = t.textStyleRef;
             n.textStyleInherited = true;
           }
-          if (n.cornerRadius === 0 && t.cornerRadius) n.cornerRadius = t.cornerRadius;
+          if (n.cornerRadius === 0 && t.cornerRadius) { n.cornerRadius = t.cornerRadius; n.cornerRadiusInherited = true; }
           if (!n.inheritedMeta && t.containerMeta &&
               (t.containerMeta.subtype === "COMPONENT" || t.containerMeta.subtype === "FRAME")) {
             n.inheritedMeta = t.containerMeta;
@@ -3059,7 +3526,34 @@
               let c = r + 2;
               while (c < limit && bytes[c] !== 0x00) c++;
               const code = decodeUtf8(bytes.subarray(r + 2, c));
-              if (!seen[id]) { seen[id] = true; pages.push({ id: id, name: name, code: code }); }
+              // Optional `05 <a><r><g><b>` = page canvas color (zero-compressed
+              // floats). The color is stored even for DEFAULT canvases (light
+              // fixtures carry #F5F5F5, the Tesla file black); the one-byte
+              // flag `06 01` among the fields that follow marks a USER-SET
+              // background — only then does the import apply it (the 0711-3
+              // cover stores black but is default; Page 1 stores black with
+              // `06 01` and really is black).
+              let background = null;
+              if (bytes[c + 1] === 0x05) {
+                let bp = c + 2;
+                const channels = [];
+                for (let i = 0; i < 4; i++) {
+                  const zf = mgReadZeroFloat(bytes, bp);
+                  channels.push(zf.value);
+                  bp = zf.next;
+                }
+                let customized = false;
+                while (bp + 1 < limit) {
+                  const flagTag = bytes[bp];
+                  if (flagTag < 0x06 || flagTag > 0x0c) break;
+                  if (flagTag === 0x06 && bytes[bp + 1] === 0x01) customized = true;
+                  bp += 2;
+                }
+                if (customized && channels.every(v => isFinite(v) && v >= 0 && v <= 1)) {
+                  background = { a: channels[0], r: channels[1], g: channels[2], b: channels[3] };
+                }
+              }
+              if (!seen[id]) { seen[id] = true; pages.push({ id: id, name: name, code: code, background: background }); }
               p = c + 1;
               continue;
             }
@@ -3085,6 +3579,12 @@
     }
 
     function convertMgPackageToV2Entries(zipEntries, fileName) {
+      // One stamp per conversion run: "MMDD-HHmm".
+      const mgImportStamp = (() => {
+        const d = new Date();
+        const p = v => String(v).padStart(2, "0");
+        return `${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
+      })();
       const documentBytes = getEntryByName(zipEntries, "document");
       if (!documentBytes) throw new Error(`"${fileName}" 不是有效的 .mg 文件（缺少 document）`);
 
@@ -3127,7 +3627,15 @@
       // Share-export template instances (tag 1a component refs) first; the
       // legacy name-based expansion only covers old-style fixtures.
       const expandedTemplateCount = mgExpandTemplateInstances(nodes, childIds);
+      mgAttachOverrideMirrors(nodes);
       mgInheritFromTemplate(nodes);
+      // Naming runs AFTER inheritance: override mirrors carry no own
+      // characters — the name follows the INHERITED characters unless the
+      // scalar-05 manual-name lock is set (0712-2 "Exit 87" mirrors).
+      mgApplyTextAutoNames(nodes);
+      // Mirror identities sync LAST: instance-child names/base boxes follow
+      // the component child even when characters are overridden.
+      mgSyncMirrorIdentity(nodes);
       if (expandedTemplateCount > 0) {
         nodeIds = Object.keys(nodes);
         rebuildChildIds();
@@ -3146,8 +3654,16 @@
       // A raw VECTOR overriding a Boolean template slot is already flattened.
       // Prune its template operands before computing page reachability/indexes.
       mgPruneInstanceBooleanLeaves(nodes, childIds);
+      // Number siblings over the same filtered child list the records emit
+      // (typeless raw stubs are dropped there); numbering the raw list would
+      // shift every sibling after a dropped stub and fail INDEX_MISMATCH.
       const indexInParent = {};
-      for (const p in childIds) childIds[p].forEach((cid, ix) => { indexInParent[cid] = ix; });
+      for (const p in childIds) {
+        let emittedIndex = 0;
+        for (const cid of childIds[p]) {
+          if (nodes[cid] && nodes[cid].type) indexInParent[cid] = emittedIndex++;
+        }
+      }
 
       function subtreeOf(root) {
         const seen = {};
@@ -3179,13 +3695,17 @@
         return sub === "COMPONENT" || sub === "COMPONENT_SET";
       }
       for (const pg of mgPages) {
-        const roots = (childIds[pg.id] || []).filter(r => nodes[r] && nodes[r].type && !isComponentMaster(r));
+        // Share exports keep component masters off-canvas (they merely share
+        // the page owner), so they are dropped from the page roots there. In
+        // FULL editor exports the masters legitimately sit ON the canvas —
+        // dropping them lost all 20 of the Tesla fixture's components.
+        const roots = (childIds[pg.id] || []).filter(r => nodes[r] && nodes[r].type && !(mgShareModeActive && isComponentMaster(r)));
         roots.forEach((rootId, rootIndex) => { rootIndexOverride[rootId] = rootIndex; });
         let count = 0;
         for (const r of roots) for (const id of subtreeOf(r)) { if (!reachable[id]) { reachable[id] = true; count++; } }
         // Keep empty pages too: MasterGo files legitimately contain pages with
         // no layers (e.g. a leftover "Temp" page) and the v2 baseline exports them.
-        if (count > 0 || roots.length === 0) pageList.push({ name: pg.name, roots: roots, count: count });
+        if (count > 0 || roots.length === 0) pageList.push({ name: pg.name, roots: roots, count: count, background: pg.background || null });
       }
 
       if (Object.keys(reachable).length === 0) {
@@ -3245,7 +3765,7 @@
           delete props.constraints;
         }
         delete props.__nativeContainerLayout;
-        records.push({
+        const record = {
           version: 2,
           id: id,
           pageId: "",
@@ -3254,7 +3774,26 @@
           name: n.name || id,
           childIds: (childIds[id] || []).filter(c => nodes[c] && nodes[c].type),
           props: props
-        });
+        };
+        // Instance records remember their component (tag 1a template ref) so
+        // the importer can re-link them via component.createInstance(). The
+        // component's own record must exist in the package (full exports keep
+        // masters on canvas; share exports drop them → no id, frame fallback).
+        // MasterGo instances carry a uniform scale (trailer 26) that Figma
+        // instances cannot express via child geometry (instance children are
+        // locked to the component); the importer replays it with
+        // InstanceNode.rescale().
+        if (props.sourceType === "INSTANCE" && n.trailer && isFinite(n.trailer.scaleFactor) &&
+            n.trailer.scaleFactor > 0 && Math.abs(n.trailer.scaleFactor - 1) > 1e-6) {
+          record.instanceScale = n.trailer.scaleFactor;
+        }
+        if (props.sourceType === "INSTANCE" && n.templateRef && nodes[n.templateRef] &&
+            reachable[n.templateRef] &&
+            nodes[n.templateRef].containerMeta &&
+            nodes[n.templateRef].containerMeta.subtype === "COMPONENT") {
+          record.mainComponentId = n.templateRef;
+        }
+        records.push(record);
       }
       // Children of a GROUP whose nearest non-group ancestor is an auto-layout
       // frame report layoutPositioning=ABSOLUTE in the v2 export.
@@ -3375,12 +3914,15 @@
       let totalLayerCount = 0;
       for (let pi = 0; pi < pageList.length; pi++) {
         const pg = pageList[pi];
-        const pageName = /_mg$/.test(pg.name) ? pg.name : `${pg.name}_mg`;
+        // `_mg` marks a native import; the timestamp suffix distinguishes
+        // repeated imports of the same file (e.g. "cover_mg 0712-2130").
+        const baseName = pg.name.replace(/_mg( \d{4}-\d{4})?$/, "");
+        const pageName = `${baseName}_mg ${mgImportStamp}`;
         const folder = `pages/page-${pi}`;
         const pageFile = `${folder}/index.json`;
         const pageId = `mgpage-${pi}`;
         const layerChunks = writeLayerChunks(folder, pageId, collectPageRecords(pg));
-        out[pageFile] = encoder.encode(JSON.stringify({
+        const pageIndexJson = {
           schema: "mastergo2figma.page.v2",
           version: 2,
           id: pageId,
@@ -3389,7 +3931,11 @@
           rootNodeIds: pg.roots,
           layerChunks: layerChunks,
           layerCount: pg.count
-        }));
+        };
+        // Page canvas color (native decode only; SendToFigma's v2 zips do not
+        // carry it). The importer applies it as the page background paint.
+        if (pg.background) pageIndexJson.background = pg.background;
+        out[pageFile] = encoder.encode(JSON.stringify(pageIndexJson));
         manifestPages.push({ id: pageId, name: pageName, folder: folder, pageFile: pageFile, layerCount: pg.count });
         totalLayerCount += pg.count;
       }

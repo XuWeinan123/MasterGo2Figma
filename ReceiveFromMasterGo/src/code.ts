@@ -12,12 +12,13 @@ import {
   applyDeferredLayoutRestores,
   applyDeferredSingleChildAutoSpaceAlignmentFixes
 } from "./deferredLayout";
-import { refreshAvailableFonts } from "./fontLoader";
+import { loadFontCached, refreshAvailableFonts } from "./fontLoader";
 import {
   cleanupImportedContainerShells, createNodeFromData,
   appendRestoredNode, safeRemove, hasUsableVectorNetwork
 } from "./nodeCreator";
 import { applyProperties } from "./propertyApplier";
+import { safeSetFills, safeSetStrokes } from "./appliers/universal";
 import {
   shouldRestoreBooleanOperationTree,
   shouldRestoreBooleanVectorAsFrame,
@@ -46,6 +47,9 @@ type ImportSession = {
   timings: { [phase: string]: number };
   timingCounts: { [phase: string]: number };
   clientTimings: any;
+  // record id → restored node, for component/instance re-linking (native .mg
+  // imports carry mainComponentId on instance records)
+  restoredNodeById: { [id: string]: SceneNode };
 };
 
 type PendingAsset = {
@@ -248,7 +252,8 @@ async function startImportSession(message: any) {
     previousCurrentPage: figma.currentPage,
     timings: {},
     timingCounts: {},
-    clientTimings: message.clientTimings || null
+    clientTimings: message.clientTimings || null,
+    restoredNodeById: {}
   };
 
   figma.ui.postMessage({
@@ -382,17 +387,51 @@ async function restoreImportPageData(importPage: ImportPageIndex, layers: { [id:
   const pageCreateStartedAt = Date.now();
   const restoredPage = figma.createPage();
   restoredPage.name = pageName;
+  if (importPage.background) {
+    const bg = importPage.background;
+    try {
+      restoredPage.backgrounds = [{ type: "SOLID", color: { r: bg.r, g: bg.g, b: bg.b }, opacity: bg.a }];
+    } catch (error) {
+      // keep the default canvas color if the runtime rejects the paint
+    }
+  }
   session.restoredPages.push(restoredPage);
   figma.currentPage = restoredPage;
   addImportTiming(session, "restore.createPageMs", Date.now() - pageCreateStartedAt);
 
   const nodeRestoreStartedAt = Date.now();
   let restoredOnPage = 0;
-  for (let rootIndex = 0; rootIndex < importPage.rootNodeIds.length; rootIndex++) {
-    const rootId = importPage.rootNodeIds[rootIndex];
+  // Restore component/component-set roots FIRST so instances elsewhere on the
+  // page can re-link to them (native .mg imports carry mainComponentId), then
+  // put the page children back into the package's root order.
+  const rootIds = importPage.rootNodeIds;
+  const isComponentRoot = (id: string) => {
+    const record = layers[id];
+    const type = record && record.props ? record.props.type : null;
+    return type === "COMPONENT" || type === "COMPONENT_SET";
+  };
+  const restoreOrder = [...rootIds.filter(isComponentRoot), ...rootIds.filter(id => !isComponentRoot(id))];
+  const restoredRootNodes: { [id: string]: SceneNode } = {};
+  for (const rootId of restoreOrder) {
+    const childCountBefore = restoredPage.children.length;
     const restored = await restoreImportedNode(rootId, restoredPage, layers, session.restoredNodes, session.totalNodes);
+    if (restoredPage.children.length > childCountBefore) {
+      restoredRootNodes[rootId] = restoredPage.children[childCountBefore];
+    }
     restoredOnPage += restored;
     session.restoredNodes += restored;
+  }
+  if (restoreOrder.length !== rootIds.length || restoreOrder.some((id, i) => id !== rootIds[i])) {
+    try {
+      for (let rootIndex = 0; rootIndex < rootIds.length; rootIndex++) {
+        const node = restoredRootNodes[rootIds[rootIndex]];
+        if (node && !node.removed && node.parent === restoredPage && restoredPage.children[rootIndex] !== node) {
+          restoredPage.insertChild(rootIndex, node);
+        }
+      }
+    } catch (error) {
+      console.warn("Unable to reorder page roots after component-first restore:", error);
+    }
   }
   if (restoredOnPage !== pageNodeCount) throw new Error(`页面还原数量不一致：expected=${pageNodeCount}, actual=${restoredOnPage}`);
   addImportTiming(session, "restore.nodesMs", Date.now() - nodeRestoreStartedAt);
@@ -768,6 +807,15 @@ async function restoreImportedNode(
     throw new Error(`缺少图层记录：${nodeId}`);
   }
 
+  // Native .mg imports mark instance records with the component's record id.
+  // When that component was already restored in this session, recreate a REAL
+  // InstanceNode (component.createInstance) instead of a frame shell; any
+  // failure falls through to the ordinary restore path below.
+  if (layerRecord.mainComponentId) {
+    const instanceRestored = await tryRestoreAsInstance(layerRecord, parent, layers, restoredBefore, totalNodes);
+    if (instanceRestored > 0) return instanceRestored;
+  }
+
   let nodeProps = applyManifestLayoutToProps(layerRecord.props, layerRecord);
   if (shouldRestoreBooleanOperationTree(nodeProps, layerRecord)) {
     return await restoreBooleanOperationTree(
@@ -836,6 +884,7 @@ async function restoreImportedNode(
     safeRemove(newNode);
     throw error;
   }
+  if (activeImportSession) activeImportSession.restoredNodeById[nodeId] = newNode;
 
   let restoredCount = 1;
   const currentCount = restoredBefore + restoredCount;
@@ -855,4 +904,210 @@ async function restoreImportedNode(
 
 function canContainRestoredChildren(node: SceneNode): boolean {
   return !!node && "appendChild" in node;
+}
+
+// Recreate an instance record as a REAL InstanceNode when its component was
+// already restored in this session. Children come from the component; the
+// import records' per-child state is applied as instance OVERRIDES by
+// positional matching (record childIds order == component child order — both
+// derive from the same sort codes). Returns the number of records this node
+// accounts for (itself + all skipped descendant records), or 0 to fall back
+// to the ordinary frame-shell restore.
+async function tryRestoreAsInstance(
+  layerRecord: ImportLayerRecord,
+  parent: PageNode | SceneNode,
+  layers: { [id: string]: ImportLayerRecord },
+  restoredBefore: number,
+  totalNodes: number
+): Promise<number> {
+  const session = activeImportSession;
+  if (!session || !layerRecord.mainComponentId) return 0;
+  const componentNode = session.restoredNodeById[layerRecord.mainComponentId];
+  if (!componentNode || componentNode.removed || componentNode.type !== "COMPONENT") {
+    console.warn(
+      "[mg-instance] frame fallback:", layerRecord.id, layerRecord.props?.name || layerRecord.name,
+      "→ component", layerRecord.mainComponentId,
+      !componentNode ? "未还原(不在 restoredNodeById)" : componentNode.removed ? "已被移除" : `类型=${componentNode.type}`
+    );
+    return 0;
+  }
+  let instance: InstanceNode | null = null;
+  try {
+    instance = (componentNode as ComponentNode).createInstance();
+    if (!appendRestoredNode(parent, instance)) throw new Error("无法挂载实例");
+  } catch (error) {
+    console.warn("[mg-instance] createInstance 失败,回退 Frame 壳:", layerRecord.id, layerRecord.props?.name || layerRecord.name, error);
+    if (instance) safeRemove(instance);
+    return 0;
+  }
+  // From here on the InstanceNode exists and is parented — keep it even if
+  // property/override application partially fails (the component-instance
+  // relationship is the point; a partially styled instance beats a frame shell).
+  // MasterGo's uniform instance scale cannot be expressed through child
+  // geometry (instance children are locked to the component) — replay it
+  // with rescale() BEFORE the exact root resize in applyProperties.
+  let rescaled = false;
+  if (typeof layerRecord.instanceScale === "number" && isFinite(layerRecord.instanceScale) &&
+      layerRecord.instanceScale > 0 && Math.abs(layerRecord.instanceScale - 1) > 1e-6) {
+    try {
+      instance.rescale(layerRecord.instanceScale);
+      rescaled = true;
+    } catch (error) {
+      console.warn("[mg-instance] rescale 失败(继续):", layerRecord.id, layerRecord.instanceScale, error);
+    }
+  }
+  try {
+    const nodeProps = applyManifestLayoutToProps(layerRecord.props, layerRecord);
+    await applyProperties(instance as any, nodeProps);
+  } catch (error) {
+    console.warn("[mg-instance] applyProperties 部分失败(实例保留):", layerRecord.id, error);
+  }
+  try {
+    await applyInstanceChildOverrides(instance, layerRecord, layers, rescaled);
+  } catch (error) {
+    console.warn("[mg-instance] 子覆盖应用失败(实例保留):", layerRecord.id, error);
+  }
+  session.restoredNodeById[layerRecord.id] = instance;
+  console.info("[mg-instance] restored:", layerRecord.id, layerRecord.props?.name || layerRecord.name, "→ instance of", layerRecord.mainComponentId);
+  const accounted = 1 + countRecordDescendants(layerRecord, layers);
+  await maybeReportRestoreProgress(restoredBefore + accounted, totalNodes, "正在还原实例：" + (layerRecord.props?.name || layerRecord.name));
+  return accounted;
+}
+
+function countRecordDescendants(record: ImportLayerRecord, layers: { [id: string]: ImportLayerRecord }): number {
+  let count = 0;
+  const seen: { [id: string]: true } = {};
+  const stack = [...(record.childIds || [])];
+  while (stack.length > 0) {
+    const id = stack.pop() as string;
+    if (seen[id]) continue;
+    seen[id] = true;
+    const child = layers[id];
+    if (!child) continue;
+    count++;
+    for (const grandChild of child.childIds || []) stack.push(grandChild);
+  }
+  return count;
+}
+
+// Positional override application: walk the instance's real children next to
+// the record tree; on any structural drift (count mismatch) skip that subtree
+// — the component state is still a faithful base. Only override-safe
+// properties are touched, each guarded individually.
+async function applyInstanceChildOverrides(
+  instance: InstanceNode,
+  record: ImportLayerRecord,
+  layers: { [id: string]: ImportLayerRecord },
+  rescaled: boolean
+): Promise<void> {
+  const pairs: Array<{ node: SceneNode; rec: ImportLayerRecord }> = [];
+  const collect = (node: SceneNode, rec: ImportLayerRecord) => {
+    if (!("children" in node)) return;
+    const childIds = rec.childIds || [];
+    const children = (node as ChildrenMixin & SceneNode).children;
+    if (childIds.length !== children.length) return;
+    for (let i = 0; i < childIds.length; i++) {
+      const childRec = layers[childIds[i]];
+      if (!childRec || !childRec.props) continue;
+      pairs.push({ node: children[i], rec: childRec });
+      collect(children[i], childRec);
+    }
+  };
+  collect(instance, record);
+  for (const { node, rec } of pairs) {
+    const props = rec.props;
+    try {
+      if (props.scence && props.scence.visible === false && node.visible !== false) node.visible = false;
+      else if (props.scence && props.scence.visible === true && node.visible === false) node.visible = true;
+    } catch (error) { /* not overridable */ }
+    try {
+      const opacity = props.blend ? props.blend.opacity : undefined;
+      if (typeof opacity === "number" && "opacity" in node && Math.abs((node as any).opacity - opacity) > 0.001) {
+        (node as any).opacity = opacity;
+      }
+    } catch (error) { /* not overridable */ }
+    if (node.type === "TEXT") {
+      const textNode = node as TextNode;
+      let charsOverridden = false;
+      if (typeof props.characters === "string" && props.characters.length > 0) {
+        try {
+          if (textNode.characters !== props.characters && textNode.fontName !== figma.mixed) {
+            await loadFontCached(textNode.fontName as FontName);
+            textNode.characters = props.characters;
+            charsOverridden = true;
+          }
+        } catch (error) { /* font unavailable or locked — keep component text */ }
+      }
+      // In a rescaled instance Figma re-hugs auto-resize text around the scaled
+      // font with its own anchor rules (box lands 1px above the scaled spot
+      // whenever fract(scaled lineHeight) > 0.5), and instance children cannot
+      // be repositioned. textAutoResize IS overridable: pinning it to NONE
+      // restores the exact scaled box, which is also MasterGo's glyph truth —
+      // MasterGo's own instance hug is center-preserving, so glyphs sit at the
+      // pure-scale position and only the integer-rounded bounding box differs
+      // (< 0.5px). Texts whose characters were overridden keep hugging so the
+      // box wraps the new content.
+      if (rescaled && !charsOverridden &&
+          (textNode.textAutoResize === "WIDTH_AND_HEIGHT" || textNode.textAutoResize === "HEIGHT")) {
+        try {
+          const len = textNode.characters.length;
+          if (len > 0) {
+            for (const font of textNode.getRangeAllFontNames(0, len)) await loadFontCached(font);
+          }
+          textNode.textAutoResize = "NONE";
+        } catch (error) { /* fonts missing — keep hug behavior */ }
+      }
+    }
+    // Paint overrides (e.g. a recolored key): apply record fills/strokes only
+    // when they differ from the component-inherited paints, so untouched
+    // children keep a clean (non-overridden) state. IMAGE paints need the
+    // asset pipeline and are skipped here.
+    const geometry = props.geometry;
+    if (geometry) {
+      try {
+        if (Array.isArray(geometry.fills) && "fills" in node) {
+          const want = comparablePaintKey(geometry.fills);
+          const have = comparablePaintKey((node as any).fills);
+          if (want !== null && want !== have) safeSetFills(node as any, geometry.fills);
+        }
+      } catch (error) { /* not overridable */ }
+      try {
+        if (Array.isArray(geometry.strokes) && "strokes" in node) {
+          const want = comparablePaintKey(geometry.strokes);
+          const have = comparablePaintKey((node as any).strokes);
+          if (want !== null && want !== have) safeSetStrokes(node as any, geometry.strokes);
+        }
+      } catch (error) { /* not overridable */ }
+    }
+  }
+}
+
+// Canonical key for a paint list, tolerant of float noise; null = not
+// comparable here (image paints, unknown shapes) — those keep component state.
+function comparablePaintKey(paints: any): string | null {
+  if (!Array.isArray(paints)) return null;
+  const round = (v: any) => Math.round(((typeof v === "number" ? v : 0)) * 1000) / 1000;
+  const out: any[] = [];
+  for (const paint of paints) {
+    if (!paint || typeof paint !== "object") return null;
+    const visible = paint.visible === undefined
+      ? (paint.isVisible === undefined ? true : !!paint.isVisible)
+      : !!paint.visible;
+    if (paint.type === "SOLID") {
+      const c = paint.color || {};
+      out.push(["S", round(c.r), round(c.g), round(c.b), round(paint.opacity === undefined ? 1 : paint.opacity), visible ? 1 : 0]);
+      continue;
+    }
+    if (typeof paint.type === "string" && paint.type.indexOf("GRADIENT_") === 0) {
+      const stops = (paint.gradientStops || []).map((s: any) => [
+        round(s.position),
+        round(s.color && s.color.r), round(s.color && s.color.g),
+        round(s.color && s.color.b), round(s.color && s.color.a)
+      ]);
+      out.push(["G", paint.type, stops, visible ? 1 : 0]);
+      continue;
+    }
+    return null;
+  }
+  return JSON.stringify(out);
 }

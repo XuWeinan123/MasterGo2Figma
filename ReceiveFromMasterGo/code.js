@@ -2567,7 +2567,8 @@ ${style}`;
         previousCurrentPage: figma.currentPage,
         timings: {},
         timingCounts: {},
-        clientTimings: message.clientTimings || null
+        clientTimings: message.clientTimings || null,
+        restoredNodeById: {}
       };
       figma.ui.postMessage({
         type: "progress",
@@ -2694,16 +2695,46 @@ ${style}`;
       const pageCreateStartedAt = Date.now();
       const restoredPage = figma.createPage();
       restoredPage.name = pageName;
+      if (importPage.background) {
+        const bg = importPage.background;
+        try {
+          restoredPage.backgrounds = [{ type: "SOLID", color: { r: bg.r, g: bg.g, b: bg.b }, opacity: bg.a }];
+        } catch (error) {
+        }
+      }
       session.restoredPages.push(restoredPage);
       figma.currentPage = restoredPage;
       addImportTiming(session, "restore.createPageMs", Date.now() - pageCreateStartedAt);
       const nodeRestoreStartedAt = Date.now();
       let restoredOnPage = 0;
-      for (let rootIndex = 0; rootIndex < importPage.rootNodeIds.length; rootIndex++) {
-        const rootId = importPage.rootNodeIds[rootIndex];
+      const rootIds = importPage.rootNodeIds;
+      const isComponentRoot = (id) => {
+        const record = layers[id];
+        const type = record && record.props ? record.props.type : null;
+        return type === "COMPONENT" || type === "COMPONENT_SET";
+      };
+      const restoreOrder = [...rootIds.filter(isComponentRoot), ...rootIds.filter((id) => !isComponentRoot(id))];
+      const restoredRootNodes = {};
+      for (const rootId of restoreOrder) {
+        const childCountBefore = restoredPage.children.length;
         const restored = yield restoreImportedNode(rootId, restoredPage, layers, session.restoredNodes, session.totalNodes);
+        if (restoredPage.children.length > childCountBefore) {
+          restoredRootNodes[rootId] = restoredPage.children[childCountBefore];
+        }
         restoredOnPage += restored;
         session.restoredNodes += restored;
+      }
+      if (restoreOrder.length !== rootIds.length || restoreOrder.some((id, i) => id !== rootIds[i])) {
+        try {
+          for (let rootIndex = 0; rootIndex < rootIds.length; rootIndex++) {
+            const node = restoredRootNodes[rootIds[rootIndex]];
+            if (node && !node.removed && node.parent === restoredPage && restoredPage.children[rootIndex] !== node) {
+              restoredPage.insertChild(rootIndex, node);
+            }
+          }
+        } catch (error) {
+          console.warn("Unable to reorder page roots after component-first restore:", error);
+        }
       }
       if (restoredOnPage !== pageNodeCount) throw new Error(`\u9875\u9762\u8FD8\u539F\u6570\u91CF\u4E0D\u4E00\u81F4\uFF1Aexpected=${pageNodeCount}, actual=${restoredOnPage}`);
       addImportTiming(session, "restore.nodesMs", Date.now() - nodeRestoreStartedAt);
@@ -3026,6 +3057,10 @@ ${style}`;
       if (!layerRecord || !layerRecord.props) {
         throw new Error(`\u7F3A\u5C11\u56FE\u5C42\u8BB0\u5F55\uFF1A${nodeId}`);
       }
+      if (layerRecord.mainComponentId) {
+        const instanceRestored = yield tryRestoreAsInstance(layerRecord, parent, layers, restoredBefore, totalNodes);
+        if (instanceRestored > 0) return instanceRestored;
+      }
       let nodeProps = applyManifestLayoutToProps(layerRecord.props, layerRecord);
       if (shouldRestoreBooleanOperationTree(nodeProps, layerRecord)) {
         return yield restoreBooleanOperationTree(
@@ -3089,6 +3124,7 @@ ${style}`;
         safeRemove(newNode);
         throw error;
       }
+      if (activeImportSession) activeImportSession.restoredNodeById[nodeId] = newNode;
       let restoredCount = 1;
       const currentCount = restoredBefore + restoredCount;
       const progressStartedAt = Date.now();
@@ -3105,5 +3141,176 @@ ${style}`;
   }
   function canContainRestoredChildren(node) {
     return !!node && "appendChild" in node;
+  }
+  function tryRestoreAsInstance(layerRecord, parent, layers, restoredBefore, totalNodes) {
+    return __async(this, null, function* () {
+      var _a, _b, _c, _d;
+      const session = activeImportSession;
+      if (!session || !layerRecord.mainComponentId) return 0;
+      const componentNode = session.restoredNodeById[layerRecord.mainComponentId];
+      if (!componentNode || componentNode.removed || componentNode.type !== "COMPONENT") {
+        console.warn(
+          "[mg-instance] frame fallback:",
+          layerRecord.id,
+          ((_a = layerRecord.props) == null ? void 0 : _a.name) || layerRecord.name,
+          "\u2192 component",
+          layerRecord.mainComponentId,
+          !componentNode ? "\u672A\u8FD8\u539F(\u4E0D\u5728 restoredNodeById)" : componentNode.removed ? "\u5DF2\u88AB\u79FB\u9664" : `\u7C7B\u578B=${componentNode.type}`
+        );
+        return 0;
+      }
+      let instance = null;
+      try {
+        instance = componentNode.createInstance();
+        if (!appendRestoredNode(parent, instance)) throw new Error("\u65E0\u6CD5\u6302\u8F7D\u5B9E\u4F8B");
+      } catch (error) {
+        console.warn("[mg-instance] createInstance \u5931\u8D25,\u56DE\u9000 Frame \u58F3:", layerRecord.id, ((_b = layerRecord.props) == null ? void 0 : _b.name) || layerRecord.name, error);
+        if (instance) safeRemove(instance);
+        return 0;
+      }
+      let rescaled = false;
+      if (typeof layerRecord.instanceScale === "number" && isFinite(layerRecord.instanceScale) && layerRecord.instanceScale > 0 && Math.abs(layerRecord.instanceScale - 1) > 1e-6) {
+        try {
+          instance.rescale(layerRecord.instanceScale);
+          rescaled = true;
+        } catch (error) {
+          console.warn("[mg-instance] rescale \u5931\u8D25(\u7EE7\u7EED):", layerRecord.id, layerRecord.instanceScale, error);
+        }
+      }
+      try {
+        const nodeProps = applyManifestLayoutToProps(layerRecord.props, layerRecord);
+        yield applyProperties(instance, nodeProps);
+      } catch (error) {
+        console.warn("[mg-instance] applyProperties \u90E8\u5206\u5931\u8D25(\u5B9E\u4F8B\u4FDD\u7559):", layerRecord.id, error);
+      }
+      try {
+        yield applyInstanceChildOverrides(instance, layerRecord, layers, rescaled);
+      } catch (error) {
+        console.warn("[mg-instance] \u5B50\u8986\u76D6\u5E94\u7528\u5931\u8D25(\u5B9E\u4F8B\u4FDD\u7559):", layerRecord.id, error);
+      }
+      session.restoredNodeById[layerRecord.id] = instance;
+      console.info("[mg-instance] restored:", layerRecord.id, ((_c = layerRecord.props) == null ? void 0 : _c.name) || layerRecord.name, "\u2192 instance of", layerRecord.mainComponentId);
+      const accounted = 1 + countRecordDescendants(layerRecord, layers);
+      yield maybeReportRestoreProgress(restoredBefore + accounted, totalNodes, "\u6B63\u5728\u8FD8\u539F\u5B9E\u4F8B\uFF1A" + (((_d = layerRecord.props) == null ? void 0 : _d.name) || layerRecord.name));
+      return accounted;
+    });
+  }
+  function countRecordDescendants(record, layers) {
+    let count = 0;
+    const seen = {};
+    const stack = [...record.childIds || []];
+    while (stack.length > 0) {
+      const id = stack.pop();
+      if (seen[id]) continue;
+      seen[id] = true;
+      const child = layers[id];
+      if (!child) continue;
+      count++;
+      for (const grandChild of child.childIds || []) stack.push(grandChild);
+    }
+    return count;
+  }
+  function applyInstanceChildOverrides(instance, record, layers, rescaled) {
+    return __async(this, null, function* () {
+      const pairs = [];
+      const collect = (node, rec) => {
+        if (!("children" in node)) return;
+        const childIds = rec.childIds || [];
+        const children = node.children;
+        if (childIds.length !== children.length) return;
+        for (let i = 0; i < childIds.length; i++) {
+          const childRec = layers[childIds[i]];
+          if (!childRec || !childRec.props) continue;
+          pairs.push({ node: children[i], rec: childRec });
+          collect(children[i], childRec);
+        }
+      };
+      collect(instance, record);
+      for (const { node, rec } of pairs) {
+        const props = rec.props;
+        try {
+          if (props.scence && props.scence.visible === false && node.visible !== false) node.visible = false;
+          else if (props.scence && props.scence.visible === true && node.visible === false) node.visible = true;
+        } catch (error) {
+        }
+        try {
+          const opacity = props.blend ? props.blend.opacity : void 0;
+          if (typeof opacity === "number" && "opacity" in node && Math.abs(node.opacity - opacity) > 1e-3) {
+            node.opacity = opacity;
+          }
+        } catch (error) {
+        }
+        if (node.type === "TEXT") {
+          const textNode = node;
+          let charsOverridden = false;
+          if (typeof props.characters === "string" && props.characters.length > 0) {
+            try {
+              if (textNode.characters !== props.characters && textNode.fontName !== figma.mixed) {
+                yield loadFontCached(textNode.fontName);
+                textNode.characters = props.characters;
+                charsOverridden = true;
+              }
+            } catch (error) {
+            }
+          }
+          if (rescaled && !charsOverridden && (textNode.textAutoResize === "WIDTH_AND_HEIGHT" || textNode.textAutoResize === "HEIGHT")) {
+            try {
+              const len = textNode.characters.length;
+              if (len > 0) {
+                for (const font of textNode.getRangeAllFontNames(0, len)) yield loadFontCached(font);
+              }
+              textNode.textAutoResize = "NONE";
+            } catch (error) {
+            }
+          }
+        }
+        const geometry = props.geometry;
+        if (geometry) {
+          try {
+            if (Array.isArray(geometry.fills) && "fills" in node) {
+              const want = comparablePaintKey(geometry.fills);
+              const have = comparablePaintKey(node.fills);
+              if (want !== null && want !== have) safeSetFills(node, geometry.fills);
+            }
+          } catch (error) {
+          }
+          try {
+            if (Array.isArray(geometry.strokes) && "strokes" in node) {
+              const want = comparablePaintKey(geometry.strokes);
+              const have = comparablePaintKey(node.strokes);
+              if (want !== null && want !== have) safeSetStrokes(node, geometry.strokes);
+            }
+          } catch (error) {
+          }
+        }
+      }
+    });
+  }
+  function comparablePaintKey(paints) {
+    if (!Array.isArray(paints)) return null;
+    const round = (v) => Math.round((typeof v === "number" ? v : 0) * 1e3) / 1e3;
+    const out = [];
+    for (const paint of paints) {
+      if (!paint || typeof paint !== "object") return null;
+      const visible = paint.visible === void 0 ? paint.isVisible === void 0 ? true : !!paint.isVisible : !!paint.visible;
+      if (paint.type === "SOLID") {
+        const c = paint.color || {};
+        out.push(["S", round(c.r), round(c.g), round(c.b), round(paint.opacity === void 0 ? 1 : paint.opacity), visible ? 1 : 0]);
+        continue;
+      }
+      if (typeof paint.type === "string" && paint.type.indexOf("GRADIENT_") === 0) {
+        const stops = (paint.gradientStops || []).map((s) => [
+          round(s.position),
+          round(s.color && s.color.r),
+          round(s.color && s.color.g),
+          round(s.color && s.color.b),
+          round(s.color && s.color.a)
+        ]);
+        out.push(["G", paint.type, stops, visible ? 1 : 0]);
+        continue;
+      }
+      return null;
+    }
+    return JSON.stringify(out);
   }
 })();

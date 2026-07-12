@@ -895,7 +895,7 @@
       if (stage === "assets") return `${formatBytes(current)} / ${formatBytes(total)} · ${totalProgress}`;
       if (stage === "pageSend") return `${current}/${total} 个图层数据已发送 · ${totalProgress}`;
       if (stage === "restore") return `${current}/${total} 个图层 · ${totalProgress} · 预计剩余 ${formatEta(current, total)}`;
-      if (stage === "postprocess") return `${current}/${total} 个图层后处理 · ${totalProgress}`;
+      if (stage === "postprocess") return `${Math.round(current)}/${total} 个图层后处理 · ${totalProgress}`;
       if (stage === "finalize") return totalProgress;
       return total > 0 ? `${current}/${total} 项准备任务 · ${totalProgress}` : totalProgress;
     }
@@ -1364,6 +1364,11 @@
       if (Array.isArray(record.childIds)) {
         record.childIds = record.childIds.map(cid => `${prefix}${cid}`);
       }
+      // The component reference must be prefixed like every other record id:
+      // the plugin resolves it against restoredNodeById, which is keyed by the
+      // PREFIXED ids — an unprefixed ref silently misses and every instance
+      // falls back to a frame shell.
+      if (record.mainComponentId) record.mainComponentId = `${prefix}${record.mainComponentId}`;
       if (record.props) {
         prepareImportProps(record.props, prefix, assetKeys);
       }

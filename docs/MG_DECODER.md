@@ -70,6 +70,193 @@ Fields cracked with this fixture (all in `mgWalkScalarFields` / record grammar b
   (default = vertical top→bottom); image scaleMode enum corrected to `2=TILE 3=CROP`;
 - geometry-blob region loops: ONE int array with `-1` (ff ff ff ff 0f) separating loops.
 
+## Full-editor "explicit zero" export form — CRACKED ✓ (2026-07-11, 0711-3 Tesla fixture)
+A third export form (`测试集/0711-3/特斯拉 Model 3车载系统.mg`, 29.7 MB, 70k records):
+a FULL editor export (n:n page ids, no component-root markers, `mgShareModeActive` false)
+that still stores instances as **share-style shallow stubs**. Structure: component/template
+trees live as ordinary records on a page (owner `0:2`), instance children are stub records
+with slash ids, `1a` templateRef, absolute scale in trailer `26`, and a bare `1c 07 0f 00 00`
+container object. Its records spell out **explicit empties** everywhere, which the sequential
+walkers used to treat as unknown-tag stop points (58k of 70k records lost their scalar tail —
+paint/stroke refs, owner, constraints — which is what "layers import completely wrong" looks
+like). Spellings handled since:
+- scalar `06 <b>` — new one-byte flag (value 0/1; between `05` and `07`);
+- `14 00` — explicit empty dashPattern; `1a 00`/`15 00`/… — explicit-empty refs;
+- paint child records carry a leading `04 <b>` field and can have an explicit-empty
+  image path (`03 00`);
+- container object: `05 00`/`06 <b>`/`07 00`/`08 00` explicit-zero fields interleave the
+  structural fields; new trailing fields `0b <b>` `0c <b>` (unknown), `0f <cstring>` (node
+  ref; EMPTY on instance stubs), `10 <b>` (unknown). **Container `06` is VALUE-semantic
+  like field 01: `06 01` = INSTANCE, `06 00` = plain flag** (superseding the 2026-07-11
+  follower-whitelist rule — block-bounded cross-tab on both baselined fixtures: 0711-3
+  cover 06=1 ⟺ sourceType INSTANCE with zero contradictions incl. 224 `06 01 09 …`
+  spellings; 0712-1's two root Keyboard instances are `06 01 09 …` and the whitelist
+  misread them as FRAME, silently dropping their 412 template children). After the flag,
+  share exports carry `0f <ref>`/`15 <table>` and stop; full exports continue with the
+  instance's own layout fields. **`07` non-zero = COMPONENT_SET** (payload: key string in
+  share exports, `04 <varint>` stamp in full exports), `07 00` = plain flag.
+- record trailer may have **NO `1d 01` introducer**: fields (`1e`/`21`/`22`/`27`/`28`…)
+  follow the `1c` object directly. `mgParseContainerMeta` reports the object's end offset
+  and `mgParseTrailer` first parses ANCHORED at that position (accepting both spellings)
+  before falling back to the legacy `1d 01` scan.
+- **style library region**: entries `01 <id> 00 02 00 03 00 04 00 05 <kind>` (explicit-empty
+  parent/sort) with kind 1 = paint style (paint children parented to the entry id), 3 = text
+  style. Text entries gain `02 <varint>` stamp, `07 <b>`, and `0f <32-hex font-file hash>`.
+  Besides the shared logical entries, TEXT stubs reference per-node **computed entries**
+  (`10:…` ids): final (already instance-scaled) fontSize, the RESOLVED line box even for
+  AUTO line height, and the concrete font file's name ("Source Han Sans CN"). For computed
+  entries the `06 01` PIXELS flag is the only trustworthy lineHeight unit signal (no flag →
+  AUTO).
+Instance-stub semantics cracked with this fixture (all cross-tabbed against the cover-page
+baseline, gated on `!mgShareModeActive` so share doctrine is untouched):
+- **Sizes**: a container stub's explicit w/h is in TEMPLATE units when overridden
+  (baseline = own × trailer-26 scale; 227/266 exact) but an UNMODIFIED size is written as
+  the final scaled copy (own == template × scale → keep). Leaf stubs (VECTOR/TEXT) and
+  instance roots are always final. Share stubs stay final everywhere.
+- **Container kind is positional**: bare stubs adopt the template child's GROUP /
+  BOOLEAN_OPERATION subtype (`bareStub` flag from `mgParseContainerMeta`).
+- **Corner radius from the node's own record is final** (stub stores 5.04 = 6 × scale;
+  template stores 6); only inherited/default corners scale.
+- **Visibility**: a stub with neither the `07` byte nor a `19` mask inherits the template
+  child's visibility (share stubs keep the default-visible rule).
+- **Omitted transform axes inherit the template child's position** (0712-1: the ENTER stub
+  has no `18` field, baseline x/y = template's 20/18 — full-export stubs omit
+  non-overridden fields entirely) — EXCEPT boolean-leaf members (mask bit 0x4000), whose
+  omitted axes really are 0 in the flattened-leaf space.
+- **The 19-mask is the per-record override bitmask** (this IS the full-export override
+  mechanism; the container `15` table remains share-only). Cracked bits: `0x1` characters
+  overridden, `0x4000` boolean leaf, `0x40000` strokeWeight overridden — a stub's explicit
+  `10 00` weight is a FILLER unless 0x40000 is set (0712-1: 8 stubs no-bit → baseline =
+  template default 1; 0711-3: 49 stubs with-bit → baseline = own, zero violations).
+  `0x10000` correlates with paint/fill overrides (every recolored 0712-1 key carries it).
+- **Auto-naming**: TEXT stubs with own characters are named by them, newlines collapsed to
+  spaces ("SPEED\nLIMIT" → "SPEED LIMIT", "Artist"→"Streaming") — EXCEPT stubs whose mask
+  has 0x10000 without 0x1: those keep the template's manual name (0712-1 "letter" keys;
+  the true autoRename flag is not located yet).
+- **clipsContent**: full-export instances default to FALSE when neither stub nor component
+  wrote field 03 (share instances keep the FRAME-family default true).
+- **Per-side weights**: a stub with explicit strokeWeight 0 whose template omits the field
+  (default 1) still reports side weights of 1 × scale.
+Third pass (0712-2, resized-instance fixture, 2026-07-12):
+- **Scalar `05` on TEXT records = the manual-name lock** (the old "shape
+  flag"): `05 01` keeps the `04` layer name, `05 00`/absent means autoRename —
+  the layer name IS the characters (newlines → spaces). Zero violations over
+  three fixtures; stubs inherit the lock from their template slot. The naming
+  pass runs BEFORE inheritance on own characters only (`mgApplyTextAutoNames`).
+- **Nested-instance overrides in component trees are BARE-id MIRROR trees**:
+  the slot's childIds are not template children but mirror records, each with
+  `parent = the slot (or parent mirror)` and `templateRef = the mirrored
+  template child`. Expansion indexes them by (parent, templateRef) as override
+  sources; walking them as template children fabricates duplicate flat-id
+  clones (302 extras on the resized "directions").
+- **Component records can be ABSENT while their subtree survives** (copy-paste
+  authored files): expansion walks the orphan tree through a virtual root
+  (geometry from the slot); the inheritance chain falls back to the slot when
+  the `1a` target is missing; INSTANCE sizing falls back to the instance's own
+  trailer 21/22.
+- **INSTANCE clipsContent is purely inherited from the component** (FRAME
+  default true). The earlier "full-export instances default to false" reading
+  fit components that themselves spell `03 00`.
+Second pass (Page-1 visual QA against MasterGo, 2026-07-11):
+- **The container `01` VALUE is the group discriminator**: `01 00` = group-like (GROUP, or
+  BOOLEAN_OPERATION when `02 <kind>` follows); **`01 01` = FRAME family** (always followed
+  by an explicit `03` clipsContent — 9897/9897; groups cannot clip and never write 03).
+  Cross-tab over the 516 cover-verified containers has zero exceptions (144 GROUP + 135
+  BOOLEAN all `01 00`; the seven `01 01` containers are baseline FRAMEs). Page 1's
+  top-level screens (1920×1200 artboards) all use the `01 01` spelling — before the rule
+  every one imported as a GROUP (17k GROUP / 2.5k FRAME flipped to 7k / 12.4k), which also
+  cascaded into "wrong positions" (groups refit their bounds and drop clipping on restore).
+- **`05 01` = COMPONENT regardless of key spelling**: share/older exports write
+  `05 01 07 <key>`, the 0711-3 explicit-zero form may leave the key EMPTY
+  (`05 01 06 00 07 00` — the Keyboard master). Census: all 95 `05 01` containers in the
+  fixture are components, everything else spells `05 00`. The old adjacency rule
+  (`05 01 07`) found only the 20 keyed ones.
+- **Component masters stay on canvas in full exports**: the share-mode rule that drops
+  COMPONENT/COMPONENT_SET page roots (off-canvas masters merely share the page owner) is
+  now gated on `mgShareModeActive` — it was silently deleting the Tesla file's components
+  (and their subtrees) from Page 1.
+- **Page background color**: the page-table record carries `05 <a><r><g><b>`
+  (zero-compressed floats) followed by one-byte flag fields. The color is stored even for
+  DEFAULT canvases (light fixtures carry #F5F5F5, the Tesla file black); **flag `06 01`
+  marks a USER-SET background** and only then does the converter emit it (the 0711-3 cover
+  stores black but has no 06 flag = default; Page 1 stores black with `06 01` and really is
+  black). `parseMgPages` extracts it, the converter writes an optional `background` field
+  in the v2 page index (a native-decode format extension — SendToFigma zips do not carry
+  it), and the importer applies it as the page's SOLID background paint.
+Third pass — **component/instance re-linking** (2026-07-11): instance records now carry a
+record-level `mainComponentId` (the tag-1a template ref, emitted only when the component's
+record is itself reachable in the package — full exports keep masters on canvas). The
+importer restores such records as REAL InstanceNodes: component/component-set page roots are
+restored first (page children re-ordered back to package order afterwards), then
+`component.createInstance()` + root props + per-child overrides applied by POSITIONAL
+matching of the record tree against the instance's children (record childIds order ==
+component child order; any count drift skips that subtree). Overrides applied: visibility,
+opacity, text characters (with cached font loads). Any failure falls back to the previous
+frame-shell restore. The comparator ignores the record-level field (SendToFigma baselines
+flatten instances to frames), so all six fixtures stay byte-identical.
+Remaining 0711-3 residuals (cover baseline: 0 type / 115 geometry / 66 transform / 43 font /
+7 paint / 622 deep): nested-instance font/image overrides that live in the still-undecoded
+container override table (`1c 07` → `06 01 15 …`), the x/y/relativeTransform position family
+(~200 rows), and live-text hug sizes. See MG_DECODER_JOURNAL.md.
+
+## Mirror-tree overrides & rootless components — CRACKED ✓ (2026-07-12, 0712-2 fixture)
+Full exports implement nested-instance overrides as **bare-id MIRROR record trees** (share
+exports use slash-composed override records instead):
+- `mirror.parent` = the instance's template SLOT (or the parent mirror), `mirror.templateRef`
+  = the mirrored component child; the tree parallels the component subtree level by level and
+  carries the per-instance overrides (hidden rows, opacity 0.4, recolors, explicit-zero
+  paddings, overridden characters). On the owning page the mirrors double as the instance's
+  canvas children (the API's node ids for them).
+- Instance-child STUB ids flatten intermediate non-instance containers, so mirrors resolve
+  per path segment against the TRANSITIVE mirror set of the current scope
+  (`mgAttachOverrideMirrors`, independent of template expansion).
+- **A file may copy component subtrees WITHOUT their roots** (0712-2: nav row's 0:761, left
+  turn's 0:773 are absent while their children are present). The inheritance chain is
+  therefore `stub → mirror → 1a target → path-segment slot node`; the slot fallback supplies
+  the instance-root invisible-white fill, opacity, clips when the component is unreachable.
+- Nested-instance detection during expansion must consult the TEMPLATE child (a resized
+  instance materialises bare stubs whose own container meta degenerates to FRAME; walking
+  such a stub descends into the mirror tree and clones it as bogus children — 288 on this
+  fixture).
+- **Instance-child identity rule**: layer NAME (and the base box) always follows the main
+  component's child — characters are overridable, names are not (mirror chars
+  "Highway 400" with name "Exit 87" from the component text). `mgSyncMirrorIdentity` syncs
+  names last; sizes are NOT synced (hug boxes are live text metrics — a package-side
+  unknowable, kept as the documented residual family).
+- A mirror's own `1c 01` geometry hash may reference a blob that was never copied into the
+  file; the vectorNetwork lookup falls back along mirror/1a/slot to the first hash present
+  in the blob table. Pen-edited ellipses keep type ELLIPSE while carrying a vectorNetwork.
+- Known no-signal residual: instance stubs whose component root is absent AND whose slot
+  lacks field 03 have no package-side clipsContent truth (6 rows; a component-missing→false
+  rule flipped 46 healthy instances and was reverted).
+- **Mirror lookup is dual-key**: for plain children `mirror.templateRef` = the mirrored
+  template child, but for NESTED-INSTANCE slots it is the COMPONENT id (0:795), not the slot
+  id (0:59042) — both keys must be tried when resolving a stub's mirror
+  (`mgAttachOverrideMirrors` flatten + `bareOverrideByParent` in expansion). Missing this
+  silently drops every per-row icon visibility override.
+- **Mirror `07` byte omitted = visible** (explicit `07 00` = hidden, 18/18; omitted = shown,
+  6/6). Do not treat an absent visibility byte on a mirror as "inherit slot".
+- **Instance uniform scale = trailer field `26`** (share exports already used it as absolute
+  scale). The converter emits it as `record.instanceScale` when ≠1; sizes of container stubs
+  inside such instances are template-units × this factor unless the stub's own size already
+  equals template×scale (final-copy rule).
+
+### Import-side replay (Figma plugin, not a package field)
+- Figma instance children are geometry-locked to the component (`set_y` → "This property
+  cannot be overridden in an instance"), so `instanceScale` is replayed with
+  `InstanceNode.rescale()` before the exact root resize.
+- **Figma rescale hug quirk (measured 2026-07-12)**: after `rescale(S)` an auto-resize text
+  box re-hugs to `ceil(S·lineHeight)` and, whenever `fract(S·lineHeight) > 0.5`, lands
+  **exactly 1px above** the scaled position (28→23.537→24: −1px; 36→30.26→31 and 50→42.03→43:
+  0). Independent of the text's y / alignment; reproduced on synthetic components.
+- Fix: `textAutoResize` IS overridable on instance children — the importer pins every text
+  child of a rescaled instance (except characters-overridden ones, which must re-hug) to
+  `NONE`, restoring the pure-scaled box. That equals MasterGo's glyph truth: MasterGo's own
+  instance hug is center-preserving, so glyph positions are exactly the scaled ones and only
+  MasterGo's integer-rounded bounding box differs (residual `(ceil(S·lh)−S·lh)/2` < 0.5px,
+  box-only, invisible). CENTER-constrained frames drift similarly (~0.4px, dragme) with no
+  writable lever — documented residual.
+
 ## Number codec — CRACKED ✓ (verified both directions)
 - decode([s0,s1,s2,s3]): `S=[s0,s3,s2,s1]`; `value = float32_be( rotr1(uint32_be(S)) )` (rotate
   keeps the sign bit; see `mgDecFloat`).
@@ -121,6 +308,36 @@ null-terminated. Native node record, top-level fields in order:
 - `1b` <id> = owner (page id in native records).
 - `1c` <typeByte> + nested object: 1=VECTOR, 2=LINE, 3=RECTANGLE, 4=ELLIPSE, 5=POLYGON, 6=STAR,
   7=container, 8=TEXT, 10=SLICE.
+
+## Registry-residue records — non-canvas, dropped before assembly ✓ (2026-07-11)
+A `.mg` can carry auxiliary registry records that reuse the node-record header
+(`01 <id> 00 02 <parentId> 00 03 <sortCode> 00`) but are NOT canvas nodes. Body
+grammar, byte-identical across all 131 records in the 0711-2 fixture:
+```
+07 01  08 <node-id> 00  0b 01 <varint 300> 02 02|04 02 00  0d 01 13 00 00
+```
+- The discriminator (`mgIsRegistryResidueRecord`) is structural: tag `08`
+  carries an ID STRING where a node record stores the one-byte
+  constrainProportions flag (legal values 0/1 only) — impossible in the node
+  scalar grammar. Match = body starts `07 00|01 08` + id-shaped cstring + `00
+  0b`.
+- No name (`04`), no owner (`1b`), no `1c` type object, no `1d 01` trailer.
+- Ids sit at the top of the file's id space (2:29891–2:30094 vs design nodes
+  ≈2:07xxx–2:25xxx); sortCode always `a0`; exactly one per parent (131 records
+  under 131 distinct instance/template children); the `08` ref names a
+  component-template node (14 distinct refs). Exact role unknown —
+  annotation/interaction-like (the `0b` object's first field is varint 300, a
+  duration-ish default); none exist in any SendToFigma baseline.
+- Skipped in `mgDecodeNativeNodes` BEFORE node assembly (same spot as the
+  `[PROPS]` carrier skip). Dropping early matters three ways: an emitted stub
+  shifts every later sibling's index (the 295-INDEX_MISMATCH incident);
+  template expansion clones residues inside component trees into every
+  instance (`2:09860/2:30074`); and the weak `1c` type-tag fallback can misread
+  bytes after the ~40-byte body as a node type — `2:30073`'s block ran 143 KB
+  to the next marker (font tables, geometry varint runs), got misread as LINE,
+  and emitted as the baseline-extra record. Cross-tabbed over all five test
+  sets: 131 hits in 0711-2 (= exactly the high-id family), zero in the other
+  four, zero overlap with any baseline record.
 
 ## Record trailer — CRACKED ✓ (`1d 01` after the `1c` object, `mgParseTrailer`)
 Ascending fields, `00`-terminated; floats/text-runs can fake a `1d 01`, so candidates are
@@ -362,9 +579,9 @@ Explicit-zero sizes are respected during vector decode: a hairline VECTOR stores
 `mgScanPaints` (paint table) + `mgScanGeometryBlobs` (vector geometry) + `mgDecodeNativeNodes`
 (records: scalars, flags, transform, container meta, geometry hash) → `mgNativeProps` (v2 props)
 → embedded overlay (`mgApplyEmbeddedOverlay`) → instance expansion → per-page chunked v2 zip
-entries (`convertMgPackageToV2Entries`). Direct `.mg` conversion appends `_mg` to every restored
-page name (without duplicating an existing suffix), so it remains distinguishable from a v2 zip
-baseline after import. `ui.html` is generated by `tools/build-ui.js`; the same
+entries (`convertMgPackageToV2Entries`). Direct `.mg` conversion appends `_mg MMDD-HHmm` (one
+stamp per run) to every restored page name — an existing `_mg`/timestamp suffix is stripped
+first, so repeated imports stay distinguishable without stacking suffixes. `ui.html` is generated by `tools/build-ui.js`; the same
 `mgPackage.js` is loaded at runtime by `pythonParser/mg_to_zip.py`.
 
 ## TODO (remaining gaps)
