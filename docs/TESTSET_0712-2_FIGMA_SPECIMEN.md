@@ -1,5 +1,10 @@
 # 测试集 0712-2 · Figma 特性覆盖样本（往返答案卡）
 
+> **2026-07-12 后续**：本样本的覆盖已并入统一回归集（插件测试文件
+> `VOxB5rJq5fji1l64tOfq2o` 的「回归 2026-07」section），后续回归以
+> [`TESTSET_UNIFIED_REGRESSION.md`](TESTSET_UNIFIED_REGRESSION.md) 为准；
+> 本文件保留作 0712-3 往返过程与结论的历史记录。
+
 本文件是为 **MasterGo → Figma 往返测试**手工搭建的 Figma 特性样本的**权威规格**。
 用途：把这个 Figma 文件导入 MasterGo，再从 MasterGo 分别导出原生 `.mg` 与 SendToFigma
 v2 zip 基准，用 `tools/compare_mg_import.js` 验证解码器对这些特性的支持。本文档记录
