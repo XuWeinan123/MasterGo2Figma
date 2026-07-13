@@ -2140,13 +2140,14 @@ ${style}`;
   function createFigmaVariantName(name, index) {
     const fallback = `Variant ${index + 1}`;
     if (!name) return `Property 1=${fallback}`;
-    const bracketed = name.match(/^(.+?)\[[^\]]+\]=(.+)$/);
-    if (bracketed) {
-      return `${sanitizeVariantPropertyName(bracketed[1])}=${sanitizeVariantValue(bracketed[2], fallback)}`;
-    }
-    const equalsIndex = name.indexOf("=");
-    if (equalsIndex > 0 && equalsIndex < name.length - 1) {
-      return `${sanitizeVariantPropertyName(name.slice(0, equalsIndex))}=${sanitizeVariantValue(name.slice(equalsIndex + 1), fallback)}`;
+    if (name.indexOf("=") > 0) {
+      const pairs = name.split(",").map((pair) => {
+        const equalsIndex = pair.indexOf("=");
+        if (equalsIndex <= 0 || equalsIndex >= pair.length - 1) return null;
+        const key = pair.slice(0, equalsIndex).replace(/(\[[^\]]*\])+\s*$/, "");
+        return `${sanitizeVariantPropertyName(key)}=${sanitizeVariantValue(pair.slice(equalsIndex + 1), fallback)}`;
+      });
+      if (pairs.every((pair) => pair !== null)) return pairs.join(", ");
     }
     return `Property 1=${sanitizeVariantValue(name, fallback)}`;
   }
@@ -2581,6 +2582,7 @@ ${style}`;
         timingCounts: {},
         clientTimings: message.clientTimings || null,
         restoredNodeById: {},
+        deferredInstanceRelinks: [],
         figmaStyleIdByRef: {}
       };
       figma.ui.postMessage({
@@ -2910,6 +2912,9 @@ ${style}`;
       if (restoredOnPage !== pageNodeCount) throw new Error(`\u9875\u9762\u8FD8\u539F\u6570\u91CF\u4E0D\u4E00\u81F4\uFF1Aexpected=${pageNodeCount}, actual=${restoredOnPage}`);
       addImportTiming(session, "restore.nodesMs", Date.now() - nodeRestoreStartedAt);
       addImportTimingCount(session, "restore.pageCount", 1);
+      const relinkStartedAt = Date.now();
+      yield retryDeferredInstanceRelinks(layers);
+      addImportTiming(session, "restore.deferredRelinkMs", Date.now() - relinkStartedAt);
       yield reportPagePostprocessProgress(session, pageIndex, pageName, postprocessStart, pageNodeCount, 0, 0, 1, "\u6B63\u5728\u5E94\u7528\u81EA\u52A8\u5E03\u5C40...");
       const layoutStartedAt = Date.now();
       yield applyDeferredLayoutRestores((done, total, label) => {
@@ -3295,7 +3300,12 @@ ${style}`;
         safeRemove(newNode);
         throw error;
       }
-      if (activeImportSession) activeImportSession.restoredNodeById[nodeId] = newNode;
+      if (activeImportSession) {
+        activeImportSession.restoredNodeById[nodeId] = newNode;
+        if (layerRecord.mainComponentId) {
+          activeImportSession.deferredInstanceRelinks.push({ id: nodeId, node: newNode });
+        }
+      }
       yield applyImportedStyleBindings(newNode, layerRecord);
       let restoredCount = 1;
       const currentCount = restoredBefore + restoredCount;
@@ -3340,6 +3350,16 @@ ${style}`;
         if (instance) safeRemove(instance);
         return 0;
       }
+      yield applyInstanceRecordState(instance, layerRecord, layers);
+      session.restoredNodeById[layerRecord.id] = instance;
+      console.info("[mg-instance] restored:", layerRecord.id, ((_c = layerRecord.props) == null ? void 0 : _c.name) || layerRecord.name, "\u2192 instance of", layerRecord.mainComponentId);
+      const accounted = 1 + countRecordDescendants(layerRecord, layers);
+      yield maybeReportRestoreProgress(restoredBefore + accounted, totalNodes, "\u6B63\u5728\u8FD8\u539F\u5B9E\u4F8B\uFF1A" + (((_d = layerRecord.props) == null ? void 0 : _d.name) || layerRecord.name));
+      return accounted;
+    });
+  }
+  function applyInstanceRecordState(instance, layerRecord, layers) {
+    return __async(this, null, function* () {
       let rescaled = false;
       if (typeof layerRecord.instanceScale === "number" && isFinite(layerRecord.instanceScale) && layerRecord.instanceScale > 0 && Math.abs(layerRecord.instanceScale - 1) > 1e-6) {
         try {
@@ -3360,11 +3380,39 @@ ${style}`;
       } catch (error) {
         console.warn("[mg-instance] \u5B50\u8986\u76D6\u5E94\u7528\u5931\u8D25(\u5B9E\u4F8B\u4FDD\u7559):", layerRecord.id, error);
       }
-      session.restoredNodeById[layerRecord.id] = instance;
-      console.info("[mg-instance] restored:", layerRecord.id, ((_c = layerRecord.props) == null ? void 0 : _c.name) || layerRecord.name, "\u2192 instance of", layerRecord.mainComponentId);
-      const accounted = 1 + countRecordDescendants(layerRecord, layers);
-      yield maybeReportRestoreProgress(restoredBefore + accounted, totalNodes, "\u6B63\u5728\u8FD8\u539F\u5B9E\u4F8B\uFF1A" + (((_d = layerRecord.props) == null ? void 0 : _d.name) || layerRecord.name));
-      return accounted;
+    });
+  }
+  function retryDeferredInstanceRelinks(layers) {
+    return __async(this, null, function* () {
+      const session = activeImportSession;
+      if (!session || session.deferredInstanceRelinks.length === 0) return;
+      const pending = session.deferredInstanceRelinks;
+      session.deferredInstanceRelinks = [];
+      let swapped = 0;
+      for (const entry of pending) {
+        const layerRecord = layers[entry.id];
+        const shell = entry.node;
+        if (!layerRecord || !layerRecord.mainComponentId || !shell || shell.removed) continue;
+        const componentNode = session.restoredNodeById[layerRecord.mainComponentId];
+        if (!componentNode || componentNode.removed || componentNode.type !== "COMPONENT") continue;
+        const parent = shell.parent;
+        if (!parent || !("insertChild" in parent)) continue;
+        let instance = null;
+        try {
+          const index = parent.children.indexOf(shell);
+          instance = componentNode.createInstance();
+          parent.insertChild(index >= 0 ? index : parent.children.length, instance);
+        } catch (error) {
+          console.warn("[mg-instance] \u5EF6\u8FDF\u91CD\u94FE\u5931\u8D25(\u4FDD\u7559 Frame \u58F3):", layerRecord.id, error);
+          if (instance) safeRemove(instance);
+          continue;
+        }
+        yield applyInstanceRecordState(instance, layerRecord, layers);
+        session.restoredNodeById[layerRecord.id] = instance;
+        safeRemove(shell);
+        swapped++;
+      }
+      if (swapped > 0) console.info("[mg-instance] deferred relinks swapped:", swapped, "/", pending.length);
     });
   }
   function countRecordDescendants(record, layers) {

@@ -1008,7 +1008,10 @@
 
     function isCurrentImportMessage(message) {
       if (!message || !message.transferId) return true;
-      return !activeImportTransferId || message.transferId === activeImportTransferId;
+      // No active transfer (idle, or reset after a local failure): drop late
+      // main-thread progress — it used to repaint over the error status with
+      // stale "页面完成" labels and zeroed totals.
+      return !!activeImportTransferId && message.transferId === activeImportTransferId;
     }
 
     function formatBytes(bytes) {
@@ -1625,6 +1628,11 @@
       return {
         page: pageIndex,
         layerChunks,
+        // Captured while the chunk arrays still exist — the posting loop
+        // nulls layerChunks slots to release memory, which silently zeroed
+        // every later record-count read (the page-end timeout collapsed from
+        // ~19min to the 120s floor on 29k-node pages and BIG timed out).
+        recordCount: organizedCount,
         assetKeys
       };
     }
@@ -1689,7 +1697,9 @@
     }
 
     function getImportPageEndTimeoutMs(pageData, assetTransfers) {
-      const recordCount = getLayerChunkRecordCount(pageData.layerChunks);
+      const recordCount = pageData.recordCount !== undefined
+        ? pageData.recordCount
+        : getLayerChunkRecordCount(pageData.layerChunks);
       const assetBytes = getAssetTransferBytes(assetTransfers);
       const scaledByNodes = recordCount * 35;
       const scaledByAssets = Math.ceil(assetBytes / (1024 * 1024)) * 5000;
@@ -2214,6 +2224,67 @@
       return slash >= 0 ? path.slice(slash + 1) : path;
     }
 
+    // RADIAL ratio semantics come in two bare spellings (extended/majorLen2
+    // form is arbitrated separately at scan time):
+    //   · field 03 alone (native-drawn): 03 IS the final normalized ratio —
+    //     set0 径向 stores 0.3265 = the v2 value, and set1/0711-2/0711-3
+    //     radials (both handle orientations) all match the direct read.
+    //   · 02/03/04 conversion chain (Figma-imported): the final ratio is
+    //     PER-NODE — the same chain entry (03=0.10662, 04=0.3265) yields v2
+    //     3.0625 on the 210×120 owner (0.10662×1.75²) and 9.3789 on shared
+    //     100×100 strokes rectangles (0.10662×1²) — so field 04 is only the
+    //     owner-node cache and the real rule is ×(w/h)² for x-dominant
+    //     handles, direct for y-dominant (vertical reference frame). Diamond
+    //     and angular gradients read 03 directly even when a chain is
+    //     present (菱形 on 210×120: v2 = 9.3789), so only kind 2 defers.
+    // The transform is finalized per node in mgNativeProps via this
+    // enumerable temp (record clones carry it; finalize strips it).
+    function mgAttachRadialMeta(paint, kind, gradient, p0, p1) {
+      if (kind === 2 && !(gradient.majorLen2 > 0) &&
+          isFinite(gradient.ratioNorm) && gradient.ratioNorm > 0 &&
+          isFinite(gradient.ratio) && gradient.ratio > 0) {
+        paint.__mgRadialMeta = { p0: { x: p0.x, y: p0.y }, p1: { x: p1.x, y: p1.y }, ratio: gradient.ratio };
+      }
+      return paint;
+    }
+
+    function mgFinalizeRadialPaints(list, w, h) {
+      if (!Array.isArray(list)) return;
+      for (const paintEntry of list) {
+        if (!paintEntry || !paintEntry.__mgRadialMeta) continue;
+        const meta = paintEntry.__mgRadialMeta;
+        delete paintEntry.__mgRadialMeta;
+        if (paintEntry.type !== "GRADIENT_RADIAL") continue;
+        if (!isFinite(w) || !isFinite(h) || w <= 0 || h <= 0) continue;
+        const uxPx = (meta.p1.x - meta.p0.x) * w;
+        const uyPx = (meta.p1.y - meta.p0.y) * h;
+        if (Math.abs(uxPx) <= Math.abs(uyPx)) continue; // vertical frame — stored ratio is already final
+        const aspect = w / h;
+        paintEntry.gradientTransform = mgRadialGradientTransform(meta.p0, meta.p1, meta.ratio * aspect * aspect);
+      }
+    }
+
+    // Default-variant name wash (mirrors MasterGo's plugin API): when every
+    // comma-separated key of a variant name ends with an [a0] order marker,
+    // strip ONE marker layer per key; if the result carries no markers at
+    // all, re-join canonically with ", " (统一集 0:495 → "Size=Small,
+    // Type=Primary"), otherwise keep the raw comma join (0:110 keeps
+    // "…,Variant[a0]=Primary,…"). Any non-conforming pair aborts the wash.
+    function mgWashDefaultVariantName(name) {
+      if (!name || name.indexOf("[a0]=") < 0) return name;
+      const pairs = name.split(",");
+      const washed = [];
+      for (const pair of pairs) {
+        const eq = pair.indexOf("=");
+        if (eq <= 0) return name;
+        const key = pair.slice(0, eq);
+        if (key.slice(-4) !== "[a0]") return name;
+        washed.push(key.slice(0, -4) + pair.slice(eq));
+      }
+      const clean = washed.every(p => p.indexOf("[") < 0);
+      return clean ? washed.join(", ") : washed.join(",");
+    }
+
     function mgPlausibleScalar(v) {
       return isFinite(v) && Math.abs(v) >= 1e-6 && Math.abs(v) < 1e6;
     }
@@ -2517,7 +2588,7 @@
       function zfloat() { const r = mgReadZFloatAt(bytes, p); p = r.next; return r.value; }
 
       function parseGradientObject() {
-        const g = { kind: 0, p0: null, p1: null, stops: null, ratio: 0, majorLen2: 0 };
+        const g = { kind: 0, p0: null, p1: null, stops: null, ratio: 0, ratioNorm: 0, majorLen2: 0 };
         for (;;) {
           if (p >= end) return null;
           const t = bytes[p++];
@@ -2551,11 +2622,19 @@
               const st = bytes[p++];
               if (st === 0x00) break;
               if (st === 0x03) { g.ratio = zfloat(); continue; }
+              // Field 04 = the NORMALIZED-FINAL axis ratio. Figma-imported
+              // radials store a conversion chain (02 px-frame, 03
+              // vertical-frame, 04 normalized) — 统一集 径向 Radial stores
+              // 03=0.10662/04=0.3265 and star 03=0.9375/04=1.6667, where the
+              // 04 values reproduce the v2 transforms exactly; native
+              // MasterGo radials (set0 era) write field 03 alone and 03 IS
+              // final. Prefer 04 when present in the bare form.
+              if (st === 0x04) { g.ratioNorm = zfloat(); continue; }
               // Extended form (测试集 0710-2 radials): the 06 sub-object also
-              // carries floats 01/02/04/05 (ellipse-frame values we don't
-              // need) and 06 = 2 × |p1 − p0|. Its presence marks the encoding
+              // carries floats 01/02/05 (ellipse-frame values we don't need)
+              // and 06 = 2 × |p1 − p0|. Its presence marks the encoding
               // where the 03 scalar is a pure divisor: ratio = field06 / 03.
-              if (st === 0x01 || st === 0x02 || st === 0x04 || st === 0x05) { zfloat(); continue; }
+              if (st === 0x01 || st === 0x02 || st === 0x05) { zfloat(); continue; }
               if (st === 0x06) { g.majorLen2 = zfloat(); continue; }
               return null;
             }
@@ -2663,22 +2742,23 @@
         // 3.5696 (direct correct, screenshots 2026-07-11) — so neither "always
         // divide" nor "always direct" survives both; max() does. All observed
         // extended-form gradients are wide (ratio > 1); a genuinely narrow
-        // extended sample would need a new discriminator. Bare-03 records
-        // store the ratio directly (mgRadialAxisRatio).
+        // extended sample would need a new discriminator. Bare records read
+        // 03 directly here; chain-spelling RADIALs (field 04 present) are
+        // re-finalized per node — see mgAttachRadialMeta.
         const axisRatio = (gradient.majorLen2 > 0 && gradient.ratio > 0)
           ? Math.max(gradient.ratio, gradient.majorLen2 / gradient.ratio)
           : mgRadialAxisRatio(p0, p1, gradient.ratio);
         const transform = kind === 1
           ? mgLinearGradientTransform(p0, p1)
           : mgRadialGradientTransform(p0, p1, axisRatio);
-        const paint = {
+        const paint = mgAttachRadialMeta({
           type: MG_GRADIENT_TYPE[kind],
           visible: visible,
           opacity: opacity,
           blendMode: "NORMAL",
           gradientStops: gradient.stops.map(s => ({ position: s.position, color: { r: s.color.r, g: s.color.g, b: s.color.b, a: s.color.a } })),
           gradientTransform: transform
-        };
+        }, kind, gradient, p0, p1);
         Object.defineProperty(paint, "__mgGradientDebug", { value: gradient, enumerable: false });
         return paint;
       }
@@ -2758,7 +2838,10 @@
         if (MG_EFFECT_TYPE[kind] === undefined) continue;
         const type = MG_EFFECT_TYPE[kind];
         let color = null;
-        let radius = (type === "DROP_SHADOW" || type === "INNER_SHADOW") ? 10 : 0;
+        // Omitted radius = MasterGo default 10 for ALL kinds — the 回归/Layer
+        // Blur style entry (radius 10) omits field 09 entirely; shadows
+        // already followed the rule.
+        let radius = 10;
         let offX = 0;
         let offY = (type === "DROP_SHADOW" || type === "INNER_SHADOW") ? 4 : 0;
         let spread = 0;
@@ -3131,6 +3214,11 @@
             if (t === 0x21) fields.has21 = true;
             if (t === 0x22) fields.has22 = true;
             if (t === 0x2c) fields.strokeCap = bytes[p + 1];
+            // 2e 01 = layoutPositioning ABSOLUTE (ignore auto-layout).
+            // Cross-tab on 统一集: all 5 v2-ABSOLUTE nodes carry it, none of
+            // the other 316 do (TP5/FP0/FN0). Replaces the old group-child
+            // heuristic, which mis-marked plain group children.
+            if (t === 0x2e) fields.absolute = bytes[p + 1] === 1;
             p += 2;
             continue;
           }
@@ -3192,7 +3280,14 @@
     const MG_BOOL_OPS = ["UNION", "INTERSECT", "EXCLUDE", "SUBTRACT"];
     // 1=MAX observed on the 0712-3 round-trip specimen (counterAxis "MAX"
     // rows spell `0e 01`); 3=MAX kept from the older fixtures.
-    const MG_ALIGN_ITEMS = { 1: "MAX", 2: "CENTER", 3: "MAX", 4: "SPACE_BETWEEN" };
+    // Primary axis (0d): 1=MAX 2=CENTER 3=SPACE_BETWEEN — 统一回归集
+    // al/space-between-3 stores `0d 03` and the v2 export says SPACE_BETWEEN,
+    // while al/vertical-primary-MAX stores `0d 01`; the old 3:"MAX" mapping
+    // came from counter-axis data and mis-packed SPACE_BETWEEN rows to the
+    // end. Counter axis (0e) keeps 3=MAX (Figma has no counter
+    // SPACE_BETWEEN). Omitted = MIN on both axes.
+    const MG_PRIMARY_ALIGN_ITEMS = { 1: "MAX", 2: "CENTER", 3: "SPACE_BETWEEN", 4: "SPACE_BETWEEN" };
+    const MG_COUNTER_ALIGN_ITEMS = { 1: "MAX", 2: "CENTER", 3: "MAX", 4: "MAX" };
     function mgParseContainerMeta(bytes, off) {
       const meta = { subtype: "FRAME", booleanOperation: null };
       let p = off;
@@ -3332,9 +3427,13 @@
           p = r.next;
         }
         // Same default rule: an empty padding object means "all 10" in full
-        // editor exports, "all 0" in share exports.
+        // editor exports, "all 0" in share exports. INDIVIDUALLY omitted
+        // sides follow the same default — MasterGo drops any side equal to
+        // 10 while keeping the others (统一集 回归BoolChip stores L/R 16 and
+        // omits T/B 10; 回归Badge stores T/B 5 and omits L/R 10). Keep absent
+        // slots undefined; the caller resolves them per side.
         if (padCount === 0) meta.paddingsMissing = true;
-        else { meta.paddings = { top: pads[1] || 0, right: pads[2] || 0, bottom: pads[3] || 0, left: pads[4] || 0 }; sawStructural = true; }
+        else { meta.paddings = { top: pads[1], right: pads[2], bottom: pads[3], left: pads[4] }; sawStructural = true; }
       } else {
         // A wholly absent 0a object follows the same omitted-field default as
         // the empty one (mirror of the 09/itemSpacing rule above). Verified on
@@ -3350,8 +3449,8 @@
       // offset is known (the record trailer anchors there).
       if (bytes[p] === 0x0b) p += 2;
       if (bytes[p] === 0x0c) p += 2;
-      if (bytes[p] === 0x0d) { meta.primaryAlign = MG_ALIGN_ITEMS[bytes[p + 1]] || "MIN"; sawStructural = true; p += 2; }
-      if (bytes[p] === 0x0e) { meta.counterAlign = MG_ALIGN_ITEMS[bytes[p + 1]] || "MIN"; sawStructural = true; p += 2; }
+      if (bytes[p] === 0x0d) { meta.primaryAlign = MG_PRIMARY_ALIGN_ITEMS[bytes[p + 1]] || "MIN"; sawStructural = true; p += 2; }
+      if (bytes[p] === 0x0e) { meta.counterAlign = MG_COUNTER_ALIGN_ITEMS[bytes[p + 1]] || "MIN"; sawStructural = true; p += 2; }
       if (bytes[p] === 0x0f) {
         const c = mgReadCString(bytes, p + 1, Math.min(off + 320, p + 96));
         if (c) { meta.sourceRef = c.text || null; p = c.end + 1; }
@@ -3603,7 +3702,7 @@
         if (bytes[p] === 0x04) { const r = mgReadZeroFloat(bytes, p + 1); entry.fontSize = r.value; p = r.next; }
         if (bytes[p] === 0x05) { const r = mgReadZeroFloat(bytes, p + 1); entry.lineHeight = r.value; p = r.next; }
         // Remaining fields: one-byte enums/flags plus the psName/styleName
-        // strings. Tag 0a is textCase: 1=UPPER, 2=LOWER (omitted=ORIGINAL).
+        // strings. Tag 0a is textCase: 1=UPPER, 2=LOWER, 3=TITLE (omitted=ORIGINAL).
         // `06 01` = lineHeight unit PIXELS, `0b 01` = letterSpacing unit
         // PIXELS (omitted = PERCENT / AUTO), `08 <f>` = letterSpacing value —
         // cross-tabled 2026-07-11: {0,PIXELS}/{4,PIXELS} entries carry 0b
@@ -4125,6 +4224,12 @@
         if (forceLayoutOverlay && Math.abs(mergedLayout.rotation || 0) < 0.01) {
           mergedLayout.relativeTransform = [[1, 0, mergedLayout.x || 0], [0, 1, mergedLayout.y || 0]];
         }
+        // The trailer `2e 01` flag is authoritative — set0's embedded copies
+        // carry a stale layoutPositioning:"AUTO" that the same-era v2 export
+        // contradicts (ABSOLUTE).
+        if (props.layout && props.layout.layoutPositioning === "ABSOLUTE") {
+          mergedLayout.layoutPositioning = "ABSOLUTE";
+        }
         props.layout = mergedLayout;
       }
       props.id = keep.id;
@@ -4136,112 +4241,14 @@
       return props;
     }
 
-    function mgApplyButtonInstanceTextCentering(records) {
-      const byId = new Map(records.map(r => [r.id, r]));
-      const templateLayout = child => {
-        const slash = child.id.lastIndexOf("/");
-        const tpl = slash > 0 ? byId.get(child.id.slice(slash + 1)) : null;
-        return tpl && tpl.props && tpl.props.layout ? tpl.props.layout : null;
-      };
-      for (const record of records) {
-        if (!record.name || record.name.indexOf("Button_Secondary_Instance") < 0) continue;
-        const children = records.filter(r => r.id.indexOf(record.id + "/") === 0 && r.parentId === record.id);
-        const label = children.find(r => r.name && r.name.indexOf("按钮文本_Button_Label") >= 0 && r.props);
-        if (!label || !label.props || !label.props.layout) continue;
-        const tplLabel = templateLayout(label);
-        label.props.characters = "Cancel";
-        label.props.layout.width = 48;
-        // The centered auto-layout reflow: shrinking the label from the
-        // template width shifts the content block right by half the delta.
-        const shift = ((tplLabel ? tplLabel.width : 55) - 48) / 2;
-        if (!(shift > 0)) continue;
-        for (const child of children) {
-          if (!child.props || !child.props.layout) continue;
-          if (child.name.indexOf("按钮图标_Button_Icon") < 0 && child.name.indexOf("按钮文本_Button_Label") < 0) continue;
-          // Shift only children still sitting at their template x. Shallow
-          // share-export override records already store the reflowed position;
-          // moving those again double-applies the shift.
-          const tpl = templateLayout(child);
-          if (tpl && Math.abs((child.props.layout.x || 0) - tpl.x) > 0.015) continue;
-          child.props.layout.x = (child.props.layout.x || 0) + shift;
-          if (Array.isArray(child.props.layout.relativeTransform) && child.props.layout.relativeTransform[0]) {
-            child.props.layout.relativeTransform[0][2] = child.props.layout.x;
-          }
-        }
-      }
-    }
-
-    function mgApplyCardInstanceOverrides(records) {
-      for (const record of records) {
-        if (!record.name || (record.name.indexOf("Card_Instance") < 0 && record.name.indexOf("卡片实例") < 0)) continue;
-        if (record.props) {
-          record.props.sourceType = "INSTANCE";
-          record.props.clipsContent = false;
-          const cardFill = mgMakeSolidPaint(1, 1, 1, 1);
-          const cardStroke = mgMakeSolidPaint(0.8980392217636108, 0.9058823585510254, 0.9215686321258545, 1);
-          cardFill.blendMode = "PASS_THROUGH";
-          cardStroke.blendMode = "PASS_THROUGH";
-          record.props.geometry = Object.assign({}, record.props.geometry || {}, {
-            fills: [cardFill],
-            strokes: [cardStroke],
-            strokeWeight: 1,
-            strokeAlign: "INSIDE",
-            strokeJoin: "MITER",
-            dashPattern: [],
-            strokeCap: "NONE"
-          });
-          record.props.blend = Object.assign({}, record.props.blend || {}, {
-            blendMode: "PASS_THROUGH",
-            effects: [mgDropShadow(0.11999999731779099, 12, 28, -8)]
-          });
-          mgSetCorner(record.props, 20);
-          mgSetSideStrokeWeights(record.props, 1);
-          if (record.props.layout) {
-            Object.assign(record.props.layout, {
-              paddingLeft: 16, paddingRight: 16, paddingTop: 16, paddingBottom: 16,
-              itemSpacing: 12, primaryAxisSizingMode: "AUTO"
-            });
-          }
-        }
-        const descendants = records.filter(r => r.id.indexOf(record.id + "/") === 0);
-        for (const child of descendants) {
-          if (!child.props || !child.props.layout) continue;
-          if (child.name.indexOf("Card_Content_Frame") >= 0) {
-            child.props.layout.height = 85;
-          } else if (child.name.indexOf("Card_Description") >= 0) {
-            child.props.characters = "Nested instance with text override.";
-            child.props.layout.height = 15;
-          } else if (child.name.indexOf("Card_Avatar") >= 0) {
-            child.props.layout.y = 53;
-          }
-          if (Array.isArray(child.props.layout.relativeTransform)) {
-            child.props.layout.relativeTransform[0][2] = child.props.layout.x || 0;
-            child.props.layout.relativeTransform[1][2] = child.props.layout.y || 0;
-          }
-        }
-      }
-    }
-
-    function mgSetCorner(props, radius) {
-      props.corner = Object.assign({}, props.corner || {}, {
-        topLeftRadius: radius, topRightRadius: radius,
-        bottomLeftRadius: radius, bottomRightRadius: radius,
-        cornerRadius: radius, cornerSmoothing: 0
-      });
-    }
-
-    function mgDropShadow(alpha, y, radius, spread) {
-      return {
-        type: "DROP_SHADOW",
-        color: { r: 0.05882352963089943, g: 0.09019608050584793, b: 0.16470588743686676, a: alpha },
-        offset: { x: 0, y: y },
-        radius: radius,
-        spread: spread,
-        visible: true,
-        blendMode: "PASS_THROUGH"
-      };
-    }
-
+    // NOTE(2026-07-13): the set1-era name-keyed patch functions that used to
+    // live here (Button_Secondary_Instance text centering, Card_Instance
+    // visual overrides, per-name frame drop-shadows) are gone. They baked one
+    // fixture's expected values into the decoder and fired on ANY file whose
+    // layer names matched — the 统一回归集 round-trip caught them forcing
+    // sourceType=INSTANCE and stale fills onto freshly decoded records. The
+    // underlying fields (effects, layoutPositioning, paddings) are decoded
+    // for real now.
     function mgNormalizePaintBlend(paints) {
       if (!Array.isArray(paints)) return;
       paints.forEach(p => { if (p) p.blendMode = "PASS_THROUGH"; });
@@ -4262,24 +4269,6 @@
         props.layout.counterAxisAlignContent = "AUTO";
         props.layout.itemReverseZIndex = false;
         props.layout.strokesIncludedInLayout = false;
-      }
-    }
-
-    function mgSetSideStrokeWeights(props, weight) {
-      if (!props.geometry) return;
-      props.geometry.strokeTopWeight = weight;
-      props.geometry.strokeRightWeight = weight;
-      props.geometry.strokeBottomWeight = weight;
-      props.geometry.strokeLeftWeight = weight;
-    }
-
-    // Native drop-shadow effects are still undecoded; these two frames carry
-    // known shadows in the fixture.
-    function mgApplyFrameFallbacks(props) {
-      if (props.name === "03_02_卡片组件_Card_Component") {
-        props.blend.effects = [mgDropShadow(0.11999999731779099, 12, 28, -8)];
-      } else if (props.name === "04_实例使用画框_Instance_Usage_Frame") {
-        props.blend.effects = [mgDropShadow(0.10000000149011612, 14, 32, -8)];
       }
     }
 
@@ -4322,7 +4311,6 @@
 
     function mgApplyNativeVisualFallbacks(props) {
       mgApplyCommonVisualDefaults(props);
-      mgApplyFrameFallbacks(props);
       mgApplyShapeFallbacks(props);
       mgApplyTextFallbacks(props);
       mgApplyCommonVisualDefaults(props);
@@ -4415,6 +4403,8 @@
       for (const paintEntry of strokes) {
         if (paintEntry && paintEntry.__mgCropRect) delete paintEntry.__mgCropRect;
       }
+      mgFinalizeRadialPaints(fills, n.w, n.h);
+      mgFinalizeRadialPaints(strokes, n.w, n.h);
       // Values read from the node's OWN record are final; template-inherited
       // and default values still need the instance scale.
       const ownFinal = !n.templateValues;
@@ -4483,6 +4473,10 @@
           layoutAlign: "INHERIT", layoutGrow: 0, layoutPositioning: "AUTO"
         }
       };
+      // Trailer `2e 01` = the node ignores its auto-layout parent (own-record
+      // flag only; instance mirrors inherit it through the cloned template
+      // record's trailer).
+      if (trailer.absolute) props.layout.layoutPositioning = "ABSOLUTE";
       if (t === "TEXT") {
         props.characters = n.characters || n.name || "";
         props.textAlignHorizontal = MG_TEXT_ALIGN_H[n.textAlignH] || "LEFT";
@@ -4579,16 +4573,21 @@
         if (meta.layoutMode) props.layout.layoutMode = meta.layoutMode;
         const missingDefault = (mgShareModeActive &&
           (n.templateValues || n.templateRef || n.id.indexOf("/") >= 0)) ? 0 : 10;
+        // MasterGo materializes instance layout in SCALED units (the v2
+        // export of inst/scale-0.83x carries padding 11.62 = 14×0.83) while
+        // the record stores the template-space value — replay the scale here
+        // like the geometry path does.
+        const layoutScale = Math.abs(n.effScale || (n.trailer && n.trailer.scaleFactor) || 1);
         const spacing = meta.itemSpacingMissing ? missingDefault : meta.itemSpacing;
-        if (spacing !== undefined && types.type !== "SECTION") props.layout.itemSpacing = spacing;
+        if (spacing !== undefined && types.type !== "SECTION") props.layout.itemSpacing = spacing * layoutScale;
         const pads = meta.paddingsMissing
           ? { top: missingDefault, right: missingDefault, bottom: missingDefault, left: missingDefault }
           : meta.paddings;
         if (pads && types.type !== "SECTION") {
-          props.layout.paddingTop = pads.top;
-          props.layout.paddingRight = pads.right;
-          props.layout.paddingBottom = pads.bottom;
-          props.layout.paddingLeft = pads.left;
+          props.layout.paddingTop = (pads.top === undefined ? missingDefault : pads.top) * layoutScale;
+          props.layout.paddingRight = (pads.right === undefined ? missingDefault : pads.right) * layoutScale;
+          props.layout.paddingBottom = (pads.bottom === undefined ? missingDefault : pads.bottom) * layoutScale;
+          props.layout.paddingLeft = (pads.left === undefined ? missingDefault : pads.left) * layoutScale;
         }
         if (meta.primaryAlign) props.layout.primaryAxisAlignItems = meta.primaryAlign;
         if (meta.counterAlign) props.layout.counterAxisAlignItems = meta.counterAlign;
@@ -4648,6 +4647,7 @@
             const segFills = cr && paints[cr.paintRef]
               ? paints[cr.paintRef].map(mgCloneJsonValue)
               : ((props.geometry && props.geometry.fills) || []).map(mgCloneJsonValue);
+            mgFinalizeRadialPaints(segFills, n.w, n.h);
             segments.push({
               start: s,
               end: e,
@@ -6097,13 +6097,28 @@
           delete props.constraints;
         }
         delete props.__nativeContainerLayout;
+        // MasterGo's plugin API washes the DEFAULT variant's stored name —
+        // the .mg keeps `Size[a0]=Small,Type[a0]=Primary` while the v2
+        // export says `Size=Small, Type=Primary`. Reproduce the wash so the
+        // records match (and the 0712-3 "1 variant name washed" residual
+        // closes): only when the component sits in a COMPONENT_SET and EVERY
+        // key ends with [a0]; non-default variants pass through raw.
+        let recordName = n.name || id;
+        if (props.sourceType === "COMPONENT" && nodes[n.parent] && nodes[n.parent].containerMeta &&
+            nodes[n.parent].containerMeta.subtype === "COMPONENT_SET") {
+          const washed = mgWashDefaultVariantName(recordName);
+          if (washed !== recordName) {
+            recordName = washed;
+            props.name = washed;
+          }
+        }
         const record = {
           version: 2,
           id: id,
           pageId: "",
           parentId: (nodes[n.parent] ? n.parent : null),
           index: rootIndexOverride[id] != null ? rootIndexOverride[id] : (indexInParent[id] || 0),
-          name: n.name || id,
+          name: recordName,
           childIds: (childIds[id] || []).filter(isEmittedChild),
           props: props
         };
@@ -6136,25 +6151,11 @@
         if (n.textStyleRef && styleDefs[n.textStyleRef]) record.textStyleRef = n.textStyleRef;
         records.push(record);
       }
-      // Children of a GROUP whose nearest non-group ancestor is an auto-layout
-      // frame report layoutPositioning=ABSOLUTE in the v2 export.
-      const recordsByIdPre = {};
-      for (const record of records) recordsByIdPre[record.id] = record;
-
-      for (const record of records) {
-        if (record.props && record.props.type === "SLICE") continue;
-        const parent = record.parentId ? recordsByIdPre[record.parentId] : null;
-        if (!parent || !parent.props || parent.props.type !== "GROUP") continue;
-        let anc = parent;
-        while (anc && anc.props && anc.props.type === "GROUP") {
-          anc = anc.parentId ? recordsByIdPre[anc.parentId] : null;
-        }
-        if (anc && anc.props && anc.props.layout && anc.props.layout.layoutMode && anc.props.layout.layoutMode !== "NONE") {
-          if (record.props && record.props.layout) record.props.layout.layoutPositioning = "ABSOLUTE";
-        }
-      }
-      mgApplyButtonInstanceTextCentering(records);
-      mgApplyCardInstanceOverrides(records);
+      // layoutPositioning now comes from the real per-node trailer flag
+      // (`2e 01`, decoded in mgParseTrailer/mgNativeProps). The old
+      // group-child-under-auto-layout heuristic that lived here mis-marked
+      // plain group children as ABSOLUTE (统一集 02_02: v2 says AUTO) while
+      // missing genuinely absolute children (03_01 按钮背景).
       // Plugin-runtime option: strip instance-DESCENDANT records down to the
       // fields the importer actually reads from them (positional override
       // matching: visible/opacity/characters/fills/strokes) plus a minimal
@@ -6328,7 +6329,14 @@
         if (def.category === "FILL" || def.category === "STROKE") {
           const fills = paints[sid];
           if (fills && fills.length) {
-            emittedStyles.push({ id: sid, styleType: "PAINT", name: def.name, paints: fills.map(mgCloneJsonValue) });
+            // Strip per-node finalize temps — styles have no node size to
+            // resolve them against (a radial style keeps the scan transform).
+            const stylePaints = fills.map(mgCloneJsonValue);
+            for (const sp of stylePaints) {
+              if (sp && sp.__mgRadialMeta) delete sp.__mgRadialMeta;
+              if (sp && sp.__mgCropRect) delete sp.__mgCropRect;
+            }
+            emittedStyles.push({ id: sid, styleType: "PAINT", name: def.name, paints: stylePaints });
           }
         } else if (def.category === "EFFECT") {
           const fx = effectTable[sid];

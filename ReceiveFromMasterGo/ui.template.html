@@ -1008,7 +1008,10 @@
 
     function isCurrentImportMessage(message) {
       if (!message || !message.transferId) return true;
-      return !activeImportTransferId || message.transferId === activeImportTransferId;
+      // No active transfer (idle, or reset after a local failure): drop late
+      // main-thread progress — it used to repaint over the error status with
+      // stale "页面完成" labels and zeroed totals.
+      return !!activeImportTransferId && message.transferId === activeImportTransferId;
     }
 
     function formatBytes(bytes) {
@@ -1625,6 +1628,11 @@
       return {
         page: pageIndex,
         layerChunks,
+        // Captured while the chunk arrays still exist — the posting loop
+        // nulls layerChunks slots to release memory, which silently zeroed
+        // every later record-count read (the page-end timeout collapsed from
+        // ~19min to the 120s floor on 29k-node pages and BIG timed out).
+        recordCount: organizedCount,
         assetKeys
       };
     }
@@ -1689,7 +1697,9 @@
     }
 
     function getImportPageEndTimeoutMs(pageData, assetTransfers) {
-      const recordCount = getLayerChunkRecordCount(pageData.layerChunks);
+      const recordCount = pageData.recordCount !== undefined
+        ? pageData.recordCount
+        : getLayerChunkRecordCount(pageData.layerChunks);
       const assetBytes = getAssetTransferBytes(assetTransfers);
       const scaledByNodes = recordCount * 35;
       const scaledByAssets = Math.ceil(assetBytes / (1024 * 1024)) * 5000;

@@ -64,7 +64,9 @@ Fields cracked with this fixture (all in `mgWalkScalarFields` / record grammar b
   family/style, style camel-case → spaced);
 - **effect registry** via node tag `17` (`mgScanEffects`): child records
   `05 <kind> 08 <argb> 09 <radius> 0a <offset.x> 0b <offset.y> 0c <spread> 0d/0e <flags>
-  0f <spread>` (floats zero-compressed; omitted offset = 0). Kind enum (0712-3):
+  0f <spread>` (floats zero-compressed; omitted offset = 0; **omitted radius = MasterGo
+  default 10 for ALL kinds** — the 回归/Layer Blur style entry radius 10 omits field `09`
+  entirely; blur kinds used to default 0 and lose the style radius). Kind enum (0712-3):
   **0=INNER_SHADOW (zero-compressed → the whole `05` field is OMITTED), 1=DROP_SHADOW,
   2=LAYER_BLUR, 3=BACKGROUND_BLUR**; `0f` is a second spread spelling (spread 1/−2/−4 all
   use it — an unknown-tag bail there used to drop whole effect lists). Tag 17 doubles as the
@@ -196,7 +198,14 @@ restored first (page children re-ordered back to package order afterwards), then
 matching of the record tree against the instance's children (record childIds order ==
 component child order; any count drift skips that subtree). Overrides applied: visibility,
 opacity, text characters (with cached font loads). Any failure falls back to the previous
-frame-shell restore. The comparator ignores the record-level field (SendToFigma baselines
+frame-shell restore. **Same-root use-before-definition** (2026-07-13, 统一集 R08: instances
+ordered before their components INSIDE one page root, where the root-level topo sort can't
+help) is handled by a deferred-relink pass: the shell fallback is remembered and swapped for
+a real instance after the page finishes (`retryDeferredInstanceRelinks`, before the deferred
+layout pass so its registrations are consumed). Multi-axis variant names are normalized per
+comma pair on import (`Size[a0]=Small,Type[a1]=Secondary` → `Size=Small, Type=Secondary`) —
+stripping only the first pair left sibling variants with mismatched property-name sets and
+`combineAsVariants` threw, degrading the whole set to a frame (统一集 R06). The comparator ignores the record-level field (SendToFigma baselines
 flatten instances to frames), so all six fixtures stay byte-identical.
 Remaining 0711-3 residuals (cover baseline: 0 type / 115 geometry / 66 transform / 43 font /
 7 paint / 622 deep): nested-instance font/image overrides that live in the still-undecoded
@@ -368,6 +377,11 @@ validated by forward-parsing to a clean terminator:
 - **`2c <b>` = strokeCap** (same enum as blob vertices: 1=ROUND 2=SQUARE 3/4=ARROW);
 - **`2d <4×f>` = per-side stroke weights** [top,right,bottom,left] — only meaningful on
   rectangle-like/frame-like nodes (Figma has no per-side weights elsewhere);
+- **`2e 01` = layoutPositioning ABSOLUTE** (ignore auto-layout) — 统一集 cross-tab: all 5
+  v2-ABSOLUTE nodes carry it, none of the other 316 do (TP5/FP0/FN0); set0's three
+  group-children confirm it against the old export era too. The flag is authoritative over the
+  embedded-v2 layout merge (set0's embedded copies carry a stale `AUTO`). Replaced the
+  group-child-under-auto-layout heuristic, which mis-marked plain group children;
 - `37 <b>` unknown (3 on the mask rectangle).
 
 ## Container subtype — CRACKED ✓ (`1c 07` nested object)
@@ -383,20 +397,30 @@ Sub-field stream after `1c 07` (ascending ids):
   - `05 01 07 …` → COMPONENT (component key follows in field 07);
   - `07 …` directly → COMPONENT_SET;
   - `06 01 15 …` → INSTANCE (field 15 = native override table: component ref id + per-child
-    overrides such as text `Confirm`/`Cancel` — decoding it would replace the name-based
-    instance-override hacks, not done yet);
+    overrides such as text `Confirm`/`Cancel` — still undecoded; the name-based
+    instance-override hacks that used to paper over it were REMOVED 2026-07-13 after they
+    corrupted same-named layers in the 统一回归集, so set0 keeps 3 honest residual rows);
   - **`08 <b>` = layoutMode** (1=HORIZONTAL 2=VERTICAL; omitted=NONE);
   - **`09 <f>` = itemSpacing**, **`0a <obj>` = paddings** (sub-fields `01`=top `02`=right
     `03`=bottom `04`=left, zero-compressed). **Default-10 rule**: a missing `09` field, an
-    EMPTY `0a` object, or a **wholly absent `0a` object** all mean the omitted-field default —
-    MasterGo runtime default **10** in full editor exports, **0** on share-export
-    template/instance nodes (`missingDefault` in `mgNativeProps`). Explicit zeros are written as
-    `09 00` / four zero sub-fields. (This is why groups/booleans export padding 10.)
-    Cross-set evidence for the absent-`0a` spelling: 0710-2 (full export) plain GROUP/BOOLEAN
-    records omit `0a` and the baseline says 10 (269 nodes); 0710-1's absent-`0a` nodes are all
-    template/instance children and the baseline says 0 — both fall out of the same
-    `paddingsMissing` funnel. Before 2026-07-10 the absent case wrote nothing (restored as 0).
-  - **`0d <b>` / `0e <b>` = primary/counterAxisAlignItems** (1=MAX [0712-3], 2=CENTER, 3=MAX, 4=SPACE_BETWEEN; omitted=MIN);
+    EMPTY `0a` object, a **wholly absent `0a` object**, or an **individually omitted sub-field**
+    (统一集 2026-07-13: 回归BoolChip stores L/R 16 and drops the T/B 10 slots; 回归Badge stores
+    T/B 5 and drops L/R 10) all mean the omitted-field default — MasterGo runtime default **10**
+    in full editor exports, **0** on share-export template/instance nodes (`missingDefault` in
+    `mgNativeProps`). Explicit zeros are written as `09 00` / four zero sub-fields — 回归Button
+    (COMPONENT_SET) writes all four `01 00 02 00 03 00 04 00`. (This is why groups/booleans
+    export padding 10.) Cross-set evidence for the absent-`0a` spelling: 0710-2 (full export)
+    plain GROUP/BOOLEAN records omit `0a` and the baseline says 10 (269 nodes); 0710-1's
+    absent-`0a` nodes are all template/instance children and the baseline says 0 — both fall
+    out of the same `paddingsMissing` funnel. Before 2026-07-10 the absent case wrote nothing
+    (restored as 0). Rescaled-instance layout is stored in TEMPLATE units and the v2 export
+    materializes it SCALED (inst/scale-0.83x: padding 14 stored, 11.62 exported) — paddings and
+    itemSpacing multiply by the trailer-26 scale like the geometry path.
+  - **`0d <b>` = primaryAxisAlignItems** (1=MAX, 2=CENTER, **3=SPACE_BETWEEN** [统一集
+    al/space-between-3 stores `0d 03`], 4=SPACE_BETWEEN; omitted=MIN) / **`0e <b>` =
+    counterAxisAlignItems** (1=MAX, 2=CENTER, 3=MAX; omitted=MIN — Figma has no counter
+    SPACE_BETWEEN; the pre-0713 shared table read primary `3` as MAX and packed
+    SPACE_BETWEEN rows to the end);
   - `14 …` component property / override definition table (not walked);
   - `17 <b>` container kind enum near the end: `01` observed only on SECTION.
 Boolean/group records also carry `09`/`0a` after their `01`/`02` flags — same rules apply
@@ -480,10 +504,21 @@ Paint child record body (after `01 <id> 00 02 <ref> 00 03 <sort> 00`), see `mgPa
 - `0a { 01 <kind> 03 <p0.x p0.y> 04 <p1.x p1.y> 05 <n stops> 06 { … } } 00` —
   gradient geometry. Stop record: `[01 <position>] 02 <argb> 00`. p0/p1 are the gradient handles
   in node-normalized space. The `06` sub-object has **two spellings**:
-  - **Bare `06 { 03 <scalar> }`** (share exports): the scalar IS the Figma minor/major handle
-    ratio, stored directly (`mgRadialAxisRatio`; absent/0 = circular). All observed bare samples
-    are ≤ 1 (0.3265/0.5714/1). The 2026-07-10 `min(scalar, 2|p1−p0|/scalar)` rule was a fit to
-    FOLDED ZIP baselines (see below), not to the render.
+  - **Bare `06 { 03 <scalar> }`** (share exports, native-drawn gradients): the scalar IS the
+    Figma minor/major handle ratio, stored directly (`mgRadialAxisRatio`; absent/0 = circular).
+    All observed bare samples are ≤ 1 (0.3265/0.5714/1). The 2026-07-10
+    `min(scalar, 2|p1−p0|/scalar)` rule was a fit to FOLDED ZIP baselines (see below), not to
+    the render.
+  - **Chain `06 { 02 <f> 03 <scalar> 04 <f> }`** (2026-07-13 统一集, Figma-imported gradients):
+    a conversion chain where field `04` is the normalized-final ratio FOR THE OWNER NODE only —
+    the same chain entry (03=0.10662, 04=0.3265) is shared by nodes of different aspect and the
+    v2 export materializes **per node**: RADIAL (kind 2) with an x-dominant handle =
+    `03 × (w/h)²` (210×120 → 0.3265 → a11 3.0625; shared 100×100 strokes rectangles → 0.10662
+    → 9.3789); y-dominant handles read `03` directly (vertical reference frame — set1/0711-2/
+    0711-3 native radials all match the direct read, a `×(h/w)²` y-branch broke 368 paints).
+    ANGULAR/DIAMOND read `03` directly even when the chain is present (菱形 on 210×120: v2 =
+    9.3789). Implemented as `__mgRadialMeta` on the scanned paint + per-node
+    `mgFinalizeRadialPaints` in `mgNativeProps` (paint styles keep the scan transform).
   - **Extended `06 { 01 <f> 02 <f> 03 <scalar> 04 <f> 05 <f> 06 <f> }`**: fields 01/02/04/05 are
     ellipse-frame floats (unused), field `06` = `2 × |p1 − p0|`. Scalar and field06 form the
     ratio **branch pair `{scalar, field06/scalar}`; the render truth is the LARGER branch**
@@ -660,8 +695,16 @@ paint/effect/text/font/vector-network mismatches. The remaining comparator outpu
 - Full-export era gaps that still stand: native instance override table (`1c 07` sub-field 15)
   for the old fixtures' name-rule hacks; star/polygon `pointCount`/`innerRadius`;
   exportSettings (absent from node records; embedded-JSON twin only).
+- Default-variant name wash (2026-07-13, `mgWashDefaultVariantName`): the .mg stores variant
+  names with MasterGo's `[aN]` order markers appended per key; the plugin API (and hence the
+  v2 export) washes the DEFAULT variant — when every comma-separated key ends with `[a0]`, one
+  marker layer is stripped per key, and a fully clean result re-joins canonically with `", "`
+  (`Size[a0]=Small,Type[a0]=Primary` → `Size=Small, Type=Primary`; `…,Variant[a0][a0]=…` keeps
+  the raw comma join after stripping to `Variant[a0]`). Non-default variants pass through raw.
+  Gated to COMPONENT records inside a COMPONENT_SET. Known era exception: set0's same-shaped
+  default variant is NOT washed in its 07-10 zip (1 accepted residual row on the retired set).
 - Unknown fields: trailer `1e/25/27/2b/37`, paint fields `07/0c/0d`, vertex flag `03` values,
-  `0d/0e` align values for MAX/SPACE_BETWEEN (guessed 3/4), scalar `19` flag-bit meanings,
+  scalar `19` flag-bit meanings,
   text-style entry field `13` (`{02 <varint> 06 <varint>}` sub-object with identical
   timestamp-like values across files — metadata, not style), TEXT-object leading `08 <b>`,
   run glyph tables' float semantics (skipped, not used).

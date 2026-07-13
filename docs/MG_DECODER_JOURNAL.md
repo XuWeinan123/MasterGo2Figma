@@ -978,3 +978,83 @@ MasterGo 导出端的共同丢失)。特性样本的 origin 页是第三真值�
    imageTransform 恰好在白名单里所以 CROP 生效、TILE 不生效,形成了误导性的
    "半成功"。教训:**修 applier 先找到字段被重建/白名单化的那一层**,在源对象
    还在手里的地方做映射;"同一文件里改了个函数"不等于"改在了数据流上"。
+
+## 2026-07-12 — 0711-2 导入"卡死 35%":发完即弃误伤超时公式
+
+症状:UI 停在「页面完成:BIG_mg …  29007/0 个图层后处理 · 总进度 35%」。链路还原:
+
+1. OOM 修复的"发完即弃"把 `pageData.layerChunks` 槽位置 null;
+2. 页面还原超时公式 `getImportPageEndTimeoutMs` 从 layerChunks **现数** recordCount
+   (`getLayerChunkRecordCount` 对 null 槽位安全返回 0——静默归零而非报错);
+3. 超时从 `120s + 29007×35ms ≈ 19 分钟` 塌缩成 **120s 底值** → 29k 真实矢量节点
+   的 share 页必然超时(特斯拉页以实例为主、真实创建节点少,侥幸不触发);
+4. UI catch → `resetImportProgressMode()`(total 清零、百分比归零)→ 主线程仍在
+   继续并发来「页面完成」→ `isCurrentImportMessage` 在 activeTransferId 为空时
+   放行一切 → 迟到消息以 35%(restore 阶段 offset)+"29007/0" **盖掉错误提示**,
+   外观= 永久卡死;主线程完成页后等不到 session-complete,双方互等。
+
+修复:① `buildPageImportData` 在置空前捕获 `recordCount`,超时公式优先取它;
+② `isCurrentImportMessage` 无活动 transfer 时丢弃带 id 的迟到消息(错误提示不再
+被盖)。教训:**释放内存的"置空"会让所有晚于它的读数静默归零——凡是"稍后还要
+读"的聚合量,必须在释放前捕获快照**;null 安全的 helper 恰恰是掩护这类 bug 的
+帮凶(宁可让它抛错)。
+
+## 2026-07-13 — 统一回归集首轮:十族问题、三个名字 hack 退役、径向三层规则定案
+
+用户把近几轮问题图层合并进「插件测试」文件(回归 2026-07 section 九区 + 同页历史
+问题图层),整页往返产出 `测试集/插件测试 0712 汇总/`(.mg + zip,344 记录)。首轮
+mg 导入用户肉眼报六处;比较器 deep 54 / paint 3 / effect 1,三源定性(mg vs zip vs
+origin)后拆成十族,终态 deep 14 / paint 1(CROP 故意超越)/ effect 0,九套旧集回归
+全持平、0712-3 还净改善一行。
+
+**解码端八刀:**
+1. **对齐枚举拆轴**:`0d 03` 实为 **primary SPACE_BETWEEN**(al/space-between-3 交叉
+   表),旧共享表 `3:"MAX"` 把三子 SPACE_BETWEEN 挤到行尾;counter(0e)保持 3=MAX。
+   单子 SPACE_BETWEEN 两路都存 CENTER——是 MasterGo 自己洗的,边界不修。
+2. **padding 逐槽省略=10**:BoolChip 存 L/R 16 丢 T/B 10、Badge 存 T/B 5 丢 L/R 10
+   ——"任一边等于 10 即省略该槽",组件路径此前把缺槽当 0;R09 的 padding=10 陷阱帧
+   (整对象空)一直是对的,坑在部分省略。
+3. **trailer `2e 01` = layoutPositioning ABSOLUTE**:统一集交叉表 TP5/FP0/FN0。顺手
+   处决了 set1 时代的"组子节点在 auto-layout 祖先下一律 ABSOLUTE"启发式(本轮把
+   02_02 的普通组子节点误标)。set0 复验时发现 flag 被**内嵌 v2 副本的陈旧
+   `AUTO` 盖掉**——嵌入合并路径对原生权威字段要重申(`2e` 优先)。
+4. **效果 radius 省略=10 对全类型**:回归/Layer Blur 样式条目 radius 10 整字段省略,
+   blur 族旧默认 0 → 样式和节点双双失模糊。
+5. **径向 ratio 三层规则定案**(本轮最大坑,两次反转):裸 `06{03}` 直读(原生绘制,
+   set0 的 03=0.3265 就是终值);**链谱写 `06{02,03,04}`**(Figma 导入来源)逐节点
+   物化——同一条目(03=0.10662,04=0.3265)在 210×120 宿主上 v2=3.0625
+   (=03×1.75²)、在共享它的 100×100 描边矩形上 v2=9.3789(=03 直读),证明 04 只是
+   宿主节点缓存,真规则 = **x 主导手柄 ×(w/h)²,y 主导直读**(竖直参照系;y 支路
+   曾试 ×(h/w)² 打爆旧集 368 个 paint);**角向/菱形永远直读**(菱形链条目在两种
+   节点上 v2 都是 9.3789)。中途"优先读 04"的版本被 Strokes 共享 paint 当场反杀
+   ——per-paint 缓存值对 per-node 语义无效。
+6. **默认变体名 wash**:.mg 存 `Size[a0]=Small,Type[a0]=Primary`,API/v2 洗默认变体
+   (全键尾 [a0] → 剥一层;剥净则 `", "` 规范连接,剥不净保持原逗号)。0712-3 的
+   "12 选 1 被洗"残差同规则闭环(deep 9→8)。era 例外:set0 同形默认变体未被洗
+   (+1 退役残差)。
+7. **缩放实例 padding/itemSpacing 按 trailer-26 缩放**:记录存模板值 14,v2 物化
+   11.62=14×0.83;几何路径早就缩了,布局字段漏了。
+8. **三个名字 hack 退役**(Button_Secondary_Instance 居中位移 / Card_Instance 视觉
+   覆盖 / 两帧投影注入):set1 时代把基线期望值抄进解码器,本轮按图层名**误伤新文件**
+   (0:161 被强设 INSTANCE,zip 明说 FRAME)。删除后 set0 剩 3 行诚实缺口(名字 1 +
+   图标位移 2),换来任意真实文件不再被同名图层污染。
+
+**导入端两刀(比较器盲区,mg/zip 同错):**
+9. **同根 use-before-def 延迟重链**:R08 实例在图层顺序上先于组件定义、且同在一个
+   页面根内——根级拓扑排序无从重排,createInstance miss → frame 壳。修复:壳照建并
+   登记,整页还原完(组件必然就位)原位 `insertChild` 换真实例
+   (`retryDeferredInstanceRelinks`,置于延迟布局 pass 之前使其注册被消费;父先于子
+   登记,外壳先换、内壳自动作废)。
+10. **多轴变体名规范化**:`createFigmaVariantName` 只处理第一段,
+    `Size[a0]=Small,Type[a1]=Secondary` 洗成 `Size=Small,Type[a1]=Secondary` → 各变体
+    属性名集合不一致(`Type[a0]` vs `Type[a1]`)→ `combineAsVariants` 抛错整组降级
+    frame。逐逗号段剥 `[aN]` 后 `", "` 连接,恰好同时对齐 Figma 规范名。
+
+**误报与边界:** 用户报的 CROP 实为误报(fills 逐位与 origin 相同,截图确认);渐变
+区的"角向异常"是 mg==zip 的 MasterGo 导入洗失(边界);origin 的径向/菱形本就是
+压扁横条(历史产物),修复目标是等于它而非"好看"。
+
+方法论沉淀:①**同一 fixture 的两个导出时代是最强判别器**——set0(0710)与统一集
+(0712)同设计不同谱写,径向链形态、名字 wash、嵌入副本覆盖全靠对时代差定案;
+②**共享 paint 是 per-node 语义的照妖镜**;③按名字注入期望值的 hack 迟早反噬,
+诚实缺口好过隐性污染。

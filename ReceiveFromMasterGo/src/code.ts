@@ -50,6 +50,11 @@ type ImportSession = {
   // record id → restored node, for component/instance re-linking (native .mg
   // imports carry mainComponentId on instance records)
   restoredNodeById: { [id: string]: SceneNode };
+  // Instance records whose component wasn't restored yet when they were
+  // reached (use-before-definition INSIDE one page root — the root-level topo
+  // sort can't reorder those). They restore as frame shells first and get
+  // swapped for real instances after the page finishes.
+  deferredInstanceRelinks: { id: string; node: SceneNode }[];
   // library style ref (prefixed .mg style record id) → created Figma style id
   // (native .mg imports ship a styles.json payload; records reference styles
   // via fillStyleRef/strokeStyleRef/effectStyleRef/textStyleRef)
@@ -263,6 +268,7 @@ async function startImportSession(message: any) {
     timingCounts: {},
     clientTimings: message.clientTimings || null,
     restoredNodeById: {},
+    deferredInstanceRelinks: [],
     figmaStyleIdByRef: {}
   };
 
@@ -614,6 +620,13 @@ async function restoreImportPageData(importPage: ImportPageIndex, layers: { [id:
   if (restoredOnPage !== pageNodeCount) throw new Error(`页面还原数量不一致：expected=${pageNodeCount}, actual=${restoredOnPage}`);
   addImportTiming(session, "restore.nodesMs", Date.now() - nodeRestoreStartedAt);
   addImportTimingCount(session, "restore.pageCount", 1);
+  // Same-root use-before-definition: every component on the page exists now,
+  // so shells that fell back can be swapped for real instances. Runs BEFORE
+  // applyDeferredLayoutRestores so layout registrations from the swap are
+  // consumed by the pass below.
+  const relinkStartedAt = Date.now();
+  await retryDeferredInstanceRelinks(layers);
+  addImportTiming(session, "restore.deferredRelinkMs", Date.now() - relinkStartedAt);
 
   await reportPagePostprocessProgress(session, pageIndex, pageName, postprocessStart, pageNodeCount, 0, 0, 1, "正在应用自动布局...");
   const layoutStartedAt = Date.now();
@@ -1062,7 +1075,17 @@ async function restoreImportedNode(
     safeRemove(newNode);
     throw error;
   }
-  if (activeImportSession) activeImportSession.restoredNodeById[nodeId] = newNode;
+  if (activeImportSession) {
+    activeImportSession.restoredNodeById[nodeId] = newNode;
+    // Reaching here with a mainComponentId means tryRestoreAsInstance fell
+    // back (component not restored yet — same-root use-before-definition).
+    // Remember the shell; retryDeferredInstanceRelinks swaps it after the
+    // page finishes. Parents register before their children restore, so the
+    // relink pass sees outer shells first and inner ones become no-ops.
+    if (layerRecord.mainComponentId) {
+      activeImportSession.deferredInstanceRelinks.push({ id: nodeId, node: newNode });
+    }
+  }
   await applyImportedStyleBindings(newNode, layerRecord);
 
   let restoredCount = 1;
@@ -1122,9 +1145,23 @@ async function tryRestoreAsInstance(
   // From here on the InstanceNode exists and is parented — keep it even if
   // property/override application partially fails (the component-instance
   // relationship is the point; a partially styled instance beats a frame shell).
-  // MasterGo's uniform instance scale cannot be expressed through child
-  // geometry (instance children are locked to the component) — replay it
-  // with rescale() BEFORE the exact root resize in applyProperties.
+  await applyInstanceRecordState(instance, layerRecord, layers);
+  session.restoredNodeById[layerRecord.id] = instance;
+  console.info("[mg-instance] restored:", layerRecord.id, layerRecord.props?.name || layerRecord.name, "→ instance of", layerRecord.mainComponentId);
+  const accounted = 1 + countRecordDescendants(layerRecord, layers);
+  await maybeReportRestoreProgress(restoredBefore + accounted, totalNodes, "正在还原实例：" + (layerRecord.props?.name || layerRecord.name));
+  return accounted;
+}
+
+// Shared instance state application: MasterGo's uniform instance scale cannot
+// be expressed through child geometry (instance children are locked to the
+// component) — replay it with rescale() BEFORE the exact root resize in
+// applyProperties, then apply per-child overrides positionally.
+async function applyInstanceRecordState(
+  instance: InstanceNode,
+  layerRecord: ImportLayerRecord,
+  layers: { [id: string]: ImportLayerRecord }
+): Promise<void> {
   let rescaled = false;
   if (typeof layerRecord.instanceScale === "number" && isFinite(layerRecord.instanceScale) &&
       layerRecord.instanceScale > 0 && Math.abs(layerRecord.instanceScale - 1) > 1e-6) {
@@ -1146,11 +1183,42 @@ async function tryRestoreAsInstance(
   } catch (error) {
     console.warn("[mg-instance] 子覆盖应用失败(实例保留):", layerRecord.id, error);
   }
-  session.restoredNodeById[layerRecord.id] = instance;
-  console.info("[mg-instance] restored:", layerRecord.id, layerRecord.props?.name || layerRecord.name, "→ instance of", layerRecord.mainComponentId);
-  const accounted = 1 + countRecordDescendants(layerRecord, layers);
-  await maybeReportRestoreProgress(restoredBefore + accounted, totalNodes, "正在还原实例：" + (layerRecord.props?.name || layerRecord.name));
-  return accounted;
+}
+
+// After a page finishes restoring, swap frame-shell fallbacks for real
+// instances — their components definitely exist by now regardless of where
+// they sat in the child order. Entries whose shell was already discarded
+// (an outer shell got swapped first) are skipped.
+async function retryDeferredInstanceRelinks(layers: { [id: string]: ImportLayerRecord }): Promise<void> {
+  const session = activeImportSession;
+  if (!session || session.deferredInstanceRelinks.length === 0) return;
+  const pending = session.deferredInstanceRelinks;
+  session.deferredInstanceRelinks = [];
+  let swapped = 0;
+  for (const entry of pending) {
+    const layerRecord = layers[entry.id];
+    const shell = entry.node;
+    if (!layerRecord || !layerRecord.mainComponentId || !shell || shell.removed) continue;
+    const componentNode = session.restoredNodeById[layerRecord.mainComponentId];
+    if (!componentNode || componentNode.removed || componentNode.type !== "COMPONENT") continue;
+    const parent = shell.parent;
+    if (!parent || !("insertChild" in parent)) continue;
+    let instance: InstanceNode | null = null;
+    try {
+      const index = parent.children.indexOf(shell);
+      instance = (componentNode as ComponentNode).createInstance();
+      parent.insertChild(index >= 0 ? index : parent.children.length, instance);
+    } catch (error) {
+      console.warn("[mg-instance] 延迟重链失败(保留 Frame 壳):", layerRecord.id, error);
+      if (instance) safeRemove(instance);
+      continue;
+    }
+    await applyInstanceRecordState(instance, layerRecord, layers);
+    session.restoredNodeById[layerRecord.id] = instance;
+    safeRemove(shell);
+    swapped++;
+  }
+  if (swapped > 0) console.info("[mg-instance] deferred relinks swapped:", swapped, "/", pending.length);
 }
 
 function countRecordDescendants(record: ImportLayerRecord, layers: { [id: string]: ImportLayerRecord }): number {

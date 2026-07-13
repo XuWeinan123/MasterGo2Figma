@@ -202,14 +202,19 @@ export function createFigmaVariantName(name: string, index: number): string {
     const fallback = `Variant ${index + 1}`;
     if (!name) return `Property 1=${fallback}`;
 
-    const bracketed = name.match(/^(.+?)\[[^\]]+\]=(.+)$/);
-    if (bracketed) {
-        return `${sanitizeVariantPropertyName(bracketed[1])}=${sanitizeVariantValue(bracketed[2], fallback)}`;
-    }
-
-    const equalsIndex = name.indexOf("=");
-    if (equalsIndex > 0 && equalsIndex < name.length - 1) {
-        return `${sanitizeVariantPropertyName(name.slice(0, equalsIndex))}=${sanitizeVariantValue(name.slice(equalsIndex + 1), fallback)}`;
+    // Normalize EVERY comma-separated axis, not just the first one. MasterGo
+    // appends [aN] order markers per property key (Size[a0]=Small,
+    // Type[a1]=Secondary); stripping only the first pair leaves sibling
+    // variants with mismatched property-name sets (Type[a0] vs Type[a1]) and
+    // figma.combineAsVariants throws, degrading the whole set to a frame.
+    if (name.indexOf("=") > 0) {
+        const pairs: (string | null)[] = name.split(",").map(pair => {
+            const equalsIndex = pair.indexOf("=");
+            if (equalsIndex <= 0 || equalsIndex >= pair.length - 1) return null;
+            const key = pair.slice(0, equalsIndex).replace(/(\[[^\]]*\])+\s*$/, "");
+            return `${sanitizeVariantPropertyName(key)}=${sanitizeVariantValue(pair.slice(equalsIndex + 1), fallback)}`;
+        });
+        if (pairs.every(pair => pair !== null)) return (pairs as string[]).join(", ");
     }
 
     return `Property 1=${sanitizeVariantValue(name, fallback)}`;

@@ -77,10 +77,12 @@
 | effect 记录字段 `0d` / `0e` | 未破解 | 尾部 flag，跳过无碍 |
 | 几何 blob 顶点 flag `03` 的取值 1/2/3 | 未破解 | VN 主体已全解，边角语义未明 |
 | 几何 blob `06` trailer | 未破解 | — |
-| 容器对齐枚举 `0d/0e` 的 MAX/SPACE_BETWEEN 取值 | **已验证（2026-07-12，0712-3）** | 1=MAX 实测（`0e 01`）；3=MAX/4=SPACE_BETWEEN 旧猜保留并存 |
+| 容器对齐枚举 `0d/0e` 的 MAX/SPACE_BETWEEN 取值 | **已破解（2026-07-13，统一集，分轴）** | primary(`0d`)：1=MAX 2=CENTER **3=SPACE_BETWEEN**（al/space-between-3 实测）4=SPACE_BETWEEN；counter(`0e`)：1=MAX 2=CENTER 3=MAX。旧共享表 3:"MAX" 曾把三子 SPACE_BETWEEN 解成右挤 |
+| 尾部 `0x2e` | **已破解（2026-07-13，统一集）** | `2e 01`=layoutPositioning ABSOLUTE，交叉表 TP5/FP0/FN0；对嵌入 v2 副本的陈旧 AUTO 权威 |
+| 渐变 `06` 子对象字段 `02`/`04`（链谱写） | **已破解役割（2026-07-13，统一集）** | Figma 导入来源径向的换算链：04=宿主节点的归一化终值（仅缓存），真规则=逐节点 x 主导 ×(w/h)²、y 主导直读；角向/菱形恒直读 03。见 MG_DECODER.md 渐变节 |
 | 页记录尾巴 `09 01 00 04 80 10` | 未破解 | 跳过处理 |
 | 文件头 magic（`document` 前 9 字节） | 未破解 | 跳过处理 |
-| 原生 instance override 表（`1c 07` 子字段 `15`） | 已定位未解码 | 解开可替换旧版按钮/卡片名字规则 hack（同容器 `0x14/0x15`） |
+| 原生 instance override 表（`1c 07` 子字段 `15`） | 已定位未解码，**hack 已先行退役（2026-07-13）** | 旧版按钮/卡片名字规则 hack 因误伤统一集同名图层被删除；set0 留 3 行诚实残差，解开此表可归零 |
 | star/polygon 的 `pointCount` / `innerRadius` | **已破解（2026-07-12，0712-3）** | `1c 05`/`1c 06` 字段 `01`=zigzag varint pointCount（省略=多边形 3/星形 5），星形字段 `02`=innerRadius 浮点（省略=0.5） |
 | exportSettings | 结构性缺口 | 节点记录里不存在，只能靠嵌入 JSON 孪生记录（完整导出才有） |
 | 幽灵原生记录 `2:30xxx`（0711-2 样本） | **已破解（2026-07-11）：非画布注册表残留记录，组装前统一剔除** | body=`07 01 08 <模板节点id> 00 0b {01 varint300 …} 0d {01 13}`，无名字/owner/类型对象/尾部；判别式=标量 `08` 槽位携带 id 字符串（节点语法不可能），`mgIsRegistryResidueRecord` 在 `mgDecodeNativeNodes` 里先于类型判定 skip（含曾被弱扫描误判 LINE 的 `2:30073`）；五集交叉表 131/0/0/0/0 命中、与基准零交集。确切角色仍未知（疑标注/交互类辅助对象），但已无还原影响，见 `MG_DECODER.md`「Registry-residue records」 |
