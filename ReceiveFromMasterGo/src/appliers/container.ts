@@ -131,7 +131,7 @@ export async function restoreComponentSetNode(
     totalNodes: number,
     restoreNodeCallback: (nodeId: string, parent: PageNode | SceneNode, layers: { [id: string]: ImportLayerRecord }, restoredBefore: number, totalNodes: number) => Promise<number>,
     applyPropertiesCallback: (node: any, data: any) => Promise<void>,
-    maybeReportProgressCallback: (current: number, total: number, label: string) => Promise<void>
+    maybeReportProgressCallback: (current: number, total: number) => Promise<void>
 ): Promise<number> {
     const shell = figma.createFrame();
     const childIds = nodeProps.omitChildrenOnRestore ? [] : (layerRecord.childIds || []);
@@ -149,7 +149,7 @@ export async function restoreComponentSetNode(
     }
 
     let restoredCount = 1;
-    await maybeReportProgressCallback(restoredBefore + restoredCount, totalNodes, "正在还原：" + (nodeProps.name || layerRecord.name));
+    await maybeReportProgressCallback(restoredBefore + restoredCount, totalNodes);
 
     for (const childId of childIds) {
         restoredCount += await restoreNodeCallback(childId, shell, layers, restoredBefore + restoredCount, totalNodes);
@@ -296,7 +296,7 @@ export async function restoreGroupNode(
     totalNodes: number,
     restoreNodeCallback: (nodeId: string, parent: PageNode | SceneNode, layers: { [id: string]: ImportLayerRecord }, restoredBefore: number, totalNodes: number) => Promise<number>,
     applyPropertiesCallback: (node: any, data: any) => Promise<void>,
-    maybeReportProgressCallback: (current: number, total: number, label: string) => Promise<void>
+    maybeReportProgressCallback: (current: number, total: number) => Promise<void>
 ): Promise<number> {
     const shell = figma.createFrame();
     const childIds = nodeProps.omitChildrenOnRestore ? [] : (layerRecord.childIds || []);
@@ -314,7 +314,7 @@ export async function restoreGroupNode(
     }
 
     let restoredCount = 1;
-    await maybeReportProgressCallback(restoredBefore + restoredCount, totalNodes, "正在还原：" + (nodeProps.name || layerRecord.name));
+    await maybeReportProgressCallback(restoredBefore + restoredCount, totalNodes);
 
     for (const childId of childIds) {
         restoredCount += await restoreNodeCallback(childId, shell, layers, restoredBefore + restoredCount, totalNodes);
@@ -368,7 +368,7 @@ export async function restoreBooleanOperationTree(
     totalNodes: number,
     restoreNodeCallback: (nodeId: string, parent: PageNode | SceneNode, layers: { [id: string]: ImportLayerRecord }, restoredBefore: number, totalNodes: number) => Promise<number>,
     applyPropertiesCallback: (node: any, data: any) => Promise<void>,
-    maybeReportProgressCallback: (current: number, total: number, label: string) => Promise<void>
+    maybeReportProgressCallback: (current: number, total: number) => Promise<void>
 ): Promise<number> {
     const shell = figma.createFrame();
     const shellProps = createBooleanFrameFallbackProps(nodeProps);
@@ -386,7 +386,7 @@ export async function restoreBooleanOperationTree(
 
     let restoredCount = 1;
     const currentCount = restoredBefore + restoredCount;
-    await maybeReportProgressCallback(currentCount, totalNodes, "正在还原：" + (nodeProps.name || layerRecord.name));
+    await maybeReportProgressCallback(currentCount, totalNodes);
 
     const childIds = nodeProps.omitChildrenOnRestore ? [] : (layerRecord.childIds || []);
     for (const childId of childIds) {
@@ -559,7 +559,7 @@ export async function restoreBooleanFallbackNode(
     restoredBefore: number,
     totalNodes: number,
     applyPropertiesCallback: (node: any, data: any) => Promise<void>,
-    maybeReportProgressCallback: (current: number, total: number, label: string) => Promise<void>
+    maybeReportProgressCallback: (current: number, total: number) => Promise<void>
 ): Promise<number> {
     state.booleanFallbackCount++;
     const fallbackNode = figma.createFrame();
@@ -575,7 +575,7 @@ export async function restoreBooleanFallbackNode(
     }
 
     const currentCount = restoredBefore + 1;
-    await maybeReportProgressCallback(currentCount, totalNodes, "正在还原：" + (data.name || layerRecord.name));
+    await maybeReportProgressCallback(currentCount, totalNodes);
 
     return 1;
 }

@@ -6,7 +6,7 @@ const SIBLING_PROPS_PREFIX = "[PROPS_SIBLING]";
 const POSTPROCESS_BATCH_SIZE = 500;
 const POSTPROCESS_YIELD_INTERVAL_MS = 50;
 
-type PostprocessProgressCallback = (done: number, total: number, label: string) => Promise<void> | void;
+type PostprocessProgressCallback = (done: number, total: number) => Promise<void> | void;
 
 export function deferLayoutRestore(node: any, layout: any, isGroup: boolean) {
     if (!node || !layout || !isSceneNode(node)) return;
@@ -31,17 +31,17 @@ export async function applyDeferredLayoutRestores(progress?: PostprocessProgress
     for (const record of records) {
         applyDeferredNodeAutoLayout(record);
         done++;
-        lastYieldAt = await maybeYieldPostprocess(done, total, "正在应用自动布局...", lastYieldAt, progress);
+        lastYieldAt = await maybeYieldPostprocess(done, total, lastYieldAt, progress);
     }
     for (const record of records) {
         applyDeferredParentAutoLayout(record);
         done++;
-        lastYieldAt = await maybeYieldPostprocess(done, total, "正在恢复父级自动布局...", lastYieldAt, progress);
+        lastYieldAt = await maybeYieldPostprocess(done, total, lastYieldAt, progress);
     }
     for (const record of records) {
         finalizeDeferredAutoLayout(record);
         done++;
-        lastYieldAt = await maybeYieldPostprocess(done, total, "正在完成自动布局...", lastYieldAt, progress);
+        lastYieldAt = await maybeYieldPostprocess(done, total, lastYieldAt, progress);
     }
 }
 
@@ -263,14 +263,13 @@ export async function applyDeferredSingleChildAutoSpaceAlignmentFixes(progress?:
             if (layout && hasAutoLayout(node)) applySingleChildAutoSpaceAlignmentFix(node, layout);
         }
         done++;
-        lastYieldAt = await maybeYieldPostprocess(done, total, "正在修正自动布局对齐...", lastYieldAt, progress);
+        lastYieldAt = await maybeYieldPostprocess(done, total, lastYieldAt, progress);
     }
 }
 
 async function maybeYieldPostprocess(
     done: number,
     total: number,
-    label: string,
     lastYieldAt: number,
     progress?: PostprocessProgressCallback
 ): Promise<number> {
@@ -278,7 +277,7 @@ async function maybeYieldPostprocess(
     if (done < total && done % POSTPROCESS_BATCH_SIZE !== 0 && now - lastYieldAt < POSTPROCESS_YIELD_INTERVAL_MS) {
         return lastYieldAt;
     }
-    if (progress) await progress(done, total, label);
+    if (progress) await progress(done, total);
     await yieldToEventLoop();
     return Date.now();
 }

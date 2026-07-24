@@ -926,17 +926,17 @@ ${style}`;
       for (const record of records) {
         applyDeferredNodeAutoLayout(record);
         done++;
-        lastYieldAt = yield maybeYieldPostprocess(done, total, "\u6B63\u5728\u5E94\u7528\u81EA\u52A8\u5E03\u5C40...", lastYieldAt, progress);
+        lastYieldAt = yield maybeYieldPostprocess(done, total, lastYieldAt, progress);
       }
       for (const record of records) {
         applyDeferredParentAutoLayout(record);
         done++;
-        lastYieldAt = yield maybeYieldPostprocess(done, total, "\u6B63\u5728\u6062\u590D\u7236\u7EA7\u81EA\u52A8\u5E03\u5C40...", lastYieldAt, progress);
+        lastYieldAt = yield maybeYieldPostprocess(done, total, lastYieldAt, progress);
       }
       for (const record of records) {
         finalizeDeferredAutoLayout(record);
         done++;
-        lastYieldAt = yield maybeYieldPostprocess(done, total, "\u6B63\u5728\u5B8C\u6210\u81EA\u52A8\u5E03\u5C40...", lastYieldAt, progress);
+        lastYieldAt = yield maybeYieldPostprocess(done, total, lastYieldAt, progress);
       }
     });
   }
@@ -1117,17 +1117,17 @@ ${style}`;
           if (layout && hasAutoLayout(node)) applySingleChildAutoSpaceAlignmentFix(node, layout);
         }
         done++;
-        lastYieldAt = yield maybeYieldPostprocess(done, total, "\u6B63\u5728\u4FEE\u6B63\u81EA\u52A8\u5E03\u5C40\u5BF9\u9F50...", lastYieldAt, progress);
+        lastYieldAt = yield maybeYieldPostprocess(done, total, lastYieldAt, progress);
       }
     });
   }
-  function maybeYieldPostprocess(done, total, label, lastYieldAt, progress) {
+  function maybeYieldPostprocess(done, total, lastYieldAt, progress) {
     return __async(this, null, function* () {
       const now = Date.now();
       if (done < total && done % POSTPROCESS_BATCH_SIZE !== 0 && now - lastYieldAt < POSTPROCESS_YIELD_INTERVAL_MS) {
         return lastYieldAt;
       }
-      if (progress) yield progress(done, total, label);
+      if (progress) yield progress(done, total);
       yield yieldToEventLoop();
       return Date.now();
     });
@@ -1354,7 +1354,7 @@ ${style}`;
       for (let index = nodes.length - 1; index >= 0; index--) {
         cleanupImportedContainerShell(nodes[index]);
         done++;
-        lastYieldAt = yield maybeYieldPostprocess2(done, total, "\u6B63\u5728\u6E05\u7406\u5BB9\u5668...", lastYieldAt, progress);
+        lastYieldAt = yield maybeYieldPostprocess2(done, total, lastYieldAt, progress);
       }
     });
   }
@@ -1385,13 +1385,13 @@ ${style}`;
       }
     }
   }
-  function maybeYieldPostprocess2(done, total, label, lastYieldAt, progress) {
+  function maybeYieldPostprocess2(done, total, lastYieldAt, progress) {
     return __async(this, null, function* () {
       const now = Date.now();
       if (done < total && done % POSTPROCESS_BATCH_SIZE2 !== 0 && now - lastYieldAt < POSTPROCESS_YIELD_INTERVAL_MS2) {
         return lastYieldAt;
       }
-      if (progress) yield progress(done, total, label);
+      if (progress) yield progress(done, total);
       yield yieldToEventLoop();
       return Date.now();
     });
@@ -2096,7 +2096,7 @@ ${style}`;
         return 0;
       }
       let restoredCount = 1;
-      yield maybeReportProgressCallback(restoredBefore + restoredCount, totalNodes, "\u6B63\u5728\u8FD8\u539F\uFF1A" + (nodeProps.name || layerRecord.name));
+      yield maybeReportProgressCallback(restoredBefore + restoredCount, totalNodes);
       for (const childId of childIds) {
         restoredCount += yield restoreNodeCallback(childId, shell, layers, restoredBefore + restoredCount, totalNodes);
       }
@@ -2200,7 +2200,7 @@ ${style}`;
         return 0;
       }
       let restoredCount = 1;
-      yield maybeReportProgressCallback(restoredBefore + restoredCount, totalNodes, "\u6B63\u5728\u8FD8\u539F\uFF1A" + (nodeProps.name || layerRecord.name));
+      yield maybeReportProgressCallback(restoredBefore + restoredCount, totalNodes);
       for (const childId of childIds) {
         restoredCount += yield restoreNodeCallback(childId, shell, layers, restoredBefore + restoredCount, totalNodes);
       }
@@ -2253,7 +2253,7 @@ ${style}`;
       }
       let restoredCount = 1;
       const currentCount = restoredBefore + restoredCount;
-      yield maybeReportProgressCallback(currentCount, totalNodes, "\u6B63\u5728\u8FD8\u539F\uFF1A" + (nodeProps.name || layerRecord.name));
+      yield maybeReportProgressCallback(currentCount, totalNodes);
       const childIds = nodeProps.omitChildrenOnRestore ? [] : layerRecord.childIds || [];
       for (const childId of childIds) {
         restoredCount += yield restoreNodeCallback(childId, shell, layers, restoredBefore + restoredCount, totalNodes);
@@ -2399,7 +2399,7 @@ ${style}`;
         return 0;
       }
       const currentCount = restoredBefore + 1;
-      yield maybeReportProgressCallback(currentCount, totalNodes, "\u6B63\u5728\u8FD8\u539F\uFF1A" + (data.name || layerRecord.name));
+      yield maybeReportProgressCallback(currentCount, totalNodes);
       return 1;
     });
   }
@@ -2414,7 +2414,7 @@ ${style}`;
   showImportUI();
   function showImportUI() {
     ensureLayerRulesLoaded();
-    figma.showUI(__html__, { width: 400, height: 630 });
+    figma.showUI(__html__, { width: 400, height: 620 });
     figma.ui.onmessage = (message) => __async(null, null, function* () {
       if (!message || typeof message !== "object") return;
       if (message.type === "ui-ready") {
@@ -2590,8 +2590,7 @@ ${style}`;
         transferId: activeImportSession.transferId,
         stage: "restore",
         current: 0,
-        total: totalNodes,
-        label: "\u6B63\u5728\u63A5\u6536\u5BFC\u5165\u6570\u636E..."
+        total: totalNodes
       });
     });
   }
@@ -2832,8 +2831,7 @@ ${style}`;
         stage: "restore",
         pageIndex,
         current: session.restoredNodes,
-        total: session.totalNodes,
-        label: "\u6B63\u5728\u521B\u5EFA\u9875\u9762\uFF1A" + pageName
+        total: session.totalNodes
       });
       const pageCreateStartedAt = Date.now();
       const restoredPage = figma.createPage();
@@ -2915,24 +2913,24 @@ ${style}`;
       const relinkStartedAt = Date.now();
       yield retryDeferredInstanceRelinks(layers);
       addImportTiming(session, "restore.deferredRelinkMs", Date.now() - relinkStartedAt);
-      yield reportPagePostprocessProgress(session, pageIndex, pageName, postprocessStart, pageNodeCount, 0, 0, 1, "\u6B63\u5728\u5E94\u7528\u81EA\u52A8\u5E03\u5C40...");
+      yield reportPagePostprocessProgress(session, pageIndex, postprocessStart, pageNodeCount, 0, 0, 1);
       const layoutStartedAt = Date.now();
-      yield applyDeferredLayoutRestores((done, total, label) => {
-        return reportPagePostprocessProgress(session, pageIndex, pageName, postprocessStart, pageNodeCount, 0, done, total, label);
+      yield applyDeferredLayoutRestores((done, total) => {
+        return reportPagePostprocessProgress(session, pageIndex, postprocessStart, pageNodeCount, 0, done, total);
       });
       addImportTiming(session, "postprocess.deferredLayoutMs", Date.now() - layoutStartedAt);
       const cleanupStartedAt = Date.now();
-      yield cleanupImportedContainerShells(restoredPage, (done, total, label) => {
-        return reportPagePostprocessProgress(session, pageIndex, pageName, postprocessStart, pageNodeCount, 1, done, total, label);
+      yield cleanupImportedContainerShells(restoredPage, (done, total) => {
+        return reportPagePostprocessProgress(session, pageIndex, postprocessStart, pageNodeCount, 1, done, total);
       });
       addImportTiming(session, "postprocess.cleanupShellsMs", Date.now() - cleanupStartedAt);
       const autoSpaceStartedAt = Date.now();
-      yield applyDeferredSingleChildAutoSpaceAlignmentFixes((done, total, label) => {
-        return reportPagePostprocessProgress(session, pageIndex, pageName, postprocessStart, pageNodeCount, 2, done, total, label);
+      yield applyDeferredSingleChildAutoSpaceAlignmentFixes((done, total) => {
+        return reportPagePostprocessProgress(session, pageIndex, postprocessStart, pageNodeCount, 2, done, total);
       });
       addImportTiming(session, "postprocess.singleChildAutoSpaceMs", Date.now() - autoSpaceStartedAt);
       session.postProcessedNodes = Math.min(session.totalNodes, postprocessStart + pageNodeCount);
-      yield reportPagePostprocessProgress(session, pageIndex, pageName, postprocessStart, pageNodeCount, PAGE_POSTPROCESS_STAGE_COUNT - 1, 1, 1, "\u9875\u9762\u5B8C\u6210\uFF1A" + pageName);
+      yield reportPagePostprocessProgress(session, pageIndex, postprocessStart, pageNodeCount, PAGE_POSTPROCESS_STAGE_COUNT - 1, 1, 1);
       state.restoredLayoutByNodeId = {};
       state.nativeGroupOffsetByNodeId = {};
       yield yieldToEventLoop();
@@ -2941,7 +2939,7 @@ ${style}`;
   function countLayerRecords(layers) {
     return layers && typeof layers === "object" ? Object.keys(layers).length : 0;
   }
-  function reportPagePostprocessProgress(session, pageIndex, pageName, pagePostprocessStart, pageNodeCount, stageIndex, done, total, label) {
+  function reportPagePostprocessProgress(session, pageIndex, pagePostprocessStart, pageNodeCount, stageIndex, done, total) {
     return __async(this, null, function* () {
       const stageRatio = total > 0 ? Math.max(0, Math.min(1, done / total)) : 1;
       const completedRatio = Math.max(0, Math.min(1, (stageIndex + stageRatio) / PAGE_POSTPROCESS_STAGE_COUNT));
@@ -2954,8 +2952,7 @@ ${style}`;
         current: session.restoredNodes,
         total: session.totalNodes,
         postprocessCurrent,
-        postprocessTotal: session.totalNodes,
-        label
+        postprocessTotal: session.totalNodes
       });
     });
   }
@@ -2970,22 +2967,22 @@ ${style}`;
         if (session.restoredNodes !== session.totalNodes) {
           throw new Error(`\u4F1A\u8BDD\u56FE\u5C42\u6570\u91CF\u4E0D\u4E00\u81F4\uFF1Aexpected=${session.totalNodes}, actual=${session.restoredNodes}`);
         }
-        postFinalizeProgress(session, 0, 4, "\u6B63\u5728\u6062\u590D\u8FDE\u63A5\u7EBF...");
+        postFinalizeProgress(session, 0, 4);
         const connectorStartedAt = Date.now();
         applyDeferredConnectorRestores();
         addImportTiming(session, "finalize.connectorsMs", Date.now() - connectorStartedAt);
-        postFinalizeProgress(session, 1, 4, "\u6B63\u5728\u8FD8\u539F\u7F3A\u5931\u5B57\u4F53...");
+        postFinalizeProgress(session, 1, 4);
         const missingFontStartedAt = Date.now();
         const missingFontRestoreResult = yield restoreMissingFontTextLayers(session.restoredPages);
         addImportTiming(session, "finalize.missingFontsMs", Date.now() - missingFontStartedAt);
-        postFinalizeProgress(session, 2, 4, "\u6B63\u5728\u5B8C\u6210\u8FD8\u539F...");
+        postFinalizeProgress(session, 2, 4);
         const viewportStartedAt = Date.now();
         if (session.restoredPages.length > 0) {
           figma.currentPage = session.restoredPages[0];
           figma.viewport.scrollAndZoomIntoView(session.restoredPages[0].children);
         }
         addImportTiming(session, "finalize.viewportMs", Date.now() - viewportStartedAt);
-        postFinalizeProgress(session, 4, 4, "\u6B63\u5728\u5B8C\u6210\u8FD8\u539F...");
+        postFinalizeProgress(session, 4, 4);
         figma.ui.postMessage({
           type: "complete",
           transferId: session.transferId,
@@ -3016,7 +3013,7 @@ ${style}`;
       }
     });
   }
-  function postFinalizeProgress(session, current, total, label) {
+  function postFinalizeProgress(session, current, total) {
     figma.ui.postMessage({
       type: "progress",
       transferId: session.transferId,
@@ -3024,8 +3021,7 @@ ${style}`;
       current,
       total,
       finalizeCurrent: current,
-      finalizeTotal: total,
-      label
+      finalizeTotal: total
     });
   }
   function addImportTiming(session, phase, ms) {
@@ -3138,7 +3134,7 @@ ${style}`;
   function createRestoredPageName(name) {
     return name || "Imported Page";
   }
-  function maybeReportRestoreProgress(current, total, label, force = false) {
+  function maybeReportRestoreProgress(current, total, force = false) {
     return __async(this, null, function* () {
       const now = Date.now();
       const progState = state.activeProgressState || {
@@ -3153,8 +3149,7 @@ ${style}`;
         transferId: activeImportSession ? activeImportSession.transferId : void 0,
         stage: "restore",
         current,
-        total,
-        label
+        total
       });
       progState.total = total;
       progState.lastCurrent = current;
@@ -3310,7 +3305,7 @@ ${style}`;
       let restoredCount = 1;
       const currentCount = restoredBefore + restoredCount;
       const progressStartedAt = Date.now();
-      yield maybeReportRestoreProgress(currentCount, totalNodes, "\u6B63\u5728\u8FD8\u539F\uFF1A" + (nodeProps.name || layerRecord.name));
+      yield maybeReportRestoreProgress(currentCount, totalNodes);
       addImportTiming(activeImportSession, "restore.progressMs", Date.now() - progressStartedAt);
       const childIds = nodeProps.omitChildrenOnRestore ? [] : layerRecord.childIds || [];
       if (canContainRestoredChildren(newNode)) {
@@ -3326,7 +3321,7 @@ ${style}`;
   }
   function tryRestoreAsInstance(layerRecord, parent, layers, restoredBefore, totalNodes) {
     return __async(this, null, function* () {
-      var _a, _b, _c, _d;
+      var _a, _b, _c;
       const session = activeImportSession;
       if (!session || !layerRecord.mainComponentId) return 0;
       const componentNode = session.restoredNodeById[layerRecord.mainComponentId];
@@ -3354,7 +3349,7 @@ ${style}`;
       session.restoredNodeById[layerRecord.id] = instance;
       console.info("[mg-instance] restored:", layerRecord.id, ((_c = layerRecord.props) == null ? void 0 : _c.name) || layerRecord.name, "\u2192 instance of", layerRecord.mainComponentId);
       const accounted = 1 + countRecordDescendants(layerRecord, layers);
-      yield maybeReportRestoreProgress(restoredBefore + accounted, totalNodes, "\u6B63\u5728\u8FD8\u539F\u5B9E\u4F8B\uFF1A" + (((_d = layerRecord.props) == null ? void 0 : _d.name) || layerRecord.name));
+      yield maybeReportRestoreProgress(restoredBefore + accounted, totalNodes);
       return accounted;
     });
   }

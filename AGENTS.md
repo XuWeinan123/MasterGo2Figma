@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-本仓库用于在 MasterGo 与 Figma 之间迁移设计图层。`SendToFigma/` 是 MasterGo 端插件，负责读取页面、序列化图层并导出 MasterGo2Figma JSON zip（v2 格式）；核心代码在 `SendToFigma/src/`，打包产物为 `SendToFigma/code.js`。`ReceiveFromMasterGo/` 是 Figma 端插件，负责上传 zip 并还原为可编辑图层；核心代码在 `ReceiveFromMasterGo/src/`，UI 模板在 `ReceiveFromMasterGo/ui.template.html`，生成后的 UI 在 `ReceiveFromMasterGo/ui.html`（**不要手动改 `ui.html`**，见下文构建说明）。
+本仓库用于在 MasterGo 与 Figma 之间迁移设计图层。`SendToFigma/` 是 MasterGo 端插件，负责读取页面、序列化图层并导出 MasterGo2Figma JSON zip（v2 格式）；核心代码在 `SendToFigma/src/`，打包产物为 `SendToFigma/code.js`。`ReceiveFromMasterGo/` 是 Figma 端插件，负责上传 zip 并还原为可编辑图层；主线程核心代码在 `ReceiveFromMasterGo/src/`。插件 UI 是 React 18 + Tailwind + shadcn/ui 应用，源码在 `ReceiveFromMasterGo/ui-src/`（`App.tsx` 视图状态机、`engine.js` 框架无关的解析/流式传输引擎、`components/ui/` shadcn 组件）；`ui.template.html` 只是内联占位外壳，生成后的 UI 在 `ReceiveFromMasterGo/ui.html`（**不要手动改 `ui.html`**，见下文构建说明）。
 
 共享类型与工具函数放在 `shared/`（`shared/types.ts` 定义跨端类型，其余为矩阵/矢量/connector 辅助函数与图层规则配置），两端通过相对路径 `../../shared/...` 引用。本地大文件中继服务在 `tools/mastergo_relay_server.py`；`tools/compare_mg_import.js` 用于比对 `.mg` 解码结果与基准 zip；`pythonParser/mg_to_zip.py` 是独立的 Python CLI，复用 `ReceiveFromMasterGo/src/ui/mgPackage.js` 的解码逻辑，可在不启动任何插件的情况下把 `.mg` 直接转成 v2 zip。根目录保留 `README.md` 和 `QUICKSTART.md`；其余长期说明集中在 `docs/`，包括 `docs/MG_DECODER.md`（`.mg` 二进制格式规格）、`docs/MG_DECODER_JOURNAL.md`（逆向过程与方法论）、`docs/MG_DECODER_UNKNOWN_FIELDS.md`（未破解字段清单速查表）、`docs/MG_ZIP_PARITY_STATUS.md`（MG/ZIP 当前一致性状态）和 `docs/PERFORMANCE_OPTIMIZATIONS.md`。截图与示例资源放在 `assets/`。不要手动修改第三方依赖目录或构建缓存。
 
@@ -15,7 +15,7 @@ cd SendToFigma && npm install && npm run build
 cd ReceiveFromMasterGo && npm install && npm run build
 ```
 
-`npm run build` 会先执行 `tsc --noEmit` 类型检查，再用 `esbuild` 把 `src/code.ts` bundle 成 `code.js`（`manifest.json` 里 `main` 指向的插件入口）。接收端还会先运行 `node tools/build-ui.js`：它把 `src/ui/mgPackage.js`（原生 `.mg` 二进制解码器）内联进 `ui.template.html` 的 `%%MASTERGO_MG_PACKAGE_JS%%` 占位符，生成 `ui.html`。修改 UI 逻辑或解码器时应编辑 `ui.template.html` / `src/ui/mgPackage.js` 后重新构建（或用 `npm run watch`），`ui.html` 是生成产物，Figma 直接读取它、无需额外构建步骤。
+`npm run build` 会先执行 `tsc --noEmit` 类型检查，再用 `esbuild` 把 `src/code.ts` bundle 成 `code.js`（`manifest.json` 里 `main` 指向的插件入口）。接收端还会先运行 `node tools/build-ui.js`：它用 esbuild 打包 `ui-src/`（React + shadcn UI 与导入引擎）、用 Tailwind CLI 编译样式，并把 `src/ui/packageValidation.js` 与 `src/ui/mgPackage.js`（原生 `.mg` 二进制解码器）一起内联进 `ui.template.html` 的占位符，生成单文件 `ui.html`（无 CDN、无外部资源）。修改 UI 时编辑 `ui-src/`，修改解码器编辑 `src/ui/mgPackage.js`，然后重新构建（或用 `npm run watch`；注意 watch 只在启动时构建一次 UI，改 `ui-src/` 后需重跑）。`ui.html` 是生成产物，Figma 直接读取它、无需额外构建步骤。
 
 开发时可使用：
 

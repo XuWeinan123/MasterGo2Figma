@@ -8,7 +8,7 @@ const POSTPROCESS_BATCH_SIZE = 500;
 const POSTPROCESS_YIELD_INTERVAL_MS = 50;
 const SHELL_PLACEHOLDER_PLUGIN_DATA_KEY = "mastergo2figma.shellPlaceholder";
 
-type PostprocessProgressCallback = (done: number, total: number, label: string) => Promise<void> | void;
+type PostprocessProgressCallback = (done: number, total: number) => Promise<void> | void;
 
 export function appendRestoredNode(parent: PageNode | SceneNode, node: SceneNode): boolean {
     if ("appendChild" in parent) {
@@ -95,7 +95,7 @@ export async function cleanupImportedContainerShells(root: BaseNode, progress?: 
     for (let index = nodes.length - 1; index >= 0; index--) {
         cleanupImportedContainerShell(nodes[index]);
         done++;
-        lastYieldAt = await maybeYieldPostprocess(done, total, "正在清理容器...", lastYieldAt, progress);
+        lastYieldAt = await maybeYieldPostprocess(done, total, lastYieldAt, progress);
     }
 }
 
@@ -138,7 +138,6 @@ function cleanupImportedContainerShell(root: BaseNode) {
 async function maybeYieldPostprocess(
     done: number,
     total: number,
-    label: string,
     lastYieldAt: number,
     progress?: PostprocessProgressCallback
 ): Promise<number> {
@@ -146,7 +145,7 @@ async function maybeYieldPostprocess(
     if (done < total && done % POSTPROCESS_BATCH_SIZE !== 0 && now - lastYieldAt < POSTPROCESS_YIELD_INTERVAL_MS) {
         return lastYieldAt;
     }
-    if (progress) await progress(done, total, label);
+    if (progress) await progress(done, total);
     await yieldToEventLoop();
     return Date.now();
 }
