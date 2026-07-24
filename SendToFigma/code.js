@@ -2971,7 +2971,7 @@
       }
       if (message.type === "resize") {
         const width = typeof message.width === "number" ? message.width : 400;
-        const height = typeof message.height === "number" ? message.height : 710;
+        const height = typeof message.height === "number" ? message.height : 620;
         mg.ui.resize(width, height);
         return;
       }
@@ -3021,10 +3021,10 @@
   }
   function openPluginUI() {
     try {
-      mg.showUI(__html__, { width: 400, height: 710 });
+      mg.showUI(__html__, { width: 400, height: 620 });
     } catch (error) {
       console.warn("Unable to open preferred SendToFigma UI size, retrying with compact size:", error);
-      mg.showUI(__html__, { width: 400, height: 710 });
+      mg.showUI(__html__, { width: 400, height: 620 });
     }
   }
   function unwrapUIMessage(rawMessage) {
