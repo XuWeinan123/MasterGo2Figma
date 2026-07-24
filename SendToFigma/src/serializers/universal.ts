@@ -90,13 +90,37 @@ export function matrixMultiplication(m1: number[][], m2: number[][]): number[][]
     return res;
 }
 
-export function getResultArrayByTwoPoint(points: readonly any[]) {
+// MasterGo (like every on-screen renderer) draws linear-gradient bands
+// perpendicular to the p0→p1 handle line in PIXEL space, while Figma's
+// gradientTransform operates on the aspect-distorting normalized square.
+// When the node's pixel size is known, build the transform in pixel space so
+// the imported gradient keeps its on-screen angle; the math reduces exactly to
+// the legacy normalized rotation when w == h or the axis is axis-aligned.
+// Without dimensions (text-run fills, degenerate handles) fall back to the
+// legacy normalized construction.
+export function getResultArrayByTwoPoint(points: readonly any[], dims?: { width: number; height: number }) {
     if (points === undefined || points.length < 2) {
         return [[1, 0, 0], [0, 1, 0]];
     }
     const first = cloneVector2(points[0]);
     const second = cloneVector2(points[1]);
     const x3 = first.x, y3 = first.y, x4 = second.x, y4 = second.y;
+    const w = dims && Number.isFinite(dims.width) ? dims.width : 0;
+    const h = dims && Number.isFinite(dims.height) ? dims.height : 0;
+    if (w > 0 && h > 0) {
+        const dx = (x4 - x3) * w, dy = (y4 - y3) * h;
+        const l2 = dx * dx + dy * dy;
+        // Perp (v) row scale: w·h·|p1−p0| keeps row1 identical to the legacy
+        // normalized rotation in every case the legacy math got right
+        // (axis-aligned any aspect, any angle on squares), preserving baselines.
+        const e = w * h * Math.sqrt((x4 - x3) ** 2 + (y4 - y3) ** 2);
+        if (Number.isFinite(l2) && l2 > 0 && Number.isFinite(e) && e > 0) {
+            return [
+                [w * dx / l2, h * dy / l2, -(x3 * w * dx + y3 * h * dy) / l2],
+                [-w * dy / e, h * dx / e, 0.5 + (x3 * w * dy - y3 * h * dx) / e]
+            ];
+        }
+    }
     const m1 = [[1, 0, 0], [0, 1, 0.5], [0, 0, 1]];
     const len = Math.sqrt((x4 - x3) ** 2 + (y4 - y3) ** 2);
     if (!Number.isFinite(len) || len <= 0) return [[1, 0, 0], [0, 1, 0]];
@@ -235,10 +259,10 @@ function recoverMinorAxisEnd(p0: { x: number; y: number }, p1: { x: number; y: n
 // is fed to getResultArrayByThreePoints, which emits a Figma-conforming matrix.
 // Falls back to the 2-handle reconstruction (circular) when transform is absent,
 // malformed, or degenerate.
-export function resolveGradientTransform(paint: any): number[][] {
+export function resolveGradientTransform(paint: any, dims?: { width: number; height: number }): number[][] {
     const points = (paint && paint.gradientHandlePositions) || [];
     if (paint && paint.type === "GRADIENT_LINEAR") {
-        return getResultArrayByTwoPoint(points);
+        return getResultArrayByTwoPoint(points, dims);
     }
     // A real third handle is authoritative: the typings declare only two, but
     // if the runtime provides the minor-axis handle it carries the true ratio.
@@ -286,7 +310,7 @@ export function processBlendMode(blendMode: any): string {
     return "NORMAL";
 }
 
-export function fillsAndStrokes2Json(fills: readonly any[] | any, strokes: readonly any[]) {
+export function fillsAndStrokes2Json(fills: readonly any[] | any, strokes: readonly any[], dims?: { width: number; height: number }) {
     const resultFills: any[] = [];
     if (Array.isArray(fills)) {
         for (const fill of fills) {
@@ -306,7 +330,7 @@ export function fillsAndStrokes2Json(fills: readonly any[] | any, strokes: reado
                     "opacity": clamp01(fill.alpha, 1),
                     "blendMode": processBlendMode(fill.blendMode),
                     "gradientStops": cloneGradientStops(fill.gradientStops),
-                    "gradientTransform": resolveGradientTransform(fill)
+                    "gradientTransform": resolveGradientTransform(fill, dims)
                 };
             } else if (fill.type === "GRADIENT_RADIAL" || fill.type === "GRADIENT_ANGULAR" || fill.type === "GRADIENT_DIAMOND") {
                 tempResultFill = {
@@ -343,7 +367,7 @@ export function fillsAndStrokes2Json(fills: readonly any[] | any, strokes: reado
                     "opacity": clamp01(stroke.alpha, 1),
                     "blendMode": processBlendMode(stroke.blendMode),
                     "gradientStops": cloneGradientStops(stroke.gradientStops),
-                    "gradientTransform": resolveGradientTransform(stroke)
+                    "gradientTransform": resolveGradientTransform(stroke, dims)
                 };
             } else if (stroke.type === "GRADIENT_RADIAL" || stroke.type === "GRADIENT_ANGULAR" || stroke.type === "GRADIENT_DIAMOND") {
                 tempResultStroke = {
@@ -452,7 +476,11 @@ export function getUniversalProperty(selection: any, sourceType?: string, restor
     const layoutTransform = getRelativeLayoutTransform(selection);
     const fills = readNodeProperty<any[]>(selection, "fills", []);
     const strokes = readNodeProperty<any[]>(selection, "strokes", []);
-    const tFS = fillsAndStrokes2Json(fills, strokes);
+    const nodeDims = {
+        width: finiteNumber(readNodeProperty(selection, "width", 0), 0),
+        height: finiteNumber(readNodeProperty(selection, "height", 0), 0)
+    };
+    const tFS = fillsAndStrokes2Json(fills, strokes, nodeDims);
 
     const fourCR = {
         tl: readNodeProperty(selection, "topLeftRadius", 0) || 0,

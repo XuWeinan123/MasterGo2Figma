@@ -96,6 +96,26 @@
       return [m[0], m[1]];
     }
 
+    // Pixel-space variant (mirrors SendToFigma's getResultArrayByTwoPoint with
+    // dims): MasterGo renders linear-gradient bands perpendicular to the
+    // handle axis in PIXEL space, so the Figma matrix must fold in the node's
+    // aspect. Reduces exactly to mgLinearGradientTransform when w == h or the
+    // axis is axis-aligned.
+    function mgLinearGradientTransformPx(p0, p1, w, h) {
+      if (!isFinite(w) || !isFinite(h) || w <= 0 || h <= 0) return null;
+      const dx = (p1.x - p0.x) * w, dy = (p1.y - p0.y) * h;
+      const l2 = dx * dx + dy * dy;
+      // Perp (v) row scale w·h·|p1−p0| matches the legacy normalized rotation
+      // wherever the legacy math was correct (see getResultArrayByTwoPoint).
+      const nx = p1.x - p0.x, ny = p1.y - p0.y;
+      const e = w * h * Math.sqrt(nx * nx + ny * ny);
+      if (!isFinite(l2) || l2 <= 0 || !isFinite(e) || e <= 0) return null;
+      return [
+        [w * dx / l2, h * dy / l2, -(p0.x * w * dx + p0.y * h * dy) / l2],
+        [-w * dy / e, h * dx / e, 0.5 + (p0.x * w * dy - p0.y * h * dx) / e]
+      ];
+    }
+
     // Radial/angular/diamond: center p0, major-axis end p1, and the minor axis
     // as the major axis rotated 90° scaled by `ratio` (1 = circular).
     function mgRadialGradientTransform(p0, p1, ratio) {
@@ -159,6 +179,14 @@
     function mgFinalizeRadialPaints(list, w, h) {
       if (!Array.isArray(list)) return;
       for (const paintEntry of list) {
+        if (paintEntry && paintEntry.__mgLinearMeta) {
+          const lm = paintEntry.__mgLinearMeta;
+          delete paintEntry.__mgLinearMeta;
+          if (paintEntry.type === "GRADIENT_LINEAR") {
+            const t = mgLinearGradientTransformPx(lm.p0, lm.p1, w, h);
+            if (t) paintEntry.gradientTransform = t;
+          }
+        }
         if (!paintEntry || !paintEntry.__mgRadialMeta) continue;
         const meta = paintEntry.__mgRadialMeta;
         delete paintEntry.__mgRadialMeta;
@@ -667,6 +695,11 @@
           gradientStops: gradient.stops.map(s => ({ position: s.position, color: { r: s.color.r, g: s.color.g, b: s.color.b, a: s.color.a } })),
           gradientTransform: transform
         }, kind, gradient, p0, p1);
+        // Linear transforms need the owner node's pixel aspect (bands are
+        // perpendicular to the handle axis in PIXEL space); finalized per
+        // node in mgFinalizeRadialPaints. The normalized transform above
+        // stays as the fallback for node-less paints (style library).
+        if (kind === 1) paint.__mgLinearMeta = { p0: { x: p0.x, y: p0.y }, p1: { x: p1.x, y: p1.y } };
         Object.defineProperty(paint, "__mgGradientDebug", { value: gradient, enumerable: false });
         return paint;
       }
@@ -3812,12 +3845,6 @@
     }
 
     function convertMgPackageToV2Entries(zipEntries, fileName, options) {
-      // One stamp per conversion run: "MMDD-HHmm".
-      const mgImportStamp = (() => {
-        const d = new Date();
-        const p = v => String(v).padStart(2, "0");
-        return `${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
-      })();
       const documentBytes = getEntryByName(zipEntries, "document");
       if (!documentBytes) throw new Error(`"${fileName}" 不是有效的 .mg 文件（缺少 document）`);
 
@@ -4201,10 +4228,7 @@
       let totalLayerCount = 0;
       for (let pi = 0; pi < pageList.length; pi++) {
         const pg = pageList[pi];
-        // `_mg` marks a native import; the timestamp suffix distinguishes
-        // repeated imports of the same file (e.g. "cover_mg 0712-2130").
-        const baseName = pg.name.replace(/_mg( \d{4}-\d{4})?$/, "");
-        const pageName = `${baseName}_mg ${mgImportStamp}`;
+        const pageName = pg.name;
         const folder = `pages/page-${pi}`;
         const pageFile = `${folder}/index.json`;
         const pageId = `mgpage-${pi}`;
@@ -4242,6 +4266,7 @@
             const stylePaints = fills.map(mgCloneJsonValue);
             for (const sp of stylePaints) {
               if (sp && sp.__mgRadialMeta) delete sp.__mgRadialMeta;
+              if (sp && sp.__mgLinearMeta) delete sp.__mgLinearMeta;
               if (sp && sp.__mgCropRect) delete sp.__mgCropRect;
             }
             emittedStyles.push({ id: sid, styleType: "PAINT", name: def.name, paints: stylePaints });

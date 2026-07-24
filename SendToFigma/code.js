@@ -635,13 +635,26 @@
     }
     return res;
   }
-  function getResultArrayByTwoPoint(points) {
+  function getResultArrayByTwoPoint(points, dims) {
     if (points === void 0 || points.length < 2) {
       return [[1, 0, 0], [0, 1, 0]];
     }
     const first = cloneVector2(points[0]);
     const second = cloneVector2(points[1]);
     const x3 = first.x, y3 = first.y, x4 = second.x, y4 = second.y;
+    const w = dims && Number.isFinite(dims.width) ? dims.width : 0;
+    const h = dims && Number.isFinite(dims.height) ? dims.height : 0;
+    if (w > 0 && h > 0) {
+      const dx = (x4 - x3) * w, dy = (y4 - y3) * h;
+      const l2 = dx * dx + dy * dy;
+      const e = w * h * Math.sqrt(__pow(x4 - x3, 2) + __pow(y4 - y3, 2));
+      if (Number.isFinite(l2) && l2 > 0 && Number.isFinite(e) && e > 0) {
+        return [
+          [w * dx / l2, h * dy / l2, -(x3 * w * dx + y3 * h * dy) / l2],
+          [-w * dy / e, h * dx / e, 0.5 + (x3 * w * dy - y3 * h * dx) / e]
+        ];
+      }
+    }
     const m1 = [[1, 0, 0], [0, 1, 0.5], [0, 0, 1]];
     const len = Math.sqrt(__pow(x4 - x3, 2) + __pow(y4 - y3, 2));
     if (!Number.isFinite(len) || len <= 0) return [[1, 0, 0], [0, 1, 0]];
@@ -705,10 +718,10 @@
     if (!Number.isFinite(end.x) || !Number.isFinite(end.y)) return null;
     return end;
   }
-  function resolveGradientTransform(paint) {
+  function resolveGradientTransform(paint, dims) {
     const points = paint && paint.gradientHandlePositions || [];
     if (paint && paint.type === "GRADIENT_LINEAR") {
-      return getResultArrayByTwoPoint(points);
+      return getResultArrayByTwoPoint(points, dims);
     }
     if (points.length >= 3) {
       return getResultArrayByThreePoints(points);
@@ -747,7 +760,7 @@
     if (value === "PLUS_LIGHTER") return "PLUS_LIGHTER";
     return "NORMAL";
   }
-  function fillsAndStrokes2Json(fills, strokes) {
+  function fillsAndStrokes2Json(fills, strokes, dims) {
     const resultFills = [];
     if (Array.isArray(fills)) {
       for (const fill of fills) {
@@ -767,7 +780,7 @@
             "opacity": clamp01(fill.alpha, 1),
             "blendMode": processBlendMode(fill.blendMode),
             "gradientStops": cloneGradientStops(fill.gradientStops),
-            "gradientTransform": resolveGradientTransform(fill)
+            "gradientTransform": resolveGradientTransform(fill, dims)
           };
         } else if (fill.type === "GRADIENT_RADIAL" || fill.type === "GRADIENT_ANGULAR" || fill.type === "GRADIENT_DIAMOND") {
           tempResultFill = {
@@ -803,7 +816,7 @@
             "opacity": clamp01(stroke.alpha, 1),
             "blendMode": processBlendMode(stroke.blendMode),
             "gradientStops": cloneGradientStops(stroke.gradientStops),
-            "gradientTransform": resolveGradientTransform(stroke)
+            "gradientTransform": resolveGradientTransform(stroke, dims)
           };
         } else if (stroke.type === "GRADIENT_RADIAL" || stroke.type === "GRADIENT_ANGULAR" || stroke.type === "GRADIENT_DIAMOND") {
           tempResultStroke = {
@@ -901,7 +914,11 @@
     const layoutTransform = getRelativeLayoutTransform(selection);
     const fills = readNodeProperty(selection, "fills", []);
     const strokes = readNodeProperty(selection, "strokes", []);
-    const tFS = fillsAndStrokes2Json(fills, strokes);
+    const nodeDims = {
+      width: finiteNumber(readNodeProperty(selection, "width", 0), 0),
+      height: finiteNumber(readNodeProperty(selection, "height", 0), 0)
+    };
+    const tFS = fillsAndStrokes2Json(fills, strokes, nodeDims);
     const fourCR = {
       tl: readNodeProperty(selection, "topLeftRadius", 0) || 0,
       tr: readNodeProperty(selection, "topRightRadius", 0) || 0,

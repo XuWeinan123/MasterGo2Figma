@@ -559,6 +559,17 @@ Paint child record body (after `01 <id> 00 02 <ref> 00 03 <sort> 00`), see `mgPa
   (`mgLinearGradientTransform` / `mgRadialGradientTransform`, ports of
   `SendToFigma/src/serializers/universal.ts`), so native decode is bit-compatible with real
   exports.
+  - **LINEAR gradients are aspect-corrected per node** (2026-07-24): MasterGo renders the
+    gradient bands perpendicular to the p0→p1 handle line in PIXEL space, while a matrix
+    built as a pure rotation in the normalized square skews the axis on non-square nodes
+    (fx/bg-blur-backdrop, 280×150, 45°-in-pixels axis imported as a hard diagonal). Paint
+    parse time has no node size, so linear paints carry `__mgLinearMeta {p0, p1}` and
+    `mgFinalizeRadialPaints` rebuilds the transform per node via
+    `mgLinearGradientTransformPx(p0, p1, w, h)` — the same formula SendToFigma now uses
+    (`getResultArrayByTwoPoint` with dims). Row0 folds the aspect into the gradient axis;
+    row1 (perp) is scaled by `w·h·|p1−p0|`, which reproduces the legacy matrix bit-for-bit
+    wherever the legacy math was already correct (axis-aligned on any aspect, any angle on
+    squares). Style-library paints have no owner node and keep the normalized fallback.
 - `0b { 01 <scaleMode: 0=FILL 1=FIT 2=CROP? 3=TILE?> 02 <ratio> 03 <image path> 00
   04 { <crop rect floats> } 07 <w> 08 <h> } 00` — image paint guts. imageRef = path basename
   (content-hash filename, resolves through `manifest.assets` and `images/`).
