@@ -84,7 +84,7 @@ showImportUI();
 
 function showImportUI() {
   ensureLayerRulesLoaded();
-  figma.showUI(__html__, { width: 400, height: 630 });
+  figma.showUI(__html__, { width: 400, height: 620 });
   figma.ui.onmessage = async (message) => {
     if (!message || typeof message !== "object") return;
 
@@ -277,8 +277,7 @@ async function startImportSession(message: any) {
     transferId: activeImportSession.transferId,
     stage: "restore",
     current: 0,
-    total: totalNodes,
-    label: "正在接收导入数据..."
+    total: totalNodes
   });
 }
 
@@ -528,8 +527,7 @@ async function restoreImportPageData(importPage: ImportPageIndex, layers: { [id:
     stage: "restore",
     pageIndex,
     current: session.restoredNodes,
-    total: session.totalNodes,
-    label: "正在创建页面：" + pageName
+    total: session.totalNodes
   });
 
   const pageCreateStartedAt = Date.now();
@@ -628,24 +626,24 @@ async function restoreImportPageData(importPage: ImportPageIndex, layers: { [id:
   await retryDeferredInstanceRelinks(layers);
   addImportTiming(session, "restore.deferredRelinkMs", Date.now() - relinkStartedAt);
 
-  await reportPagePostprocessProgress(session, pageIndex, pageName, postprocessStart, pageNodeCount, 0, 0, 1, "正在应用自动布局...");
+  await reportPagePostprocessProgress(session, pageIndex, postprocessStart, pageNodeCount, 0, 0, 1);
   const layoutStartedAt = Date.now();
-  await applyDeferredLayoutRestores((done, total, label) => {
-    return reportPagePostprocessProgress(session, pageIndex, pageName, postprocessStart, pageNodeCount, 0, done, total, label);
+  await applyDeferredLayoutRestores((done, total) => {
+    return reportPagePostprocessProgress(session, pageIndex, postprocessStart, pageNodeCount, 0, done, total);
   });
   addImportTiming(session, "postprocess.deferredLayoutMs", Date.now() - layoutStartedAt);
   const cleanupStartedAt = Date.now();
-  await cleanupImportedContainerShells(restoredPage, (done, total, label) => {
-    return reportPagePostprocessProgress(session, pageIndex, pageName, postprocessStart, pageNodeCount, 1, done, total, label);
+  await cleanupImportedContainerShells(restoredPage, (done, total) => {
+    return reportPagePostprocessProgress(session, pageIndex, postprocessStart, pageNodeCount, 1, done, total);
   });
   addImportTiming(session, "postprocess.cleanupShellsMs", Date.now() - cleanupStartedAt);
   const autoSpaceStartedAt = Date.now();
-  await applyDeferredSingleChildAutoSpaceAlignmentFixes((done, total, label) => {
-    return reportPagePostprocessProgress(session, pageIndex, pageName, postprocessStart, pageNodeCount, 2, done, total, label);
+  await applyDeferredSingleChildAutoSpaceAlignmentFixes((done, total) => {
+    return reportPagePostprocessProgress(session, pageIndex, postprocessStart, pageNodeCount, 2, done, total);
   });
   addImportTiming(session, "postprocess.singleChildAutoSpaceMs", Date.now() - autoSpaceStartedAt);
   session.postProcessedNodes = Math.min(session.totalNodes, postprocessStart + pageNodeCount);
-  await reportPagePostprocessProgress(session, pageIndex, pageName, postprocessStart, pageNodeCount, PAGE_POSTPROCESS_STAGE_COUNT - 1, 1, 1, "页面完成：" + pageName);
+  await reportPagePostprocessProgress(session, pageIndex, postprocessStart, pageNodeCount, PAGE_POSTPROCESS_STAGE_COUNT - 1, 1, 1);
   // Both maps are strictly page-scoped: every reader (group-offset
   // normalization, vector layout-box checks, deferred layout passes,
   // component-set finalize, SPACE_BETWEEN fixes) runs within this page's
@@ -665,13 +663,11 @@ function countLayerRecords(layers: { [id: string]: ImportLayerRecord }): number 
 async function reportPagePostprocessProgress(
   session: ImportSession,
   pageIndex: number,
-  pageName: string,
   pagePostprocessStart: number,
   pageNodeCount: number,
   stageIndex: number,
   done: number,
-  total: number,
-  label: string
+  total: number
 ) {
   const stageRatio = total > 0 ? Math.max(0, Math.min(1, done / total)) : 1;
   const completedRatio = Math.max(0, Math.min(1, (stageIndex + stageRatio) / PAGE_POSTPROCESS_STAGE_COUNT));
@@ -684,8 +680,7 @@ async function reportPagePostprocessProgress(
     current: session.restoredNodes,
     total: session.totalNodes,
     postprocessCurrent,
-    postprocessTotal: session.totalNodes,
-    label
+    postprocessTotal: session.totalNodes
   });
 }
 
@@ -699,15 +694,15 @@ async function completeImportSession(message: any) {
     if (session.restoredNodes !== session.totalNodes) {
       throw new Error(`会话图层数量不一致：expected=${session.totalNodes}, actual=${session.restoredNodes}`);
     }
-    postFinalizeProgress(session, 0, 4, "正在恢复连接线...");
+    postFinalizeProgress(session, 0, 4);
     const connectorStartedAt = Date.now();
     applyDeferredConnectorRestores();
     addImportTiming(session, "finalize.connectorsMs", Date.now() - connectorStartedAt);
-    postFinalizeProgress(session, 1, 4, "正在还原缺失字体...");
+    postFinalizeProgress(session, 1, 4);
     const missingFontStartedAt = Date.now();
     const missingFontRestoreResult = await restoreMissingFontTextLayers(session.restoredPages);
     addImportTiming(session, "finalize.missingFontsMs", Date.now() - missingFontStartedAt);
-    postFinalizeProgress(session, 2, 4, "正在完成还原...");
+    postFinalizeProgress(session, 2, 4);
 
     const viewportStartedAt = Date.now();
     if (session.restoredPages.length > 0) {
@@ -715,7 +710,7 @@ async function completeImportSession(message: any) {
       figma.viewport.scrollAndZoomIntoView(session.restoredPages[0].children as SceneNode[]);
     }
     addImportTiming(session, "finalize.viewportMs", Date.now() - viewportStartedAt);
-    postFinalizeProgress(session, 4, 4, "正在完成还原...");
+    postFinalizeProgress(session, 4, 4);
 
     figma.ui.postMessage({
       type: "complete",
@@ -748,7 +743,7 @@ async function completeImportSession(message: any) {
   }
 }
 
-function postFinalizeProgress(session: ImportSession, current: number, total: number, label: string) {
+function postFinalizeProgress(session: ImportSession, current: number, total: number) {
   figma.ui.postMessage({
     type: "progress",
     transferId: session.transferId,
@@ -756,8 +751,7 @@ function postFinalizeProgress(session: ImportSession, current: number, total: nu
     current,
     total,
     finalizeCurrent: current,
-    finalizeTotal: total,
-    label
+    finalizeTotal: total
   });
 }
 
@@ -882,7 +876,7 @@ function createRestoredPageName(name: string): string {
   return name || "Imported Page";
 }
 
-async function maybeReportRestoreProgress(current: number, total: number, label: string, force = false) {
+async function maybeReportRestoreProgress(current: number, total: number, force = false) {
   const now = Date.now();
   const progState = state.activeProgressState || {
     total,
@@ -901,8 +895,7 @@ async function maybeReportRestoreProgress(current: number, total: number, label:
     transferId: activeImportSession ? activeImportSession.transferId : undefined,
     stage: "restore",
     current,
-    total,
-    label
+    total
   });
   progState.total = total;
   progState.lastCurrent = current;
@@ -1091,7 +1084,7 @@ async function restoreImportedNode(
   let restoredCount = 1;
   const currentCount = restoredBefore + restoredCount;
   const progressStartedAt = Date.now();
-  await maybeReportRestoreProgress(currentCount, totalNodes, "正在还原：" + (nodeProps.name || layerRecord.name));
+  await maybeReportRestoreProgress(currentCount, totalNodes);
   addImportTiming(activeImportSession, "restore.progressMs", Date.now() - progressStartedAt);
 
   const childIds = nodeProps.omitChildrenOnRestore ? [] : (layerRecord.childIds || []);
@@ -1149,7 +1142,7 @@ async function tryRestoreAsInstance(
   session.restoredNodeById[layerRecord.id] = instance;
   console.info("[mg-instance] restored:", layerRecord.id, layerRecord.props?.name || layerRecord.name, "→ instance of", layerRecord.mainComponentId);
   const accounted = 1 + countRecordDescendants(layerRecord, layers);
-  await maybeReportRestoreProgress(restoredBefore + accounted, totalNodes, "正在还原实例：" + (layerRecord.props?.name || layerRecord.name));
+  await maybeReportRestoreProgress(restoredBefore + accounted, totalNodes);
   return accounted;
 }
 
