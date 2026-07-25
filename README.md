@@ -1,149 +1,116 @@
 # MasterGo2Figma
 
-把 MasterGo 文件中的图层导出为 MasterGo2Figma JSON zip，并在 Figma 中用插件还原为可编辑图层。
+将 MasterGo 设计稿导入 Figma，并尽可能还原为可继续编辑的页面、图层与本地样式。
 
-当前版本不再使用“转移页 + Sketch 导出”的旧方案。发送端统一生成 JSON 包；接收端统一上传 zip 还原。
+**推荐直接安装已发布的 Figma 社区插件：
+[MasterGo Importer · Figma Community](https://www.figma.com/community/plugin/1662512589841230294)**
 
-## 插件组成
+普通用户不需要克隆仓库、安装 Node.js，也不需要运行 MasterGo 端插件：从 MasterGo 导出 `.mg` 文件后，直接在 Figma 中用 MasterGo Importer 打开即可。
 
-- `SendToFigma`：运行在 MasterGo 中，读取页面/图层并导出 MasterGo2Figma JSON 包。
-- `ReceiveFromMasterGo`：运行在 Figma 中，上传导出的 zip 或 MasterGo 原生 `.mg` 文件并还原图层。
-- `tools/mastergo_relay_server.py`：本地 Python 中继服务，用于大文件流式写入本地并自动打包 zip。
-- `pythonParser/mg_to_zip.py`：独立 Python CLI，不启动任何插件即可把 `.mg` 直接转成 v2 zip（详见下文）。
+## 快速使用
 
-## 两种迁移路径
+1. 在 MasterGo 中导出需要迁移的 `.mg` 文件。
+2. 在 Figma 中安装并运行 [MasterGo Importer](https://www.figma.com/community/plugin/1662512589841230294)。
+3. 将一个或多个 `.mg` 文件拖入插件，或点击「选择文件」。
+4. 查看解析出的页面和图层数量，勾选需要导入的页面。
+5. 点击「导入」，等待进度完成。
 
-1. **SendToFigma 导出 zip → ReceiveFromMasterGo 还原**（推荐，保真度最高）：MasterGo 端在插件里读取
-   实时图层树并序列化，能拿到插件 API 暴露的全部属性。
-2. **直接导入 MasterGo 原生 `.mg` 文件**：接收端插件可以直接上传 `.mg`（无需先跑发送端），内置的原生二进制
-   解码器会把它解析成 v2 图层再还原。适合手上只有 `.mg` 文件、无法运行 MasterGo 端插件的场景。当前解码器在
-   基准样例上已能做到与发送端 zip 逐字段一致；仍有少量属性依赖 `.mg` 内嵌的 JSON 兜底（见
-   [`MG_DECODER.md`](docs/MG_DECODER.md) 的「TODO」）。
+插件会在当前 Figma 文件中创建新页面。导入完成后可以直接编辑图层；如有图片缺失、连接线降级或字体未完全恢复，结果页会显示详情。
 
-## SendToFigma 用法
+更完整的安装、使用与排错说明见 [QUICKSTART.md](QUICKSTART.md)。
 
-1. 在 MasterGo 中安装并运行 `SendToFigma` 插件。
-2. 选择要导出的页面。
-3. 选择传输方式：
-   - `直接生成 zip`：适合小文件，插件 UI 会直接生成并下载 zip。
-   - `流传输到本地`：适合较大的页面，插件 UI 会把 JSON 和图片分块发送到本地 Python 服务，完成后生成 zip。
-4. 点击 `开始`。
+## 当前能力
 
-### 直接生成 zip
+- 直接解析 MasterGo 原生 `.mg`，包括完整文件以及 share / 局部导出形成的不同记录结构。
+- 一次选择多个文件，并在导入前按页面勾选。
+- 还原常见图形、矢量网络、布尔运算、Group、Section、自动布局与绝对定位。
+- 还原组件、组件集、变体和实例；对定义顺序晚于实例的文件进行依赖排序和延迟重连。
+- 还原文本及混合样式，包括字号、字重、行高、字距、大小写和装饰等属性。
+- 重建并绑定本地 Paint / Text / Effect Style。
+- 还原图片填充及 FILL、FIT、CROP、TILE 等模式。
+- 还原描边、圆角、透明度、混合模式、阴影、模糊和线性 / 径向 / 角向 / 菱形渐变。
+- 还原连接线；无法恢复原端点时会降级为普通折线并在结果中提示。
+- 按页准备和分块传输数据，页面完成后及时释放缓存，降低大文件导入的内存峰值。
 
-这个模式最方便，不需要启动本地服务。导出完成后会直接下载一个 `.zip` 文件。
+原生 `.mg` 解码器已通过多组 MG / ZIP 对照样例和统一回归集验证。格式细节、已知差异与验证状态见：
 
-注意：直接 zip 会在插件 UI 内存中打包，页面较大时更容易触发内存问题。大文件优先使用本地流式传输。
+- [`.mg` 解码格式说明](docs/MG_DECODER.md)
+- [MG / ZIP 一致性状态](docs/MG_ZIP_PARITY_STATUS.md)
+- [统一回归测试集](docs/TESTSET_UNIFIED_REGRESSION.md)
+- [逆向过程与方法论](docs/MG_DECODER_JOURNAL.md)
 
-### 流传输到本地
+## 项目结构
 
-先在仓库根目录启动本地服务：
+- `ReceiveFromMasterGo/`：Figma 端插件，发布名称为 **MasterGo Importer**。负责解析 `.mg`、选择页面并在 Figma 中还原图层。
+- `ReceiveFromMasterGo/ui-src/`：React 18 + Tailwind + shadcn/ui 插件界面源码。
+- `ReceiveFromMasterGo/src/ui/mgPackage.js`：MasterGo 原生 `.mg` 二进制解码器。
+- `SendToFigma/`：MasterGo 端导出工具，用于生成 MasterGo2Figma v2 ZIP；目前作为高级兼容与对照路径保留。
+- `pythonParser/mg_to_zip.py`：无需启动 Figma 插件，将 `.mg` 转为 v2 ZIP 的命令行工具。
+- `tools/mastergo_relay_server.py`：SendToFigma 大文件导出时使用的本地中继服务。
+- `shared/`：两端共用的类型、矩阵、矢量、连接线与图层规则。
 
-```bash
-python3 tools/mastergo_relay_server.py
-```
+## 高级用法
 
-默认服务地址是：
+### 在命令行将 `.mg` 转成 v2 ZIP
 
-```text
-http://127.0.0.1:8765
-```
-
-然后在 `SendToFigma` 中选择 `流传输到本地`，确认地址后点击 `开始`。导出完成后，服务会在下面目录生成 zip：
-
-```text
-mastergo2figma-relay-output/<transferId>.zip
-```
-
-中继服务会在完成后删除展开的临时文件夹，只保留最终 zip。
-
-## ReceiveFromMasterGo 用法
-
-1. 在 Figma 中安装并运行 `ReceiveFromMasterGo` 插件。
-2. 上传 `SendToFigma` 生成的 `.zip` 文件，或直接上传 MasterGo 导出的 `.mg` 文件。
-3. 点击开始还原。
-
-无论发送端使用 `直接生成 zip` 还是 `流传输到本地`，接收端都只需要上传最终 zip。上传 `.mg` 时，插件会先
-用内置的原生解码器把它转成 v2 结构再还原，用户操作与上传 zip 完全一致。
-
-接收端支持的输入结构：
-
-- zip 根目录直接包含 `manifest.json`。
-- zip 内有一个顶层目录，顶层目录内包含 `manifest.json`。
-- MasterGo 原生 `.mg`（本身也是 zip，内含 `document` / `meta.json` / `images/`）。
-
-### 用 CLI 把 `.mg` 转成 zip（不启动插件）
-
-如果只想把 `.mg` 转成 v2 zip（例如批处理或在没有 Figma 的环境里预处理），用独立 CLI：
+适合批处理、调试或在没有 Figma 的环境中预处理文件：
 
 ```bash
 python3 pythonParser/mg_to_zip.py 输入.mg -o 输出.zip
 ```
 
-它复用接收端同一份解码器 `ReceiveFromMasterGo/src/ui/mgPackage.js`，产出的 zip 可以直接喂给
-`ReceiveFromMasterGo`。`.mg` 二进制格式的逆向说明见 [`MG_DECODER.md`](docs/MG_DECODER.md)，逆向过程与方法论
-见 [`MG_DECODER_JOURNAL.md`](docs/MG_DECODER_JOURNAL.md)。当前 MG/ZIP 一致性状态见
-[`MG_ZIP_PARITY_STATUS.md`](docs/MG_ZIP_PARITY_STATUS.md)。
+该工具复用 MasterGo Importer 的同一份解码器。生成的 ZIP 可用于调试、对照，也可在插件「实验室」中启用 ZIP 导入后打开。
 
-### 接收端还原阶段
+### 使用 SendToFigma 导出 v2 ZIP
 
-接收端导入 zip 后，会按下面阶段还原页面和图层：
+仓库仍保留 MasterGo 端的 `SendToFigma`。它通过 MasterGo 插件 API 读取实时图层树，主要用于开发对照以及原生 `.mg` 暂未覆盖的特殊情况：
 
-1. `startImportSession()` 校验 v2 package manifest，初始化运行时状态、图片/页面缓存和进度统计。
-2. 通过 `import-asset-*` 接收图片资源分块，通过 `import-page-*` 接收页面 layer 分块，并把每个 layer record 累积到当前页面的导入缓存中。
-3. `restoreImportPageData()` 为每个导入页面创建新的 Figma Page，再按 `rootNodeIds` 从根节点开始递归还原。
-4. `restoreImportedNode()` 根据图层类型选择还原路径：Boolean tree、native Group、ComponentSet 或普通节点创建；普通节点由 `createNodeFromData()` 创建后 append 到父级。
-5. `applyProperties()` 应用名称、可见性、blend、fills/strokes/effects、constraints、layout 等通用属性，并按节点类型继续应用 vector network、文本属性或 connector 属性。
-6. 特殊容器在子节点递归完成后 finalize：Group 使用临时 Frame 承载子节点后调用 `figma.group()`，Boolean 执行组合或 fallback，ComponentSet 执行 `combineAsVariants()`。
-7. 页面节点创建完成后执行 `applyDeferredLayoutRestores()`，分三步补齐 auto-layout：节点自身 auto-layout、作为父级 auto-layout 子项的属性、固定尺寸和 transform 收尾。native Group 子节点会在这里把局部坐标转换为 Figma Group 所需的父级坐标。
-8. 最后执行清理和后处理：删除导入 shell、修正单子节点 `SPACE_BETWEEN`、恢复 deferred connector、尝试恢复缺失字体、定位视口并发送完成通知。
+1. 在 MasterGo 中以开发插件方式载入 `SendToFigma/manifest.json`。
+2. 小文件可选择直接生成 ZIP。
+3. 较大文件可先在仓库根目录运行：
 
-## OOM（Out of Memory 内存溢出） 和 MasterGo 限制说明
+   ```bash
+   python3 tools/mastergo_relay_server.py
+   ```
 
-这是 MasterGo 插件架构下的共性问题，不是单纯的本项目打包逻辑问题。
+4. 在 SendToFigma 中选择流传输到 `http://127.0.0.1:8765`。
+5. 生成的文件位于 `mastergo2figma-relay-output/<transferId>.zip`。
 
-本项目已经用本地 Python 中继规避了 UI 侧拼接大 zip / Blob 下载带来的内存峰值，但它只能避免“打包 zip 时”把所有文件聚合到 UI 内存中，不能避免“大量 JSON / 图片 chunk 传输时”造成的 OOM。
+ZIP 导入目前位于 MasterGo Importer 的「实验室」中，默认关闭。
 
-当前导出链路是：
+## 已知边界
 
-```text
-MasterGo 插件主线程 code.ts
-  -> 读取图层
-  -> 转换为 JS record
-  -> JSON.stringify
-  -> mg.ui.postMessage 发送给 ui.html
-  -> ui.html fetch 到本地 Python
-  -> Python 写文件并打 zip
-```
+- MasterGo 在导入、保存或导出过程中可能不写出某些属性，或将它们转换为运行时派生值；源文件没有保留的数据无法在 Figma 端重建。
+- 布尔结果包围盒、连接线拐点和文本尺寸可能由 Figma 重新计算，因此会出现少量像素级差异。
+- 缺少的本机字体需要先安装到系统。新安装字体未被识别时，可在插件「实验室」中使用「刷新字体」。
+- 特别大的 `.mg` 仍可能受 Figma 插件运行时内存限制影响，建议只勾选本次需要的页面并分批导入。
+- SendToFigma 的本地中继只能降低 UI 打包 ZIP 的内存峰值，不能消除 MasterGo `mg.ui.postMessage` 桥接大量数据时的宿主内存开销。
 
-实际测试中，MasterGo 插件主线程没有 `fetch` API，无法直接请求本地 Python 服务。因此数据必须经过 `mg.ui.postMessage` 从主线程传到 UI。
+## 本地开发
 
-当插件连续通过 `mg.ui.postMessage` 发送大量 JSON / 图片 chunk 时，MasterGo 宿主需要在主线程、UI bridge 和 UI 之间做序列化、复制或排队。这个桥接层开销由 MasterGo 宿主管理，插件 API 没有提供主动释放、零拷贝传输、可写文件句柄或真正的 streaming channel。因此即使 UI 已经把 chunk 发给 Python 并写盘，插件也无法保证 bridge 内部开销已经被释放。
-
-因此对于特别大的页面或多页面连续导出，当前版本无法保证稳定完成。缩小单次导出范围只能作为临时规避方式，不是根本解决方案。
-
-`流传输到本地` 仍然建议用于较大文件，因为它能避免 UI 打包 zip 的额外内存峰值；但如果 OOM 发生在 `mg.ui.postMessage` 大量传输 JSON / 图片 chunk 的阶段，流式传输本身无法解决。
-
-如果 MasterGo 后续提供插件主线程网络请求、Transferable / zero-copy postMessage、文件系统写入或官方大文件导出 API，才有机会从架构上彻底解决这个问题。
-
-## 开发
-
-两个插件分别编译：
+要求 Node.js、npm 和 Python 3。分别安装依赖并构建两个插件：
 
 ```bash
 cd SendToFigma
 npm install
 npm run build
-```
 
-```bash
-cd ReceiveFromMasterGo
+cd ../ReceiveFromMasterGo
 npm install
 npm run build
 ```
 
-本地中继服务只使用 Python 标准库，不需要额外依赖。
+接收端构建会从 `ReceiveFromMasterGo/ui-src/` 生成单文件 `ReceiveFromMasterGo/ui.html`，请勿手动修改生成文件。
+
+涉及 `.mg` 解码逻辑时，可运行：
+
+```bash
+node tools/compare_mg_import.js 输入.mg 基准.zip
+node --test tools/tests/*.test.js
+```
+
+提交前至少确认两个插件的 `npm run build` 都能通过。详细开发约定见 [AGENTS.md](AGENTS.md)。
 
 ## 开源协议
 
-本项目采用 [知识共享 署名-非商业性使用-相同方式共享 4.0 国际许可协议 (CC BY-NC-SA 4.0)](LICENSE) 进行许可。
+本项目采用 [知识共享 署名-非商业性使用-相同方式共享 4.0 国际许可协议（CC BY-NC-SA 4.0）](LICENSE)。

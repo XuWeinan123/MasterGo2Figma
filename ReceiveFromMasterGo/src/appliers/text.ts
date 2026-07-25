@@ -162,6 +162,7 @@ export async function restoreMissingFontTextLayers(pages: PageNode[]): Promise<M
     await ensureAvailableFontsLoaded();
 
     for (const page of pages) {
+        await page.loadAsync();
         const textNodes = page.findAll(node => node.type === "TEXT") as TextNode[];
         result.scannedTextNodeCount += textNodes.length;
 

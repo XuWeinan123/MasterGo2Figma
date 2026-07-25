@@ -5,17 +5,17 @@ export function normalizeVectorStrokeCap(value: any): string {
     return normalizeConnectorVectorStrokeCap(value);
 }
 
-export function applyVectorNetwork(node: VectorNode, vectorNetwork: any, data: any) {
+export async function applyVectorNetwork(node: VectorNode, vectorNetwork: any, data: any): Promise<void> {
     const normalized = normalizeVectorNetworkForFigma(createVectorNetworkWithLayoutBoxAnchors(vectorNetwork, data));
     try {
-        node.vectorNetwork = normalized;
+        await node.setVectorNetworkAsync(normalized);
         return;
     } catch (error) {
         console.warn("Unable to set vectorNetwork, retrying without vertex stroke caps/corner radii:", data?.name || data?.id || "Untitled", error);
     }
 
     try {
-        node.vectorNetwork = stripVectorNetworkVertexExtras(normalized);
+        await node.setVectorNetworkAsync(stripVectorNetworkVertexExtras(normalized));
     } catch (fallbackError) {
         console.warn("Unable to set fallback vectorNetwork:", data?.name || data?.id || "Untitled", fallbackError);
     }

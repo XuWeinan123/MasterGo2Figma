@@ -11,7 +11,7 @@ export async function applyProperties(node: any, data: any) {
     await applyUniversalProperties(node, data);
 
     if (node.type === "VECTOR" && data.vectorNetwork) {
-        applyVectorNetwork(node as VectorNode, data.vectorNetwork, data);
+        await applyVectorNetwork(node as VectorNode, data.vectorNetwork, data);
         reapplyVectorStrokeGeometry(node as VectorNode, data);
     }
 
@@ -20,7 +20,7 @@ export async function applyProperties(node: any, data: any) {
     }
 
     if (node.type === "CONNECTOR") {
-        applyConnectorProperties(node as ConnectorNode, data, true);
+        await applyConnectorProperties(node as ConnectorNode, data, true);
     }
 }
 

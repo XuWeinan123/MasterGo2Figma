@@ -216,7 +216,7 @@ export async function createNodeFromData(data: any): Promise<SceneNode | null> {
                 if (!hasUsableVectorNetwork(data.vectorNetwork)) {
                     data.vectorNetwork = createConnectorVectorNetworkFromData(data, null);
                 }
-                if (data.vectorNetwork) applyVectorNetwork(connectorVector, data.vectorNetwork, data);
+                if (data.vectorNetwork) await applyVectorNetwork(connectorVector, data.vectorNetwork, data);
                 state.fallbackConnectorCount++;
                 if (!state.connectorFallbackLogged) {
                     state.connectorFallbackLogged = true;

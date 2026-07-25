@@ -1,10 +1,16 @@
 {
   "name": "MasterGo Importer",
-  "id": "1187658562814194202",
+  "id": "1662512589841230294",
   "api": "1.0.0",
   "main": "code.js",
   "ui": "ui.html",
   "editorType": [
     "figma"
-  ]
+  ],
+  "networkAccess": {
+    "allowedDomains": [
+      "none"
+    ]
+  },
+  "documentAccess": "dynamic-page"
 }

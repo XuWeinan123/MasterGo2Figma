@@ -563,6 +563,7 @@ ${style}`;
       const targets = [];
       yield ensureAvailableFontsLoaded();
       for (const page of pages) {
+        yield page.loadAsync();
         const textNodes = page.findAll((node) => node.type === "TEXT");
         result.scannedTextNodeCount += textNodes.length;
         for (const node of textNodes) {
@@ -765,21 +766,28 @@ ${style}`;
     }
     return null;
   }
-  function resolveConnectorEndpointNodeId(sourceId, allowExistingFallback) {
+  function resolveRestoredConnectorEndpointNodeId(sourceId) {
     if (typeof sourceId !== "string" || !sourceId) return null;
     if (state.restoredNodeIdBySourceId[sourceId]) {
       return state.restoredNodeIdBySourceId[sourceId];
     }
-    if (!allowExistingFallback) return null;
-    try {
-      const existing = figma.getNodeById(sourceId);
-      if (existing && isSceneNode(existing)) return existing.id;
-    } catch (error) {
-    }
     return null;
   }
+  function resolveConnectorEndpointNodeId(sourceId, allowExistingFallback) {
+    return __async(this, null, function* () {
+      const restoredId = resolveRestoredConnectorEndpointNodeId(sourceId);
+      if (restoredId) return restoredId;
+      if (!allowExistingFallback) return null;
+      try {
+        const existing = yield figma.getNodeByIdAsync(sourceId);
+        if (existing && isSceneNode(existing)) return existing.id;
+      } catch (error) {
+      }
+      return null;
+    });
+  }
   function hasUnresolvedConnectorEndpoint(endpoint) {
-    return !!(endpoint && endpoint.endpointNodeId && !resolveConnectorEndpointNodeId(endpoint.endpointNodeId, false));
+    return !!(endpoint && endpoint.endpointNodeId && !resolveRestoredConnectorEndpointNodeId(endpoint.endpointNodeId));
   }
   function normalizeConnectorStrokeCap(value) {
     if (value === "ARROW_EQUILATERAL" || value === "ARROW_LINES" || value === "TRIANGLE_FILLED" || value === "DIAMOND_FILLED" || value === "CIRCLE_FILLED" || value === "NONE") {
@@ -860,44 +868,50 @@ ${style}`;
     return { vertices, segments, regions: [] };
   }
   function normalizeConnectorEndpointForFigma(endpoint, allowExistingFallback) {
-    if (!endpoint || typeof endpoint !== "object") return null;
-    const endpointNodeId = resolveConnectorEndpointNodeId(endpoint.endpointNodeId, allowExistingFallback);
-    const position = normalizeConnectorPosition(endpoint.position);
-    if (endpointNodeId) {
-      const magnet = normalizeConnectorMagnet(endpoint.magnet);
-      if (magnet) return { endpointNodeId, magnet };
-      if (position) return { endpointNodeId, position };
-      return { endpointNodeId, magnet: "AUTO" };
-    }
-    if (position) return { position };
-    return null;
+    return __async(this, null, function* () {
+      if (!endpoint || typeof endpoint !== "object") return null;
+      const endpointNodeId = yield resolveConnectorEndpointNodeId(endpoint.endpointNodeId, allowExistingFallback);
+      const position = normalizeConnectorPosition(endpoint.position);
+      if (endpointNodeId) {
+        const magnet = normalizeConnectorMagnet(endpoint.magnet);
+        if (magnet) return { endpointNodeId, magnet };
+        if (position) return { endpointNodeId, position };
+        return { endpointNodeId, magnet: "AUTO" };
+      }
+      if (position) return { position };
+      return null;
+    });
   }
   function applyConnectorProperties(node, data, deferUnresolved) {
-    var _a, _b;
-    safeSet(node, "connectorLineType", data.connectorLineType || "ELBOWED");
-    safeSet(node, "cornerRadius", (_b = data.connectorCornerRadius) != null ? _b : (_a = data.corner) == null ? void 0 : _a.cornerRadius);
-    if (data.connectorStartStrokeCap) {
-      safeSet(node, "connectorStartStrokeCap", normalizeConnectorStrokeCap(data.connectorStartStrokeCap));
-    }
-    if (data.connectorEndStrokeCap) {
-      safeSet(node, "connectorEndStrokeCap", normalizeConnectorStrokeCap(data.connectorEndStrokeCap));
-    }
-    const start = normalizeConnectorEndpointForFigma(data.connectorStart, !deferUnresolved);
-    const end = normalizeConnectorEndpointForFigma(data.connectorEnd, !deferUnresolved);
-    if (start) safeSet(node, "connectorStart", start);
-    if (end) safeSet(node, "connectorEnd", end);
-    if (deferUnresolved && (hasUnresolvedConnectorEndpoint(data.connectorStart) || hasUnresolvedConnectorEndpoint(data.connectorEnd))) {
-      state.deferredConnectorRestores.push({ node, data });
-    }
+    return __async(this, null, function* () {
+      var _a, _b;
+      safeSet(node, "connectorLineType", data.connectorLineType || "ELBOWED");
+      safeSet(node, "cornerRadius", (_b = data.connectorCornerRadius) != null ? _b : (_a = data.corner) == null ? void 0 : _a.cornerRadius);
+      if (data.connectorStartStrokeCap) {
+        safeSet(node, "connectorStartStrokeCap", normalizeConnectorStrokeCap(data.connectorStartStrokeCap));
+      }
+      if (data.connectorEndStrokeCap) {
+        safeSet(node, "connectorEndStrokeCap", normalizeConnectorStrokeCap(data.connectorEndStrokeCap));
+      }
+      const start = yield normalizeConnectorEndpointForFigma(data.connectorStart, !deferUnresolved);
+      const end = yield normalizeConnectorEndpointForFigma(data.connectorEnd, !deferUnresolved);
+      if (start) safeSet(node, "connectorStart", start);
+      if (end) safeSet(node, "connectorEnd", end);
+      if (deferUnresolved && (hasUnresolvedConnectorEndpoint(data.connectorStart) || hasUnresolvedConnectorEndpoint(data.connectorEnd))) {
+        state.deferredConnectorRestores.push({ node, data });
+      }
+    });
   }
   function applyDeferredConnectorRestores() {
-    if (state.deferredConnectorRestores.length === 0) return;
-    const deferred = state.deferredConnectorRestores;
-    state.deferredConnectorRestores = [];
-    for (const item of deferred) {
-      if (!item.node || item.node.removed) continue;
-      applyConnectorProperties(item.node, item.data, false);
-    }
+    return __async(this, null, function* () {
+      if (state.deferredConnectorRestores.length === 0) return;
+      const deferred = state.deferredConnectorRestores;
+      state.deferredConnectorRestores = [];
+      for (const item of deferred) {
+        if (!item.node || item.node.removed) continue;
+        yield applyConnectorProperties(item.node, item.data, false);
+      }
+    });
   }
 
   // src/deferredLayout.ts
@@ -1205,18 +1219,20 @@ ${style}`;
     return normalizeConnectorVectorStrokeCap(value);
   }
   function applyVectorNetwork(node, vectorNetwork, data) {
-    const normalized = normalizeVectorNetworkForFigma(createVectorNetworkWithLayoutBoxAnchors(vectorNetwork, data));
-    try {
-      node.vectorNetwork = normalized;
-      return;
-    } catch (error) {
-      console.warn("Unable to set vectorNetwork, retrying without vertex stroke caps/corner radii:", (data == null ? void 0 : data.name) || (data == null ? void 0 : data.id) || "Untitled", error);
-    }
-    try {
-      node.vectorNetwork = stripVectorNetworkVertexExtras(normalized);
-    } catch (fallbackError) {
-      console.warn("Unable to set fallback vectorNetwork:", (data == null ? void 0 : data.name) || (data == null ? void 0 : data.id) || "Untitled", fallbackError);
-    }
+    return __async(this, null, function* () {
+      const normalized = normalizeVectorNetworkForFigma(createVectorNetworkWithLayoutBoxAnchors(vectorNetwork, data));
+      try {
+        yield node.setVectorNetworkAsync(normalized);
+        return;
+      } catch (error) {
+        console.warn("Unable to set vectorNetwork, retrying without vertex stroke caps/corner radii:", (data == null ? void 0 : data.name) || (data == null ? void 0 : data.id) || "Untitled", error);
+      }
+      try {
+        yield node.setVectorNetworkAsync(stripVectorNetworkVertexExtras(normalized));
+      } catch (fallbackError) {
+        console.warn("Unable to set fallback vectorNetwork:", (data == null ? void 0 : data.name) || (data == null ? void 0 : data.id) || "Untitled", fallbackError);
+      }
+    });
   }
   function createVectorNetworkWithLayoutBoxAnchors(vectorNetwork, data) {
     var _a, _b;
@@ -1458,7 +1474,7 @@ ${style}`;
             if (!hasUsableVectorNetwork(data.vectorNetwork)) {
               data.vectorNetwork = createConnectorVectorNetworkFromData(data, null);
             }
-            if (data.vectorNetwork) applyVectorNetwork(connectorVector, data.vectorNetwork, data);
+            if (data.vectorNetwork) yield applyVectorNetwork(connectorVector, data.vectorNetwork, data);
             state.fallbackConnectorCount++;
             if (!state.connectorFallbackLogged) {
               state.connectorFallbackLogged = true;
@@ -1980,14 +1996,14 @@ ${style}`;
       if (!node || !data) return;
       yield applyUniversalProperties(node, data);
       if (node.type === "VECTOR" && data.vectorNetwork) {
-        applyVectorNetwork(node, data.vectorNetwork, data);
+        yield applyVectorNetwork(node, data.vectorNetwork, data);
         reapplyVectorStrokeGeometry(node, data);
       }
       if (node.type === "TEXT" && data.characters !== void 0) {
         yield applyTextProperties(node, data);
       }
       if (node.type === "CONNECTOR") {
-        applyConnectorProperties(node, data, true);
+        yield applyConnectorProperties(node, data, true);
       }
     });
   }
@@ -2535,7 +2551,7 @@ ${style}`;
       } catch (error) {
         console.error("Import request failed:", error);
         if (typeof message.type === "string" && message.type.indexOf("import-") === 0) {
-          rollbackImportSession(activeImportSession);
+          yield rollbackImportSession(activeImportSession);
           state.importInProgress = false;
           activeImportSession = null;
           clearPendingImportAssets();
@@ -2844,7 +2860,7 @@ ${style}`;
         }
       }
       session.restoredPages.push(restoredPage);
-      figma.currentPage = restoredPage;
+      yield figma.setCurrentPageAsync(restoredPage);
       addImportTiming(session, "restore.createPageMs", Date.now() - pageCreateStartedAt);
       const nodeRestoreStartedAt = Date.now();
       let restoredOnPage = 0;
@@ -2969,7 +2985,7 @@ ${style}`;
         }
         postFinalizeProgress(session, 0, 4);
         const connectorStartedAt = Date.now();
-        applyDeferredConnectorRestores();
+        yield applyDeferredConnectorRestores();
         addImportTiming(session, "finalize.connectorsMs", Date.now() - connectorStartedAt);
         postFinalizeProgress(session, 1, 4);
         const missingFontStartedAt = Date.now();
@@ -2978,7 +2994,7 @@ ${style}`;
         postFinalizeProgress(session, 2, 4);
         const viewportStartedAt = Date.now();
         if (session.restoredPages.length > 0) {
-          figma.currentPage = session.restoredPages[0];
+          yield figma.setCurrentPageAsync(session.restoredPages[0]);
           figma.viewport.scrollAndZoomIntoView(session.restoredPages[0].children);
         }
         addImportTiming(session, "finalize.viewportMs", Date.now() - viewportStartedAt);
@@ -2998,7 +3014,7 @@ ${style}`;
         logImportPerformanceSummary(session, missingFontRestoreResult);
         figma.notify("Restore complete!");
       } catch (error) {
-        rollbackImportSession(session);
+        yield rollbackImportSession(session);
         console.error("Import failed:", error);
         figma.ui.postMessage({
           type: "error",
@@ -3086,18 +3102,22 @@ ${style}`;
     for (const pageIndex in pendingImportPages) delete pendingImportPages[pageIndex];
   }
   function rollbackImportSession(session) {
-    if (!session) return;
-    for (const page of session.restoredPages) {
-      try {
-        if (!page.removed) page.remove();
-      } catch (error) {
-        console.warn("Unable to roll back imported page:", page.name, error);
+    return __async(this, null, function* () {
+      if (!session) return;
+      for (const page of session.restoredPages) {
+        try {
+          if (!page.removed) page.remove();
+        } catch (error) {
+          console.warn("Unable to roll back imported page:", page.name, error);
+        }
       }
-    }
-    try {
-      if (session.previousCurrentPage && !session.previousCurrentPage.removed) figma.currentPage = session.previousCurrentPage;
-    } catch (_) {
-    }
+      try {
+        if (session.previousCurrentPage && !session.previousCurrentPage.removed) {
+          yield figma.setCurrentPageAsync(session.previousCurrentPage);
+        }
+      } catch (_) {
+      }
+    });
   }
   function recordStreamedMissingImage(assetName) {
     if (state.missingImageAssetNames[assetName]) return;

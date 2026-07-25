@@ -220,7 +220,7 @@ async function handleImportRequest(message: any, action: () => Promise<void> | v
   } catch (error) {
     console.error("Import request failed:", error);
     if (typeof message.type === "string" && message.type.indexOf("import-") === 0) {
-      rollbackImportSession(activeImportSession);
+      await rollbackImportSession(activeImportSession);
       state.importInProgress = false;
       activeImportSession = null;
       clearPendingImportAssets();
@@ -542,7 +542,7 @@ async function restoreImportPageData(importPage: ImportPageIndex, layers: { [id:
     }
   }
   session.restoredPages.push(restoredPage);
-  figma.currentPage = restoredPage;
+  await figma.setCurrentPageAsync(restoredPage);
   addImportTiming(session, "restore.createPageMs", Date.now() - pageCreateStartedAt);
 
   const nodeRestoreStartedAt = Date.now();
@@ -696,7 +696,7 @@ async function completeImportSession(message: any) {
     }
     postFinalizeProgress(session, 0, 4);
     const connectorStartedAt = Date.now();
-    applyDeferredConnectorRestores();
+    await applyDeferredConnectorRestores();
     addImportTiming(session, "finalize.connectorsMs", Date.now() - connectorStartedAt);
     postFinalizeProgress(session, 1, 4);
     const missingFontStartedAt = Date.now();
@@ -706,7 +706,7 @@ async function completeImportSession(message: any) {
 
     const viewportStartedAt = Date.now();
     if (session.restoredPages.length > 0) {
-      figma.currentPage = session.restoredPages[0];
+      await figma.setCurrentPageAsync(session.restoredPages[0]);
       figma.viewport.scrollAndZoomIntoView(session.restoredPages[0].children as SceneNode[]);
     }
     addImportTiming(session, "finalize.viewportMs", Date.now() - viewportStartedAt);
@@ -728,7 +728,7 @@ async function completeImportSession(message: any) {
     logImportPerformanceSummary(session, missingFontRestoreResult);
     figma.notify("Restore complete!");
   } catch (error) {
-    rollbackImportSession(session);
+    await rollbackImportSession(session);
     console.error("Import failed:", error);
     figma.ui.postMessage({
       type: "error",
@@ -823,7 +823,7 @@ function clearPendingImportPages() {
   for (const pageIndex in pendingImportPages) delete pendingImportPages[pageIndex];
 }
 
-function rollbackImportSession(session: ImportSession | null) {
+async function rollbackImportSession(session: ImportSession | null): Promise<void> {
   if (!session) return;
   for (const page of session.restoredPages) {
     try {
@@ -833,7 +833,9 @@ function rollbackImportSession(session: ImportSession | null) {
     }
   }
   try {
-    if (session.previousCurrentPage && !session.previousCurrentPage.removed) figma.currentPage = session.previousCurrentPage;
+    if (session.previousCurrentPage && !session.previousCurrentPage.removed) {
+      await figma.setCurrentPageAsync(session.previousCurrentPage);
+    }
   } catch (_) {
     // Viewport restoration is best effort in the desktop plugin runtime.
   }

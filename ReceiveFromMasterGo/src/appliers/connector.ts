@@ -12,15 +12,21 @@ export function normalizeConnectorMagnet(value: any) {
     return null;
 }
 
-export function resolveConnectorEndpointNodeId(sourceId: any, allowExistingFallback: boolean): string | null {
+function resolveRestoredConnectorEndpointNodeId(sourceId: any): string | null {
     if (typeof sourceId !== "string" || !sourceId) return null;
     if (state.restoredNodeIdBySourceId[sourceId]) {
         return state.restoredNodeIdBySourceId[sourceId];
     }
+    return null;
+}
+
+export async function resolveConnectorEndpointNodeId(sourceId: any, allowExistingFallback: boolean): Promise<string | null> {
+    const restoredId = resolveRestoredConnectorEndpointNodeId(sourceId);
+    if (restoredId) return restoredId;
     if (!allowExistingFallback) return null;
 
     try {
-        const existing = figma.getNodeById(sourceId);
+        const existing = await figma.getNodeByIdAsync(sourceId);
         if (existing && isSceneNode(existing)) return existing.id;
     } catch (error) {}
 
@@ -28,7 +34,7 @@ export function resolveConnectorEndpointNodeId(sourceId: any, allowExistingFallb
 }
 
 export function hasUnresolvedConnectorEndpoint(endpoint: any): boolean {
-    return !!(endpoint && endpoint.endpointNodeId && !resolveConnectorEndpointNodeId(endpoint.endpointNodeId, false));
+    return !!(endpoint && endpoint.endpointNodeId && !resolveRestoredConnectorEndpointNodeId(endpoint.endpointNodeId));
 }
 
 export function normalizeConnectorStrokeCap(value: any) {
@@ -126,10 +132,10 @@ export function createConnectorVectorNetworkFromData(data: any, parent: PageNode
     return { vertices, segments, regions: [] };
 }
 
-export function normalizeConnectorEndpointForFigma(endpoint: any, allowExistingFallback: boolean) {
+export async function normalizeConnectorEndpointForFigma(endpoint: any, allowExistingFallback: boolean) {
     if (!endpoint || typeof endpoint !== "object") return null;
 
-    const endpointNodeId = resolveConnectorEndpointNodeId(endpoint.endpointNodeId, allowExistingFallback);
+    const endpointNodeId = await resolveConnectorEndpointNodeId(endpoint.endpointNodeId, allowExistingFallback);
     const position = normalizeConnectorPosition(endpoint.position);
     if (endpointNodeId) {
         const magnet = normalizeConnectorMagnet(endpoint.magnet);
@@ -142,7 +148,7 @@ export function normalizeConnectorEndpointForFigma(endpoint: any, allowExistingF
     return null;
 }
 
-export function applyConnectorProperties(node: ConnectorNode, data: any, deferUnresolved: boolean) {
+export async function applyConnectorProperties(node: ConnectorNode, data: any, deferUnresolved: boolean): Promise<void> {
     safeSet(node, "connectorLineType", data.connectorLineType || "ELBOWED");
     safeSet(node, "cornerRadius", data.connectorCornerRadius ?? data.corner?.cornerRadius);
 
@@ -153,8 +159,8 @@ export function applyConnectorProperties(node: ConnectorNode, data: any, deferUn
         safeSet(node, "connectorEndStrokeCap", normalizeConnectorStrokeCap(data.connectorEndStrokeCap));
     }
 
-    const start = normalizeConnectorEndpointForFigma(data.connectorStart, !deferUnresolved);
-    const end = normalizeConnectorEndpointForFigma(data.connectorEnd, !deferUnresolved);
+    const start = await normalizeConnectorEndpointForFigma(data.connectorStart, !deferUnresolved);
+    const end = await normalizeConnectorEndpointForFigma(data.connectorEnd, !deferUnresolved);
     if (start) safeSet(node, "connectorStart", start);
     if (end) safeSet(node, "connectorEnd", end);
 
@@ -163,13 +169,13 @@ export function applyConnectorProperties(node: ConnectorNode, data: any, deferUn
     }
 }
 
-export function applyDeferredConnectorRestores() {
+export async function applyDeferredConnectorRestores(): Promise<void> {
     if (state.deferredConnectorRestores.length === 0) return;
 
     const deferred = state.deferredConnectorRestores;
     state.deferredConnectorRestores = [];
     for (const item of deferred) {
         if (!item.node || (item.node as any).removed) continue;
-        applyConnectorProperties(item.node, item.data, false);
+        await applyConnectorProperties(item.node, item.data, false);
     }
 }
