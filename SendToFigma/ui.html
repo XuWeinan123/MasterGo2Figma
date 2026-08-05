@@ -378,6 +378,130 @@
       display: none !important;
     }
 
+    .fullscreen-panel {
+      position: fixed;
+      inset: 0;
+      z-index: 100;
+      display: flex;
+      flex-direction: column;
+      padding: 20px;
+      overflow-y: auto;
+      background: rgba(248, 250, 252, 0.82);
+      -webkit-backdrop-filter: blur(16px);
+      backdrop-filter: blur(16px);
+      color: var(--foreground);
+    }
+
+    .fullscreen-heading {
+      display: flex;
+      height: 28px;
+      flex: 0 0 28px;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .fullscreen-heading-title {
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    .email-body {
+      display: flex;
+      min-height: 0;
+      flex: 1;
+      flex-direction: column;
+      justify-content: center;
+    }
+
+    .email-mark {
+      display: flex;
+      width: 48px;
+      height: 48px;
+      align-items: center;
+      justify-content: center;
+      border-radius: 999px;
+      background: var(--secondary);
+      color: var(--secondary-foreground);
+      font-size: 20px;
+      font-weight: 600;
+    }
+
+    #startupNotice {
+      align-items: center;
+      justify-content: center;
+    }
+
+    .notice-content {
+      width: 100%;
+      max-width: 360px;
+      text-align: center;
+    }
+
+    .notice-copy {
+      display: grid;
+      gap: 12px;
+      color: var(--muted-foreground);
+      font-size: 13px;
+      line-height: 1.7;
+      text-align: left;
+    }
+
+    .notice-copy a,
+    .email-address {
+      color: var(--foreground);
+      text-decoration: underline;
+      text-underline-offset: 3px;
+    }
+
+    .notice-checkbox {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      width: fit-content;
+      color: var(--muted-foreground);
+      font-size: 12px;
+      cursor: pointer;
+    }
+
+    #startupNotice .notice-checkbox {
+      margin: 16px auto 0;
+    }
+
+    .notice-actions {
+      display: grid;
+      margin-top: 24px;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .notice-actions .button {
+      width: 100%;
+    }
+
+    .email-body {
+      align-items: center;
+      gap: 12px;
+      padding: 0 16px;
+      text-align: center;
+    }
+
+    .email-title {
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    .email-address {
+      overflow-wrap: anywhere;
+      color: var(--muted-foreground);
+      font-size: 13px;
+    }
+
+    .email-body .button {
+      width: 100%;
+      max-width: 180px;
+      margin-top: 4px;
+    }
+
     .button {
       height: 38px;
       border: 1px solid var(--border);
@@ -1419,6 +1543,14 @@
           </div>
         </div>
 
+        <div class="settings-card">
+          <div class="settings-row">
+            <div class="settings-label">恢复默认设置</div>
+            <button class="button button-secondary" id="resetSettings" type="button">恢复</button>
+          </div>
+          <div class="settings-note">将本地中继、服务地址和启动提示恢复为默认状态。</div>
+        </div>
+
       </section>
     </main>
 
@@ -1426,10 +1558,42 @@
       <div class="footer-actions">
         <button class="footer-button" id="openSettings" type="button">实验室</button>
         <span aria-hidden="true">·</span>
-        <a class="footer-link" href="https://github.com/XuWeinan123/MasterGo2Figma/issues" target="_blank" rel="noreferrer">Github</a>
+        <button class="footer-button" id="openEmail" type="button">邮箱</button>
+        <span aria-hidden="true">·</span>
+        <a class="footer-link" href="https://github.com/XuWeinan123/MasterGo2Figma" target="_blank" rel="noreferrer">Github</a>
       </div>
       <span>v1.0</span>
     </footer>
+  </div>
+
+  <div class="fullscreen-panel hidden" id="startupNotice" role="dialog" aria-modal="true" aria-label="项目说明">
+    <div class="notice-content">
+      <div class="notice-copy">
+        <p>这个插件是一个个人项目，我目前只能保证自己的设计稿能够 100% 还原。</p>
+        <p>若你的设计稿还原有差异，欢迎将 .mg 文件或地址发送至 woshixwn@gmail.com，或在 Github 提交 issue / PR。</p>
+      </div>
+      <div class="notice-actions">
+        <a class="button button-secondary" href="https://github.com/XuWeinan123/MasterGo2Figma" target="_blank" rel="noreferrer">查看 Github</a>
+        <button class="button button-primary" id="dismissStartupNotice" type="button">知道了</button>
+      </div>
+      <label class="notice-checkbox">
+        <input id="noticeDontShowAgain" type="checkbox">
+        <span>不再提示</span>
+      </label>
+    </div>
+  </div>
+
+  <div class="fullscreen-panel hidden" id="emailPanel" role="dialog" aria-modal="true" aria-labelledby="emailPanelTitle">
+    <div class="fullscreen-heading">
+      <button class="icon-button" id="closeEmail" type="button" title="返回" aria-label="返回">‹</button>
+      <span class="fullscreen-heading-title" id="emailPanelTitle">联系邮箱</span>
+    </div>
+    <div class="email-body">
+      <div class="email-mark" aria-hidden="true">@</div>
+      <div class="email-title">欢迎反馈还原问题</div>
+      <span class="email-address">woshixwn@gmail.com</span>
+      <button class="button button-primary" id="copyEmail" type="button">复制邮箱</button>
+    </div>
   </div>
 
   <script>
@@ -1445,7 +1609,15 @@
     const modeBadge = document.getElementById("modeBadge");
     const appFooter = document.getElementById("appFooter");
     const openSettings = document.getElementById("openSettings");
+    const openEmail = document.getElementById("openEmail");
     const settingsBack = document.getElementById("settingsBack");
+    const resetSettingsButton = document.getElementById("resetSettings");
+    const startupNotice = document.getElementById("startupNotice");
+    const noticeDontShowAgain = document.getElementById("noticeDontShowAgain");
+    const dismissStartupNoticeButton = document.getElementById("dismissStartupNotice");
+    const emailPanel = document.getElementById("emailPanel");
+    const closeEmail = document.getElementById("closeEmail");
+    const copyEmail = document.getElementById("copyEmail");
     const finish = document.getElementById("finish");
     const exportAgain = document.getElementById("exportAgain");
     const retry = document.getElementById("retry");
@@ -1464,6 +1636,14 @@
     const TRANSFER_MODE_LOCAL_JSON_STREAM = "local-json-stream";
     const EXPORT_TARGET_LOCAL_RELAY = "local-relay";
     const DEFAULT_RELAY_URL = "http://127.0.0.1:8765";
+    const HELP_URL = "https://github.com/XuWeinan123/MasterGo2Figma";
+    const CONTACT_EMAIL = "woshixwn@gmail.com";
+    const SETTINGS_STORAGE_KEY = "mastergo2figma.send.settings";
+    const DEFAULT_SETTINGS = {
+      relayEnabled: false,
+      relayUrl: DEFAULT_RELAY_URL,
+      suppressStartupNotice: false
+    };
     let isBusy = false;
     let hasRules = true;
     let pages = [];
@@ -1474,6 +1654,97 @@
     let operationStartMs = 0;
     let pendingExportQueue = null;
     let currentView = "ready";
+    let appSettings = loadSettings();
+
+    function loadSettings() {
+      try {
+        const raw = window.localStorage.getItem(SETTINGS_STORAGE_KEY);
+        if (!raw) return { ...DEFAULT_SETTINGS };
+        const saved = JSON.parse(raw) || {};
+        return {
+          relayEnabled: saved.relayEnabled === true,
+          relayUrl: normalizeRelayUrl(saved.relayUrl),
+          suppressStartupNotice: saved.suppressStartupNotice === true
+        };
+      } catch (_) {
+        return { ...DEFAULT_SETTINGS };
+      }
+    }
+
+    function saveSettings(settings) {
+      try {
+        window.localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+      } catch (_) {
+        // Storage can be unavailable in restricted plugin runtimes.
+      }
+    }
+
+    function initializeSettings() {
+      const relayEnabled = transferModeInputs.find(input => input.value === TRANSFER_MODE_LOCAL_JSON_STREAM);
+      if (relayEnabled) relayEnabled.checked = appSettings.relayEnabled;
+      relayUrlInput.value = normalizeRelayUrl(appSettings.relayUrl);
+    }
+
+    function persistCurrentSettings() {
+      const relayEnabled = transferModeInputs.find(input => input.value === TRANSFER_MODE_LOCAL_JSON_STREAM);
+      appSettings = {
+        ...appSettings,
+        relayEnabled: Boolean(relayEnabled && relayEnabled.checked),
+        relayUrl: normalizeRelayUrl(relayUrlInput.value)
+      };
+      saveSettings(appSettings);
+    }
+
+    function showStartupNotice() {
+      noticeDontShowAgain.checked = false;
+      startupNotice.classList.remove("hidden");
+    }
+
+    function dismissStartupNotice() {
+      appSettings = {
+        ...appSettings,
+        suppressStartupNotice: noticeDontShowAgain.checked
+      };
+      saveSettings(appSettings);
+      startupNotice.classList.add("hidden");
+    }
+
+    function showEmailPanel() {
+      emailPanel.classList.remove("hidden");
+    }
+
+    function hideEmailPanel() {
+      emailPanel.classList.add("hidden");
+    }
+
+    async function copyContactEmail() {
+      try {
+        await navigator.clipboard.writeText(CONTACT_EMAIL);
+      } catch (_) {
+        const textarea = document.createElement("textarea");
+        textarea.value = CONTACT_EMAIL;
+        textarea.style.position = "fixed";
+        textarea.style.opacity = "0";
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand("copy");
+        textarea.remove();
+      }
+      copyEmail.textContent = "已复制";
+      window.setTimeout(() => {
+        copyEmail.textContent = "复制邮箱";
+      }, 1600);
+    }
+
+    function resetAppSettings() {
+      appSettings = { ...DEFAULT_SETTINGS };
+      saveSettings(appSettings);
+      initializeSettings();
+      updateTransferMode();
+      relayDiagnostic.textContent = "设置已恢复默认。";
+      relayDiagnostic.classList.remove("error");
+      showStartupNotice();
+    }
 
     function send(pluginMessage) {
       if (window.parent === window) return;
@@ -1560,6 +1831,7 @@
     function updateTransferMode() {
       currentTransferMode = getTransferMode();
       const isStream = currentTransferMode === TRANSFER_MODE_LOCAL_JSON_STREAM;
+      persistCurrentSettings();
       relayConfig.classList.toggle("hidden", !isStream);
       modeBadge.textContent = isStream ? "本地中继" : "ZIP";
       send({
@@ -1688,11 +1960,21 @@
       input.onchange = updateTransferMode;
     });
 
+    relayUrlInput.onchange = () => {
+      relayUrlInput.value = normalizeRelayUrl(relayUrlInput.value);
+      persistCurrentSettings();
+    };
+
     openSettings.onclick = () => {
       if (!isBusy) showView("settings");
     };
 
+    openEmail.onclick = showEmailPanel;
     settingsBack.onclick = () => showView("ready");
+    resetSettingsButton.onclick = resetAppSettings;
+    dismissStartupNoticeButton.onclick = dismissStartupNotice;
+    closeEmail.onclick = hideEmailPanel;
+    copyEmail.onclick = copyContactEmail;
     finish.onclick = () => send({ type: "close" });
     exportAgain.onclick = returnToReady;
     retry.onclick = returnToReady;
@@ -2374,8 +2656,10 @@
         applyPreviewState(previewState);
       } else {
         send({ type: "ui-ready" });
+        if (!appSettings.suppressStartupNotice) showStartupNotice();
       }
     });
+    initializeSettings();
     updateTransferMode();
 
     function escapeHtml(value) {

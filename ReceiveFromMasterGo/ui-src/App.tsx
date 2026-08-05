@@ -53,12 +53,51 @@ interface ErrorState {
   pagesTotal: number
 }
 
-const HELP_URL = "https://github.com/XuWeinan123/MasterGo2Figma/issues"
+interface AppSettings {
+  zipEnabled: boolean
+  suppressStartupNotice: boolean
+}
+
+type Overlay = "notice" | "email" | null
+
+const HELP_URL = "https://github.com/XuWeinan123/MasterGo2Figma"
+const CONTACT_EMAIL = "woshixwn@gmail.com"
+const SETTINGS_STORAGE_KEY = "mastergo2figma.receive.settings"
+const DEFAULT_SETTINGS: AppSettings = {
+  zipEnabled: false,
+  suppressStartupNotice: false,
+}
+
+function loadSettings(): AppSettings {
+  try {
+    const raw = window.localStorage.getItem(SETTINGS_STORAGE_KEY)
+    if (!raw) return { ...DEFAULT_SETTINGS }
+    const saved = JSON.parse(raw) as Partial<AppSettings>
+    return {
+      zipEnabled: saved.zipEnabled === true,
+      suppressStartupNotice: saved.suppressStartupNotice === true,
+    }
+  } catch {
+    return { ...DEFAULT_SETTINGS }
+  }
+}
+
+function saveSettings(settings: AppSettings) {
+  try {
+    window.localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings))
+  } catch {
+    // Storage can be unavailable in restricted plugin runtimes; keep the in-memory setting.
+  }
+}
 
 export function App() {
   const [view, setView] = React.useState<View>("idle")
   const [prevView, setPrevView] = React.useState<View>("idle")
-  const [zipEnabled, setZipEnabled] = React.useState(false)
+  const [settings, setSettings] = React.useState<AppSettings>(() => loadSettings())
+  const [overlay, setOverlay] = React.useState<Overlay>(() =>
+    settings.suppressStartupNotice ? null : "notice"
+  )
+  const [noticeDontShowAgain, setNoticeDontShowAgain] = React.useState(false)
   const [parsing, setParsing] = React.useState(false)
   const [dropHint, setDropHint] = React.useState<string | null>(null)
   const [dragOver, setDragOver] = React.useState(false)
@@ -81,6 +120,7 @@ export function App() {
   viewRef.current = view
   const pagesDoneRef = React.useRef(0)
   const pagesTotalRef = React.useRef(0)
+  const zipEnabled = settings.zipEnabled
 
   React.useEffect(() => {
     engine.initEngine({
@@ -192,6 +232,28 @@ export function App() {
     setView("lab")
   }
 
+  function updateSettings(patch: Partial<AppSettings>) {
+    setSettings((previous) => {
+      const next = { ...previous, ...patch }
+      saveSettings(next)
+      return next
+    })
+  }
+
+  function dismissStartupNotice() {
+    updateSettings({ suppressStartupNotice: noticeDontShowAgain })
+    setOverlay(null)
+  }
+
+  function resetSettings() {
+    const defaults = { ...DEFAULT_SETTINGS }
+    saveSettings(defaults)
+    setSettings(defaults)
+    setNoticeDontShowAgain(false)
+    setDropHint(null)
+    setOverlay("notice")
+  }
+
   const accept = zipEnabled ? ".mg,.zip,application/zip" : ".mg"
 
   return (
@@ -260,7 +322,7 @@ export function App() {
           <LabView
             zipEnabled={zipEnabled}
             onZipEnabledChange={(v) => {
-              setZipEnabled(v)
+              updateSettings({ zipEnabled: v })
               setDropHint(null)
             }}
             fontBusy={fontBusy}
@@ -270,6 +332,7 @@ export function App() {
               setFontMsg(null)
               engine.refreshFonts()
             }}
+            onResetSettings={resetSettings}
             onBack={() => setView(prevView)}
           />
         )}
@@ -286,6 +349,10 @@ export function App() {
               实验室
             </button>
             <span aria-hidden>·</span>
+            <button className="hover:text-foreground" onClick={() => setOverlay("email")}>
+              邮箱
+            </button>
+            <span aria-hidden>·</span>
             <a className="hover:text-foreground" href={HELP_URL} target="_blank" rel="noreferrer">
               Github（禁止未署名二次分发）
             </a>
@@ -293,6 +360,15 @@ export function App() {
           <span>v1.0</span>
         </footer>
       )}
+
+      {overlay === "notice" && (
+        <StartupNotice
+          dontShowAgain={noticeDontShowAgain}
+          onDontShowAgainChange={setNoticeDontShowAgain}
+          onDismiss={dismissStartupNotice}
+        />
+      )}
+      {overlay === "email" && <EmailView onBack={() => setOverlay(null)} />}
     </div>
   )
 }
@@ -549,9 +625,18 @@ function LabView(props: {
   fontBusy: boolean
   fontMsg: string | null
   onRefreshFonts: () => void
+  onResetSettings: () => void
   onBack: () => void
 }) {
-  const { zipEnabled, onZipEnabledChange, fontBusy, fontMsg, onRefreshFonts, onBack } = props
+  const {
+    zipEnabled,
+    onZipEnabledChange,
+    fontBusy,
+    fontMsg,
+    onRefreshFonts,
+    onResetSettings,
+    onBack,
+  } = props
   return (
     <div className="flex flex-1 flex-col gap-4">
       <div className="flex items-center gap-1">
@@ -587,6 +672,107 @@ function LabView(props: {
           重新读取本机字体，仅在新安装字体未被识别时使用。
         </div>
         {fontMsg && <div className="mt-1.5 text-xs text-foreground">字体列表已刷新 · {fontMsg}</div>}
+      </div>
+
+      <div className="rounded-lg border p-3">
+        <div className="flex items-center justify-between gap-3">
+          <div className="text-sm font-medium">恢复默认设置</div>
+          <Button variant="outline" size="sm" onClick={onResetSettings}>
+            恢复
+          </Button>
+        </div>
+        <div className="mt-1.5 text-xs text-muted-foreground">
+          将实验功能和启动提示恢复为默认状态。
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function StartupNotice(props: {
+  dontShowAgain: boolean
+  onDontShowAgainChange: (checked: boolean) => void
+  onDismiss: () => void
+}) {
+  const { dontShowAgain, onDontShowAgainChange, onDismiss } = props
+  return (
+    <div
+      className="fixed inset-0 z-50 flex h-full items-center justify-center bg-background/80 p-5 backdrop-blur-md"
+      role="dialog"
+      aria-modal="true"
+      aria-label="项目说明"
+    >
+      <div className="flex w-full max-w-sm flex-col items-center text-center">
+        <div className="w-full space-y-3 text-left text-sm leading-6 text-muted-foreground">
+          <p>
+            这个插件是一个个人项目，我目前只能保证自己的设计稿能够 100% 还原。
+          </p>
+          <p>
+            若你的设计稿还原有差异，欢迎将 .mg 文件或地址发送至{" "}
+            <span className="text-foreground">{CONTACT_EMAIL}</span>
+            ，或在 Github 提交 issue / PR。
+          </p>
+        </div>
+        <div className="mt-6 grid w-full grid-cols-2 gap-2">
+          <Button variant="outline" asChild>
+            <a href={HELP_URL} target="_blank" rel="noreferrer">
+              查看 Github
+            </a>
+          </Button>
+          <Button onClick={onDismiss}>知道了</Button>
+        </div>
+        <label className="mt-4 flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
+          <Checkbox checked={dontShowAgain} onCheckedChange={(checked) => onDontShowAgainChange(checked === true)} />
+          <span>不再提示</span>
+        </label>
+      </div>
+    </div>
+  )
+}
+
+function EmailView({ onBack }: { onBack: () => void }) {
+  const [copied, setCopied] = React.useState(false)
+
+  async function copyEmail() {
+    try {
+      await navigator.clipboard.writeText(CONTACT_EMAIL)
+    } catch {
+      const textarea = document.createElement("textarea")
+      textarea.value = CONTACT_EMAIL
+      textarea.style.position = "fixed"
+      textarea.style.opacity = "0"
+      document.body.appendChild(textarea)
+      textarea.select()
+      document.execCommand("copy")
+      textarea.remove()
+    }
+    setCopied(true)
+    window.setTimeout(() => setCopied(false), 1600)
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex h-full flex-col bg-background/80 p-5 backdrop-blur-md"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="email-view-title"
+    >
+      <div className="flex items-center gap-1">
+        <Button variant="ghost" size="icon" className="h-7 w-7" onClick={onBack} title="返回">
+          <ChevronLeft />
+        </Button>
+        <span id="email-view-title" className="text-sm font-semibold">
+          联系邮箱
+        </span>
+      </div>
+
+      <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-4 text-center">
+        <div className="flex h-12 w-12 items-center justify-center rounded-full bg-secondary text-xl font-semibold text-secondary-foreground">
+          @
+        </div>
+        <div className="text-sm font-medium">欢迎反馈还原问题</div>
+        <span className="select-text break-all text-sm text-muted-foreground">{CONTACT_EMAIL}</span>
+        <Button className="mt-1" onClick={copyEmail}>{copied ? "已复制" : "复制邮箱"}</Button>
       </div>
     </div>
   )
