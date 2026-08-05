@@ -287,7 +287,7 @@ export function App() {
             </button>
             <span aria-hidden>·</span>
             <a className="hover:text-foreground" href={HELP_URL} target="_blank" rel="noreferrer">
-              Github
+              Github（禁止未署名二次分发）
             </a>
           </div>
           <span>v1.0</span>
@@ -365,7 +365,7 @@ function FileRow({ fileInfo, onRemove }: { fileInfo: FileInfo; onRemove?: () => 
   const fileLabel =
     fileInfo.fileNames.length === 1 ? fileInfo.fileNames[0] : `${fileInfo.fileNames.length} 个文件`
   return (
-    <div className="flex h-11 shrink-0 items-center gap-2 rounded-lg border px-3">
+    <div className="flex h-11 shrink-0 items-center gap-2 rounded-lg border pl-3 pr-2">
       <FileArchive className="h-4 w-4 shrink-0 text-muted-foreground" />
       <span className="min-w-0 flex-1 truncate text-sm font-medium" title={fileInfo.fileNames.join("\n")}>
         {fileLabel}
@@ -494,12 +494,14 @@ function ResultView(props: {
           </div>
         )}
       </div>
-      <Button className="w-full" onClick={onDone}>
-        完成
-      </Button>
-      <Button variant="ghost" className="w-full" onClick={onRestart}>
-        重新导入
-      </Button>
+      <div className="flex w-full flex-col gap-2">
+        <Button className="w-full" onClick={onDone}>
+          完成
+        </Button>
+        <Button variant="ghost" className="w-full" onClick={onRestart}>
+          重新导入
+        </Button>
+      </div>
     </>
   )
 }
