@@ -42,14 +42,17 @@ def safe_relative_path(value: str) -> Path:
         raise ValueError("absolute file path is not allowed")
 
     normalized = posixpath.normpath(value)
-    if normalized in ("", ".") or normalized == ".." or normalized.startswith("../") or "/../" in normalized:
+    if normalized in ("", ".") or normalized.startswith(".."):
         raise ValueError("unsafe file path")
     return Path(*normalized.split("/"))
 
 
 def path_within(root: Path, relative: Path) -> Path:
     target = (root / relative).resolve()
-    target.relative_to(root.resolve())
+    try:
+        target.relative_to(root.resolve())
+    except ValueError as exc:
+        raise ValueError("path escapes output root") from exc
     return target
 
 
