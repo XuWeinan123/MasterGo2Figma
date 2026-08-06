@@ -308,7 +308,10 @@
       for (let i = 0; i < runCount; i++) {
         if (bytes[p] !== 0x01) return null;
         const sid = mgReadCString(bytes, p + 1, Math.min(end, p + 12));
-        if (!sid || !/^[0-9A-Za-z]{1,8}$/.test(sid.text)) return null;
+        // The fractional-index alphabet is printable ASCII including space
+        // (`b&n`, `b$ `), not just alnum — library-bearing exports use the
+        // full base-95 range.
+        if (!sid || !/^[\x20-\x7e]{1,8}$/.test(sid.text)) return null;
         p = sid.end + 1;
         if (bytes[p] !== 0x02) return null;
         const txt = mgReadCString(bytes, p + 1, end);
@@ -347,6 +350,10 @@
           p++;
         }
         if (p >= end) return null;
+        // Glyphless runs (library-bearing exports) end with an explicit 00
+        // terminator; glyph-bearing runs already consumed theirs via the 07
+        // table. Consume it so the next run's 01 tag lines up.
+        if (bytes[p] === 0x00) p++;
         runs.push({ sortId: sid.text, text: txt.text, styleRef: ref.text, fontString: fontString });
       }
       runs.sort((a, b) => (a.sortId < b.sortId ? -1 : a.sortId > b.sortId ? 1 : 0));
@@ -409,7 +416,11 @@
       for (let p = start; p + 2 < end; p++) {
         if (bytes[p] !== 0x09) continue;
         const count = bytes[p + 1];
-        if (count < 2 || count > 32) continue;
+        // count=1 is real (library-bearing exports write a single full-cover
+        // color run whose paint overrides a stale template ref); the walk's
+        // structural gates (valid ID ref, terminator, runEnd == charCount)
+        // hold the false-positive line.
+        if (count < 1 || count > 32) continue;
         let q = p + 2;
         let previousEnd = 0;
         const runs = [];
@@ -424,9 +435,13 @@
             if (tag === 0x00) { terminated = true; break; }
             if (tag === 0x01 || tag === 0x02) {
               if (q >= end) { valid = false; break; }
-              const value = bytes[q++];
-              if (tag === 0x01) runStart = value;
-              else runEnd = value;
+              // Boundaries are LEB128 varints (single byte below 128; long
+              // texts store e.g. 218 as `da 01`).
+              const r = mgReadVarint(bytes, q);
+              if (!isFinite(r.value)) { valid = false; break; }
+              q = r.next;
+              if (tag === 0x01) runStart = r.value;
+              else runEnd = r.value;
               continue;
             }
             if (tag === 0x03) {
@@ -720,7 +735,9 @@
 
     function mgScanPaints(bytes, str) {
       const paints = {};
-      const ID = "[0-9]+:[0-9A-Za-z]+";
+      // Library-bearing editor exports allocate paint-child ids from the
+      // colon-token space (`:396`), not the numeric node-id space.
+      const ID = "(?::[0-9A-Za-z]+|[0-9]+:[0-9A-Za-z]+)";
       const markRe = new RegExp("\\x01(" + ID + ")\\x00\\x02(" + ID + ")\\x00\\x03([0-9A-Za-z]+)\\x00", "g");
       const marks = [];
       let m;
@@ -754,7 +771,8 @@
     const MG_EFFECT_TYPE = { 0: "INNER_SHADOW", 1: "DROP_SHADOW", 2: "LAYER_BLUR", 3: "BACKGROUND_BLUR" };
     function mgScanEffects(bytes, str) {
       const effects = {};
-      const ID = "[0-9]+:[0-9A-Za-z]+";
+      // Same colon-token child-id space as mgScanPaints.
+      const ID = "(?::[0-9A-Za-z]+|[0-9]+:[0-9A-Za-z]+)";
       const markRe = new RegExp("\\x01(" + ID + ")\\x00\\x02(" + ID + ")\\x00\\x03([0-9A-Za-z]+)\\x00", "g");
       const marks = [];
       let m;
@@ -1786,11 +1804,52 @@
           end: m.index + m[0].length - 1, // keep the 04 name tag in the body
           recId: m[1],
           id2: null,
-          code: ""
+          code: "",
+          compRoot: true
         });
       }
-      mgShareModeActive = componentRootMarks > 0;
       marks.sort((a, b) => a.start - b.start);
+      // Editor exports that embed external library documents ALSO contain
+      // `01 <id> 00 04` component-master roots. Treating those as share
+      // evidence flips the omitted-field defaults and disables the text
+      // auto-naming / mirror passes for the whole file (0804 library fixture:
+      // stale "#111d2c" names instead of the characters). Nor does the
+      // comp-root's OWNER discriminate: an editor export of the library
+      // document ITSELF holds foreign off-canvas masters (pasted icon
+      // components) owned by its own header pages — the 大文件 0804 design
+      // system carries 12 such `2129:*` comp-roots owned by page :01695,
+      // exactly the shape a share export would have. The reliable signal is
+      // the SORT CODE: editor exports sort-code every on-canvas record
+      // (`01 <id> 00 03 <code>`), while share exports store page-owned
+      // content as codeless comp-roots. So: any sort-coded record owned by a
+      // header page (`1b <owner> 00 1c`) proves an editor export; share mode
+      // only holds when none exists (or the file has no parseable page table
+      // at all). A regex owner probe inside the record block is safe here: a
+      // float-payload false hit would also have to equal a known page id to
+      // flip the decision.
+      if (componentRootMarks > 0) {
+        const headerPages = parseMgPages(bytes, -1);
+        if (headerPages.length === 0) {
+          mgShareModeActive = true;
+        } else {
+          const headerPageIds = {};
+          for (const pg of headerPages) headerPageIds[pg.id] = true;
+          const ownerProbe = /\x1b([0-9A-Za-z:\/]{1,64})\x00\x1c/g;
+          mgShareModeActive = true;
+          for (let i = 0; i < marks.length && mgShareModeActive; i++) {
+            if (marks[i].compRoot) continue;
+            const blockEnd = (i + 1 < marks.length) ? marks[i + 1].start : Math.min(marks[i].start + 6000, str.length);
+            const block = str.slice(marks[i].start, blockEnd);
+            ownerProbe.lastIndex = 0;
+            let om;
+            while ((om = ownerProbe.exec(block))) {
+              if (headerPageIds[om[1]]) { mgShareModeActive = false; break; }
+            }
+          }
+        }
+      } else {
+        mgShareModeActive = false;
+      }
       const nodes = {};
       for (let i = 0; i < marks.length; i++) {
         const mk = marks[i];
@@ -2551,6 +2610,11 @@
         } else if (n.trailer) {
           props.layout.primaryAxisSizingMode = trailer.has21 ? "FIXED" : "AUTO";
           props.layout.counterAxisSizingMode = trailer.has22 ? "FIXED" : "AUTO";
+        } else {
+          // No trailer at all (library-bearing shallow copies): absent 21/22
+          // means AUTO, same as a trailer without those fields.
+          props.layout.primaryAxisSizingMode = "AUTO";
+          props.layout.counterAxisSizingMode = "AUTO";
         }
         if (types.type !== "SECTION" && types.sourceType !== "INSTANCE") props.__nativeContainerLayout = true;
       }
@@ -2569,6 +2633,22 @@
       if (t === "TEXT") {
         const fontRuns = Array.isArray(n.fontRuns) ? n.fontRuns : null;
         const colorRuns = Array.isArray(n.styledRuns) ? n.styledRuns : null;
+        // A single full-cover color run IS the text color. The scalar-15 slot
+        // can keep a stale template paint ref on library-bearing exports
+        // (0804: title kept the library's white while the color run says the
+        // edited black), so the run's paint wins when both resolve. Instance
+        // expansion clones (slash ids) keep the template's paintRef semantics
+        // — their per-instance color truth is the override mirror, not the
+        // cloned run table (Tesla OPEN labels).
+        if (colorRuns && colorRuns.length === 1 && fontRuns && fontRuns.length <= 1 &&
+            String(n.id || "").indexOf("/") < 0 &&
+            paints[colorRuns[0].paintRef] && colorRuns[0].paintRef !== n.paintRef && props.geometry) {
+          props.geometry.fills = paints[colorRuns[0].paintRef].map(mgCloneJsonValue);
+          mgFinalizeRadialPaints(props.geometry.fills, n.w, n.h);
+          for (const f of props.geometry.fills) {
+            if (f && f.blendMode === "NORMAL") f.blendMode = "PASS_THROUGH";
+          }
+        }
         if ((fontRuns && fontRuns.length > 1) || (colorRuns && colorRuns.length > 1)) {
           const chars = props.characters || "";
           const cuts = new Set([0, chars.length]);
@@ -3735,8 +3815,10 @@
       const pages = [];
       const seen = {};
       // Node ids look like `2:1010` or slash-composed `2:1010/2:0162`; page ids
-      // can additionally be short tokens like `M` (share/partial exports).
-      const idRe = /^(?:[0-9]+:[0-9A-Za-z]+(?:\/[0-9]+:[0-9A-Za-z]+)*|[A-Za-z][0-9A-Za-z]{0,7})$/;
+      // can additionally be short tokens like `M` (share/partial exports) or
+      // colon-prefixed tokens like `:7384` (editor exports that embed external
+      // library documents use colon tokens for page/canvas owners).
+      const idRe = /^(?:[0-9]+:[0-9A-Za-z]+(?:\/[0-9]+:[0-9A-Za-z]+)*|[A-Za-z][0-9A-Za-z]{0,7}|:[0-9A-Za-z]{1,12})$/;
       const nodeIdRe = /^[0-9]+:[0-9A-Za-z]+(?:\/[0-9]+:[0-9A-Za-z]+)*$/;
       const limit = Math.min(headerEnd > 0 ? headerEnd : bytes.length, 200000);
       let p = 0;
@@ -3957,11 +4039,15 @@
         return sub === "COMPONENT" || sub === "COMPONENT_SET";
       }
       for (const pg of mgPages) {
-        // Share exports keep component masters off-canvas (they merely share
-        // the page owner), so they are dropped from the page roots there. In
-        // FULL editor exports the masters legitimately sit ON the canvas —
-        // dropping them lost all 20 of the Tesla fixture's components.
-        const roots = (childIds[pg.id] || []).filter(r => nodes[r] && nodes[r].type && !(mgShareModeActive && isComponentMaster(r)));
+        // Off-canvas registry masters merely share the page owner and carry
+        // no sort code — drop those from the page roots (share exports store
+        // ALL masters that way; editor exports of a library file still hold a
+        // few codeless foreign masters, e.g. pasted icons). Sort-CODED
+        // masters legitimately sit ON the canvas and must stay — dropping
+        // them lost all 20 of the Tesla fixture's components, and the 大文件
+        // 0804 design system keeps every button/button-group master as a
+        // coded canvas root.
+        const roots = (childIds[pg.id] || []).filter(r => nodes[r] && nodes[r].type && !(isComponentMaster(r) && !nodes[r].code));
         roots.forEach((rootId, rootIndex) => { rootIndexOverride[rootId] = rootIndex; });
         let count = 0;
         for (const r of roots) for (const id of subtreeOf(r)) { if (!reachable[id]) { reachable[id] = true; count++; } }

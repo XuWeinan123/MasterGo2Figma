@@ -53,6 +53,11 @@ export function initEngine(callbacks) {
     const message = event.data && event.data.pluginMessage;
     if (!message) return;
 
+    if (message.type === "init") {
+      if (ui.onInit) ui.onInit(message);
+      return;
+    }
+
     if (message.type === "import-ack") {
       resolveImportAck(message);
       return;
@@ -110,6 +115,10 @@ export function initEngine(callbacks) {
     }
   };
   send({ type: "ui-ready" });
+}
+
+export function saveSettings(settings) {
+  send({ type: "set-settings", settings });
 }
 
 export function hasPackage() {

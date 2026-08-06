@@ -2424,6 +2424,7 @@ ${style}`;
   var RESTORE_PROGRESS_NODE_INTERVAL = 100;
   var RESTORE_PROGRESS_TIME_INTERVAL_MS = 500;
   var PAGE_POSTPROCESS_STAGE_COUNT = 3;
+  var UI_SETTINGS_STORAGE_KEY = "mastergo2figma.receive.settings";
   var activeImportSession = null;
   var pendingImportAssets = {};
   var pendingImportPages = {};
@@ -2489,6 +2490,14 @@ ${style}`;
       }
       if (message.type === "import-client-timing") {
         recordClientTiming(message);
+        return;
+      }
+      if (message.type === "set-settings") {
+        try {
+          yield figma.clientStorage.setAsync(UI_SETTINGS_STORAGE_KEY, message.settings || {});
+        } catch (error) {
+          console.error("Failed to save settings:", error);
+        }
         return;
       }
       if (message.type === "start-import") {
@@ -3127,9 +3136,16 @@ ${style}`;
   function postInitUI() {
     return __async(this, null, function* () {
       yield ensureLayerRulesLoaded();
+      let settings = null;
+      try {
+        settings = yield figma.clientStorage.getAsync(UI_SETTINGS_STORAGE_KEY);
+      } catch (error) {
+        console.error("Failed to load settings:", error);
+      }
       figma.ui.postMessage({
         type: "init",
-        rules: getLayerRuleStatus()
+        rules: getLayerRuleStatus(),
+        settings
       });
     });
   }

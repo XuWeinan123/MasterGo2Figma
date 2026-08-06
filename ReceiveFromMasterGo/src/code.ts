@@ -76,6 +76,8 @@ type PendingPage = {
   error?: string;
 };
 
+const UI_SETTINGS_STORAGE_KEY = "mastergo2figma.receive.settings";
+
 let activeImportSession: ImportSession | null = null;
 const pendingImportAssets: { [path: string]: PendingAsset } = {};
 const pendingImportPages: { [pageIndex: string]: PendingPage } = {};
@@ -157,6 +159,15 @@ function showImportUI() {
 
     if (message.type === "import-client-timing") {
       recordClientTiming(message);
+      return;
+    }
+
+    if (message.type === "set-settings") {
+      try {
+        await figma.clientStorage.setAsync(UI_SETTINGS_STORAGE_KEY, message.settings || {});
+      } catch (error) {
+        console.error("Failed to save settings:", error);
+      }
       return;
     }
 
@@ -849,9 +860,16 @@ function recordStreamedMissingImage(assetName: string) {
 
 async function postInitUI() {
   await ensureLayerRulesLoaded();
+  let settings: any = null;
+  try {
+    settings = await figma.clientStorage.getAsync(UI_SETTINGS_STORAGE_KEY);
+  } catch (error) {
+    console.error("Failed to load settings:", error);
+  }
   figma.ui.postMessage({
     type: "init",
-    rules: getLayerRuleStatus()
+    rules: getLayerRuleStatus(),
+    settings
   });
 }
 

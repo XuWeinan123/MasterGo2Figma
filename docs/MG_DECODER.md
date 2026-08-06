@@ -283,6 +283,64 @@ exports use slash-composed override records instead):
   box-only, invisible). CENTER-constrained frames drift similarly (~0.4px, dragme) with no
   writable lever — documented residual.
 
+## Library-bearing editor export form (colon-token dialect) — CRACKED ✓ (2026-08-05, 0804 带外部库 fixture)
+Editor exports of files that REFERENCE external libraries embed the entire library document(s)
+into the same `document` binary (0804: 28MB, 195k decoded records — the user page holds 997).
+Fixture pair: `测试集/带外部库测试/测试集 0804_1_32.mg` (library-bearing) vs
+`测试集 0804_1_32 手动复制对照组.mg` (same content manually copied into a clean file; MasterGo
+materializes display names/values on copy, so it is the known-answer table). Verified to a
+0-row field diff over 997 position-paired nodes (residuals: 9 sub-pixel 0.5px x-coords that
+differ in the SOURCE files, 18 rows where the orig produces RICHER mixed-font
+styledTextSegments than the materialized control, 1 node-level fontName covered by segments).
+
+- **Colon-token id space.** Auxiliary records get ids like `:7384` — page ids
+  (`01 :7384 00 02 色值 00 03 a1P`), node owner tokens (`1b :7384 00 1c`), paint/effect child
+  ids (`01 :396 00 02 0:2451 00 03 a0 <paint>`), and a token registry near the style region
+  (`01 :2513 00 02 0:71915 00 03 a0` = token → node id). `parseMgPages`' idRe and the
+  paint/effect scan child-ID patterns accept `:[0-9A-Za-z]+`.
+- **Library removal = page reachability.** The header page table lists ONLY the main
+  document's pages; every embedded-library node hangs off owner tokens absent from that
+  table and is dropped by the existing page-root reachability gate. Nothing else is needed —
+  but decode must still SEE the library records (user-page records carry `15` paint refs and
+  `1a` template refs into library-owned slots/styles).
+- **Share-mode discriminator.** Embedded libraries contribute `01 <id> 00 04` component-root
+  marks (0804: 12× `2129:*` owned by library page `:01695`), which used to flip
+  `mgShareModeActive` for the whole file — disabling `mgApplyTextAutoNames` (stale names
+  emitted), flipping omitted-spacing defaults, and skipping the mirror passes. The comp-root's
+  OWNER does **not** discriminate either: an editor export of a library document itself (大文件
+  0804 design system) holds foreign off-canvas masters (pasted icon components) owned by its
+  own header pages — exactly the shape a share export would have. Rule now: the SORT CODE is
+  the signal. Editor exports sort-code every on-canvas record (`01 <id> 00 03 <code>`); share
+  exports store page-owned content as codeless comp-roots. Any sort-coded record owned by a
+  header-page id (`1b <owner> 00 1c`) proves an editor export → share mode OFF; share mode
+  holds only when none exists, or the file has no parseable page table at all.
+- **Page-root master filter follows the same signal.** Page roots drop only masters
+  **without** a sort code (off-canvas registry masters that merely share the page owner).
+  Sort-CODED masters are genuine canvas content and must stay — the 0804 design system keeps
+  every `button`/`button-group` COMPONENT_SET as a coded canvas root; dropping masters by
+  share-mode flag alone emptied 60+ of its 69 pages (7.2k of 205k layers survived).
+- **Stale display fields are normal here.** Un-materialized copies keep the ORIGINAL name in
+  `04` (name "#111d2c" while the run says "#1D2129") and the original paint ref in scalar
+  `15`; MasterGo derives the live value from the run tables. Auto-naming (scalar-05 lock)
+  already handles names; fills additionally need the color-run override below.
+- **Text run grammar refinements** (all in `mgParseFontRuns` / `mgParseTextRuns`):
+  - run sortIds use the full printable-ASCII fractional-index alphabet INCLUDING space
+    (`b&n`, `b$ `) — `[\x20-\x7e]{1,8}`, not alnum;
+  - glyphless runs (no `05/06/07` tables) end with an explicit `00` terminator that must be
+    consumed before the next run's `01`;
+  - color-run boundaries (`01 <start> 02 <end>`) are LEB128 varints (218 = `da 01`);
+  - a color-run table with count **1** is real (`09 01 02 17 03 <paintRef> 00 00`) — one
+    full-cover run;
+  - **single-run fill override**: when a TEXT record's single color run resolves in the paint
+    table and its ref differs from the scalar-15 ref, the RUN's paint is the text color (the
+    15 slot is the stale template link). Restricted to slash-less ids — instance expansion
+    clones keep template paintRef semantics (Tesla OPEN labels regressed without the gate).
+- **Trailer-less containers hug.** Shallow-copy frames/groups may have NO trailer at all;
+  absent `21/22` still means sizing AUTO (previous code only reached the AUTO branch when a
+  trailer existed, leaving FIXED defaults).
+- Records may omit the `02` parent field entirely (`01 <id> 00 03 <code> …`); parent falls
+  back to the `1b` owner token, which is how page roots attach to the page.
+
 ## Number codec — CRACKED ✓ (verified both directions)
 - decode([s0,s1,s2,s3]): `S=[s0,s3,s2,s1]`; `value = float32_be( rotr1(uint32_be(S)) )` (rotate
   keeps the sign bit; see `mgDecFloat`).

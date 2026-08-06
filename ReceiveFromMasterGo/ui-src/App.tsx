@@ -62,41 +62,27 @@ type Overlay = "notice" | "email" | null
 
 const HELP_URL = "https://github.com/XuWeinan123/MasterGo2Figma"
 const CONTACT_EMAIL = "woshixwn@gmail.com"
-const SETTINGS_STORAGE_KEY = "mastergo2figma.receive.settings"
 const DEFAULT_SETTINGS: AppSettings = {
   zipEnabled: false,
   suppressStartupNotice: false,
 }
 
-function loadSettings(): AppSettings {
-  try {
-    const raw = window.localStorage.getItem(SETTINGS_STORAGE_KEY)
-    if (!raw) return { ...DEFAULT_SETTINGS }
-    const saved = JSON.parse(raw) as Partial<AppSettings>
-    return {
-      zipEnabled: saved.zipEnabled === true,
-      suppressStartupNotice: saved.suppressStartupNotice === true,
-    }
-  } catch {
-    return { ...DEFAULT_SETTINGS }
-  }
-}
-
-function saveSettings(settings: AppSettings) {
-  try {
-    window.localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings))
-  } catch {
-    // Storage can be unavailable in restricted plugin runtimes; keep the in-memory setting.
+// Settings persist via figma.clientStorage in the main thread (bridged
+// through engine.saveSettings / the "init" message) rather than iframe
+// localStorage, which Figma does not guarantee to preserve across plugin
+// relaunches.
+function parseSettings(raw: any): AppSettings {
+  return {
+    zipEnabled: raw?.zipEnabled === true,
+    suppressStartupNotice: raw?.suppressStartupNotice === true,
   }
 }
 
 export function App() {
   const [view, setView] = React.useState<View>("idle")
   const [prevView, setPrevView] = React.useState<View>("idle")
-  const [settings, setSettings] = React.useState<AppSettings>(() => loadSettings())
-  const [overlay, setOverlay] = React.useState<Overlay>(() =>
-    settings.suppressStartupNotice ? null : "notice"
-  )
+  const [settings, setSettings] = React.useState<AppSettings>(() => ({ ...DEFAULT_SETTINGS }))
+  const [overlay, setOverlay] = React.useState<Overlay>(null)
   const [noticeDontShowAgain, setNoticeDontShowAgain] = React.useState(false)
   const [parsing, setParsing] = React.useState(false)
   const [dropHint, setDropHint] = React.useState<string | null>(null)
@@ -139,6 +125,11 @@ export function App() {
       onRefreshFontsComplete: (text: string) => {
         setFontBusy(false)
         setFontMsg(text)
+      },
+      onInit: (message: { settings?: unknown }) => {
+        const loaded = parseSettings(message.settings)
+        setSettings(loaded)
+        if (!loaded.suppressStartupNotice) setOverlay("notice")
       },
     })
   }, [])
@@ -235,7 +226,7 @@ export function App() {
   function updateSettings(patch: Partial<AppSettings>) {
     setSettings((previous) => {
       const next = { ...previous, ...patch }
-      saveSettings(next)
+      engine.saveSettings(next)
       return next
     })
   }
@@ -247,7 +238,7 @@ export function App() {
 
   function resetSettings() {
     const defaults = { ...DEFAULT_SETTINGS }
-    saveSettings(defaults)
+    engine.saveSettings(defaults)
     setSettings(defaults)
     setNoticeDontShowAgain(false)
     setDropHint(null)
@@ -297,13 +288,7 @@ export function App() {
         {view === "importing" && <ImportingView progress={progress} />}
 
         {view === "success" && result && (
-          <ResultView
-            result={result}
-            showDetails={showDetails}
-            onToggleDetails={() => setShowDetails((v) => !v)}
-            onDone={() => engine.closePlugin()}
-            onRestart={resetToIdle}
-          />
+          <ResultView result={result} onDone={() => engine.closePlugin()} onRestart={resetToIdle} />
         )}
 
         {view === "error" && error && (
@@ -541,12 +526,10 @@ function ImportingView({ progress }: { progress: ProgressState }) {
 
 function ResultView(props: {
   result: ResultState
-  showDetails: boolean
-  onToggleDetails: () => void
   onDone: () => void
   onRestart: () => void
 }) {
-  const { result, showDetails, onToggleDetails, onDone, onRestart } = props
+  const { result, onDone, onRestart } = props
   return (
     <>
       <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 overflow-y-auto rounded-lg border px-6 text-center">
@@ -555,19 +538,11 @@ function ResultView(props: {
           导入完成 · {result.pageCount} 个页面 · {result.layerCount} 个图层
         </div>
         {result.details.length > 0 && (
-          <div className="text-xs text-muted-foreground">
-            <button className="inline-flex items-center gap-0.5 hover:text-foreground" onClick={onToggleDetails}>
-              {showDetails ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-              查看详情
-            </button>
-            {showDetails && (
-              <ul className="mt-1.5 space-y-0.5 text-left">
-                {result.details.map((d, i) => (
-                  <li key={i}>{d}</li>
-                ))}
-              </ul>
-            )}
-          </div>
+          <ul className="space-y-0.5 text-left text-xs text-muted-foreground">
+            {result.details.map((d, i) => (
+              <li key={i}>{d}</li>
+            ))}
+          </ul>
         )}
       </div>
       <div className="flex w-full flex-col gap-2">
@@ -710,7 +685,7 @@ function StartupNotice(props: {
           <p>
             若你的设计稿还原有差异，欢迎将 .mg 文件或地址发送至{" "}
             <span className="text-foreground">{CONTACT_EMAIL}</span>
-            ，或在 Github 提交 issue / PR。
+            （注意将文件缩减至仅包含问题图层）。或在 Github 提交 issue / PR。
           </p>
         </div>
         <div className="mt-6 grid w-full grid-cols-2 gap-2">
