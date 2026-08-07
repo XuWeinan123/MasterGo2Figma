@@ -36,7 +36,15 @@ export async function applyTextProperties(node: TextNode, data: any) {
     // entire text node from an otherwise valid import.
     trySetText(() => { node.textAlignHorizontal = data.textAlignHorizontal || "LEFT"; });
     trySetText(() => { node.textAlignVertical = data.textAlignVertical || "TOP"; });
-    trySetText(() => { node.textAutoResize = data.textAutoResize || "NONE"; });
+    // MasterGo reports an ellipsising layer as textAutoResize TRUNCATE — a
+    // spelling Figma deprecated and now REJECTS, so the assignment threw, the
+    // node kept its default hug, and the layer grew to its full stored string
+    // (MasterGo stores the untruncated text and clips at render): the 消息通知
+    // row's `10` badge got shoved to x 564 in a 378-wide row. Figma's current
+    // spelling is a fixed box plus textTruncation.
+    const truncates = data.textAutoResize === "TRUNCATE";
+    trySetText(() => { node.textAutoResize = truncates ? "NONE" : (data.textAutoResize || "NONE"); });
+    trySetText(() => { node.textTruncation = truncates ? "ENDING" : "DISABLED"; });
     trySetText(() => { node.paragraphIndent = data.paragraphIndent || 0; });
     trySetText(() => { node.paragraphSpacing = data.paragraphSpacing || 0; });
     trySetText(() => { node.autoRename = data.autoRename || false; });

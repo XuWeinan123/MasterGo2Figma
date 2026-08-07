@@ -2040,7 +2040,20 @@
             const tt = bytes[tp];
             if (tt === 0x01) { textAlignH = bytes[tp + 1]; tp += 2; continue; }
             if (tt === 0x02) { textAlignV = bytes[tp + 1]; tp += 2; continue; }
-            if (tt === 0x03) { textAutoResize = bytes[tp + 1] === 1 ? "HEIGHT" : "WIDTH_AND_HEIGHT"; tp += 2; continue; }
+            // 3 = fixed box that ELLIPSISES its overflow — the MasterGo API
+            // reports it as `TRUNCATE`, so the zip baseline spells it that way
+            // and so do we (the importer maps it onto Figma's NONE +
+            // textTruncation ENDING). Reading it as WIDTH_AND_HEIGHT made the
+            // 消息通知 line hug its full stored string (MasterGo stores the
+            // untruncated text and clips at render), so the row's `10` badge
+            // was pushed to x 564 in a 378-wide row and vanished. Exactly one
+            // node in the 0806 汇总 fixture spells 3 — and it is that one.
+            if (tt === 0x03) {
+              textAutoResize = bytes[tp + 1] === 1 ? "HEIGHT"
+                : bytes[tp + 1] === 3 ? "TRUNCATE" : "WIDTH_AND_HEIGHT";
+              tp += 2;
+              continue;
+            }
             break;
           }
           // The run's `03 <id>` reference (followed by the `05` glyph table)
@@ -3641,7 +3654,7 @@
         // tplPath tracks the template-side path: component trees carry their
         // own nested-instance override records (e.g. `2:0748/2:0018`), which
         // take precedence over the raw template child as the clone source.
-        const walk = [{ tplId: comp.id, cloneId: instId, tplPath: job.tplSide, ovId: jobSlotId, tplNodeOverride: virtualComp }];
+        const walk = [{ tplId: comp.id, cloneId: instId, tplPath: job.tplSide, rootPath: job.tplSide, ovId: jobSlotId, tplNodeOverride: virtualComp }];
         while (walk.length) {
           const cur = walk.shift();
           const tplNode = cur.tplNodeOverride || nodes[cur.tplId];
@@ -3653,7 +3666,17 @@
             if (!t) continue;
             const lastSegId = childTplId.indexOf("/") >= 0 ? childTplId.slice(childTplId.lastIndexOf("/") + 1) : childTplId;
             const overrideKey = cur.tplPath + "/" + lastSegId;
+            // MasterGo keys an instance's overrides FLAT against the INSTANCE
+            // id — a deep descendant's override is `<instId>/<nodeId>`, never
+            // `<instId>/<group>/<nodeId>`. Walking `tplPath` alone loses that
+            // the moment an intermediate node has no override of its own: it
+            // falls back to the raw template id, and every deeper override
+            // becomes unreachable. 大头针's `组 1136` has none, so the blue
+            // recolor in `24:1747/24:0946` was never found and the map's
+            // location marker imported with the component's black.
+            const rootKey = cur.rootPath + "/" + lastSegId;
             if (overrideKey !== childTplId && nodes[overrideKey]) t = nodes[overrideKey];
+            else if (rootKey !== childTplId && nodes[rootKey]) t = nodes[rootKey];
             // Full-export bare override mirror: the record whose parent is the
             // current mirror (or the job's slot) and whose templateRef is this
             // template child overrides it, exactly like the share overrideKey.
@@ -3714,6 +3737,7 @@
                 tplId: childTplId,
                 cloneId: cloneId,
                 tplPath: overrideKey !== childTplId && nodes[overrideKey] ? overrideKey : childTplId,
+                rootPath: cur.rootPath,
                 ovId: bareOv ? bareOv.id : null
               });
             }
@@ -3889,27 +3913,16 @@
             n.containerMeta = mirror.containerMeta;
           }
         }
-        // 0711-3 full exports: instance-child container stubs store their size
-        // in TEMPLATE units when the user overrode it (route: own 307, tpl
-        // 297, baseline 307×scale), but an UNMODIFIED size is written as the
-        // final scaled copy (pagination: own 487.56 == tpl 580 × 0.8406 ==
-        // baseline). So scale only values that do NOT already equal
-        // template×scale (268/276 cross-tab; the misfits are live-text hug
-        // frames). Share-export stubs store final sizes (2026-07 doctrine);
-        // leaf stubs (VECTOR/TEXT) are final in both forms; instance roots are
-        // always final.
-        if (!mgShareModeActive && n.isRawRecord && n.containerMeta &&
-            n.containerMeta.subtype !== "INSTANCE" &&
-            n.trailer && isFinite(n.trailer.scaleFactor) && n.trailer.scaleFactor > 0 &&
-            Math.abs(n.trailer.scaleFactor - 1) > 1e-9) {
-          const s = n.trailer.scaleFactor;
-          const tpl = nodes[n.templateRef];
-          const tol = v => Math.max(0.02, Math.abs(v) * 1e-4);
-          const wIsFinalCopy = tpl && isFinite(tpl.w) && Math.abs(n.w - tpl.w * s) < tol(tpl.w * s);
-          const hIsFinalCopy = tpl && isFinite(tpl.h) && Math.abs(n.h - tpl.h * s) < tol(tpl.h * s);
-          if (n.hasExplicitW && isFinite(n.w) && !wIsFinalCopy) n.w *= s;
-          if (n.hasExplicitH && isFinite(n.h) && !hIsFinalCopy) n.h *= s;
-        }
+        // NO size rescale from trailer 26 here. This used to multiply an
+        // instance-child container stub's explicit size by its own tag-26,
+        // under the (wrong) 0711-3 reading that the stub stores TEMPLATE
+        // units. Tag 26 is the AMBIENT scale (2026-08-06), and a stub's own
+        // explicit size is already final — the guard that was supposed to
+        // catch that (`n.w == tpl.w * s`) never fired, because templateRef is
+        // still null this early in inheritance, so all 32 matches were scaled
+        // twice. Every one of them disagreed with the baseline: 附近充电's
+        // 24×24 icon frame became 1.55×1.55 (24 × 0.12 × 0.539) and clipped
+        // its own paper-plane away.
         // TEXT naming is finalized by mgApplyTextAutoNames (scalar 05 = the
         // manual-name lock) after inheritance fills characters.
         // Inheritance passes THROUGH the override mirror when one exists:
@@ -4388,9 +4401,19 @@
         // instances cannot express via child geometry (instance children are
         // locked to the component); the importer replays it with
         // InstanceNode.rescale().
-        if (props.sourceType === "INSTANCE" && n.trailer && isFinite(n.trailer.scaleFactor) &&
-            n.trailer.scaleFactor > 0 && Math.abs(n.trailer.scaleFactor - 1) > 1e-6) {
-          record.instanceScale = n.trailer.scaleFactor;
+        // Take the AMBIENT scale (effScale), not just the node's own trailer: a
+        // NESTED instance is synthesized from its template and never carries a
+        // trailer of its own, so `n.trailer` alone left all 7 nested instances
+        // in 容器 359 unrescaled. Figma then only resized the shell, and the
+        // locked component children kept component-space values inside a
+        // 0.539-sized box — the 快/慢 chips rendered as circles (radius 7 on a
+        // 17px box) with a clipped 22px glyph. effScale already equals the own
+        // trailer factor for a top-level instance (mgExpandTemplateInstances).
+        const instScale = isFinite(n.effScale) ? n.effScale
+          : (n.trailer ? n.trailer.scaleFactor : 1);
+        if (props.sourceType === "INSTANCE" && isFinite(instScale) &&
+            instScale > 0 && Math.abs(instScale - 1) > 1e-6) {
+          record.instanceScale = instScale;
         }
         if (props.sourceType === "INSTANCE" && n.templateRef && nodes[n.templateRef] &&
             reachable[n.templateRef] &&

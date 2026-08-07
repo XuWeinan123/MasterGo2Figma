@@ -438,8 +438,12 @@ ${style}`;
       trySetText(() => {
         node.textAlignVertical = data.textAlignVertical || "TOP";
       });
+      const truncates = data.textAutoResize === "TRUNCATE";
       trySetText(() => {
-        node.textAutoResize = data.textAutoResize || "NONE";
+        node.textAutoResize = truncates ? "NONE" : data.textAutoResize || "NONE";
+      });
+      trySetText(() => {
+        node.textTruncation = truncates ? "ENDING" : "DISABLED";
       });
       trySetText(() => {
         node.paragraphIndent = data.paragraphIndent || 0;
@@ -2077,6 +2081,10 @@ ${style}`;
         const parentLayout = {};
         for (const key of ["layoutAlign", "layoutGrow", "layoutPositioning"]) {
           if (layout[key] !== void 0) parentLayout[key] = layout[key];
+        }
+        if (layout.layoutPositioning === "ABSOLUTE") {
+          if (layout.x !== void 0) parentLayout.x = layout.x;
+          if (layout.y !== void 0) parentLayout.y = layout.y;
         }
         props.layout = Object.keys(parentLayout).length > 0 ? parentLayout : void 0;
       }

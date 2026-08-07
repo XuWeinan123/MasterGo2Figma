@@ -82,6 +82,17 @@ export function createFinalizedContainerProps(data: any, preserveLayout = false)
             for (const key of ["layoutAlign", "layoutGrow", "layoutPositioning"]) {
                 if (layout[key] !== undefined) parentLayout[key] = layout[key];
             }
+            // An ABSOLUTE child is the one case where the derived position does
+            // NOT survive: the deferred pass gives the parent its layoutMode
+            // first, which snaps every child (including this group) to a flow
+            // slot, and only the LATER pass flips it back to ABSOLUTE. With x/y
+            // dropped there is nothing left to restore the position with — the
+            // 找桩充电 card's map texture, pinned at x 170.76, ended up at the
+            // 12.93 padding corner behind the tab row.
+            if (layout.layoutPositioning === "ABSOLUTE") {
+                if (layout.x !== undefined) parentLayout.x = layout.x;
+                if (layout.y !== undefined) parentLayout.y = layout.y;
+            }
             props.layout = Object.keys(parentLayout).length > 0 ? parentLayout : undefined;
         }
     }

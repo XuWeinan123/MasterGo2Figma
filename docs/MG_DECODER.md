@@ -56,8 +56,26 @@ MasterGo's share/partial `.mg` differs structurally from full editor exports:
     override record's `26` describes the clone. `mgExpandTemplateInstances` gates on that.
   - The effective scale for a clone is the INSTANCE's ambient, not the template's, and not the
     product of the two: `核心功能 2`'s corners are template 16 → 8.62 (× 0.539), never × 1.111.
+  - The record-level `instanceScale` (what the importer replays with `InstanceNode.rescale()`)
+    is `n.effScale`, NOT `n.trailer.scaleFactor`. A nested instance is synthesized and has no
+    trailer of its own, so reading the trailer left all 7 nested instances under `容器 359`
+    unrescaled — Figma resized only the shell and the locked component children kept
+    component-space values in a 0.539-sized box (the 快/慢 chips became circles with a
+    clipped 22px glyph).
+  - **A node's own explicit size is NEVER multiplied by its own tag 26.** The pre-2026-08
+    reading had `mgInheritFromTemplate` scale any raw record's explicit `0e`/`0f` by its
+    trailer factor, guarded by "unless it already equals template × scale". `templateRef` is
+    still null that early, so the guard never fired and all 32 matches were scaled twice —
+    every one of them disagreed with the baseline (`附近充电`'s 24×24 icon frame became
+    1.55×1.55 = 24 × 0.12 × 0.539 and clipped its own paper-plane away). The rule is deleted.
 - **Component trees contain their own nested-instance override records** (`2:0748/2:0018`),
-  which take precedence over the raw template child during expansion.
+  which take precedence over the raw template child during expansion. The key is **FLAT
+  against the instance id** — a deep descendant's override is `<instId>/<nodeId>`, never
+  `<instId>/<group>/<nodeId>`, and its `02 <parent>` may point at a mirror record that does
+  not exist (`24:1747/24:0946`.parent = `24:1747/24:0944`, absent). So the walk must try
+  `<instance root>/<childId>` as well as the per-level path: chaining the path alone loses
+  every override below the first un-overridden ancestor (大头针's `组 1136` has none, so its
+  blue recolor was never found and the map's location marker imported black).
 - Slot-positional fields (constraints, visibility) inherit from the template CHILD (the id's
   last segment); visual fields (paints, font, caps) follow the `1a` component chain.
 - Missing spacing/padding fields mean **0** here (full editor exports mean 10).
@@ -622,7 +640,13 @@ byte↔char offsets, so regex indexes stay valid).
 
 ## TEXT / ELLIPSE nested-object fields — CRACKED ✓
 - TEXT `1c 08`: leading field **`03 <b>` = textAutoResize** — `03 00` = WIDTH_AND_HEIGHT,
-  `03 01` = HEIGHT, field omitted = NONE/fixed size (25/25 nodes). Field `06 <n>` = styled-run
+  `03 01` = HEIGHT, **`03 03` = TRUNCATE** (fixed box, ellipsised overflow — the MasterGo API
+  spelling the zip baseline uses; the importer maps it onto Figma's `textAutoResize NONE` +
+  `textTruncation ENDING`, because Figma REJECTS the deprecated `TRUNCATE` and the throw left
+  the layer hugging), field omitted = NONE/fixed size (25/25 nodes). 0806 汇总 histogram:
+  `0`×218, `1`×18, `3`×1 — and that single `3` is exactly the 消息通知 line whose overflow
+  shoved the row's `10` badge to x 564 in a 378-wide row. MasterGo stores the FULL string and
+  clips at render, so getting this wrong is visible immediately. Field `06 <n>` = styled-run
   count, then the run blob.
 - ELLIPSE `1c 04 01 <obj>`: **arcData** — field `01 <f>` = sweep as a fraction of a full turn
   (`-1` = clockwise full circle → −2π, omitted = +2π, `0.75` → 4.712…), field `02 <f>` =
