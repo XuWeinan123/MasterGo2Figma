@@ -2608,6 +2608,8 @@ ${style}`;
         clientTimings: message.clientTimings || null,
         restoredNodeById: {},
         deferredInstanceRelinks: [],
+        libraryMasterNodes: [],
+        libraryMasterLayerCount: 0,
         figmaStyleIdByRef: {}
       };
       figma.ui.postMessage({
@@ -2938,12 +2940,14 @@ ${style}`;
       const relinkStartedAt = Date.now();
       yield retryDeferredInstanceRelinks(layers);
       addImportTiming(session, "restore.deferredRelinkMs", Date.now() - relinkStartedAt);
+      collectLibraryMasterNodes(session, layers);
       yield reportPagePostprocessProgress(session, pageIndex, postprocessStart, pageNodeCount, 0, 0, 1);
       const layoutStartedAt = Date.now();
       yield applyDeferredLayoutRestores((done, total) => {
         return reportPagePostprocessProgress(session, pageIndex, postprocessStart, pageNodeCount, 0, done, total);
       });
       addImportTiming(session, "postprocess.deferredLayoutMs", Date.now() - layoutStartedAt);
+      flushInstanceChildLayoutOverrides(false);
       const cleanupStartedAt = Date.now();
       yield cleanupImportedContainerShells(restoredPage, (done, total) => {
         return reportPagePostprocessProgress(session, pageIndex, postprocessStart, pageNodeCount, 1, done, total);
@@ -3001,6 +3005,9 @@ ${style}`;
         const missingFontRestoreResult = yield restoreMissingFontTextLayers(session.restoredPages);
         addImportTiming(session, "finalize.missingFontsMs", Date.now() - missingFontStartedAt);
         postFinalizeProgress(session, 2, 4);
+        flushInstanceChildLayoutOverrides(true);
+        paintFilledMaskTwins(session);
+        removeLibraryMasterNodes(session);
         const viewportStartedAt = Date.now();
         if (session.restoredPages.length > 0) {
           yield figma.setCurrentPageAsync(session.restoredPages[0]);
@@ -3012,7 +3019,7 @@ ${style}`;
           type: "complete",
           transferId: session.transferId,
           pageCount: session.restoredPages.length,
-          layerCount: session.restoredNodes,
+          layerCount: session.restoredNodes - session.libraryMasterLayerCount,
           missingImageAssetCount: state.missingImageAssetCount,
           fallbackConnectorCount: state.fallbackConnectorCount,
           restoredMissingFontTextNodeCount: missingFontRestoreResult.restoredTextNodeCount,
@@ -3461,6 +3468,72 @@ ${style}`;
     }
     return count;
   }
+  function collectLibraryMasterNodes(session, layers) {
+    for (const id in layers) {
+      const record = layers[id];
+      if (!record || !record.libraryMaster) continue;
+      const parentId = record.parentId;
+      if (parentId && layers[parentId] && layers[parentId].libraryMaster) continue;
+      let node = session.restoredNodeById[id];
+      if (!node) {
+        for (const childId of record.childIds || []) {
+          const childNode = session.restoredNodeById[childId];
+          const childParent = childNode && !childNode.removed ? childNode.parent : null;
+          if (childParent && childParent.type !== "PAGE" && childParent.type !== "DOCUMENT") {
+            node = childParent;
+            break;
+          }
+        }
+      }
+      if (!node || node.removed) continue;
+      session.libraryMasterNodes.push(node);
+      session.libraryMasterLayerCount += 1 + countRecordDescendants(record, layers);
+    }
+  }
+  function removeLibraryMasterNodes(session) {
+    let removed = 0;
+    for (const node of session.libraryMasterNodes) {
+      if (!node || node.removed) continue;
+      safeRemove(node);
+      removed++;
+    }
+    session.libraryMasterNodes = [];
+    if (removed > 0) console.info("[mg-instance] removed library masters:", removed);
+    return removed;
+  }
+  function paintFilledMaskTwins(session) {
+    let added = 0;
+    const hasVisiblePaint = (paints) => Array.isArray(paints) && paints.some((paint) => paint && paint.visible !== false && (paint.opacity === void 0 || paint.opacity > 0));
+    const visit = (node) => {
+      if (node.type === "INSTANCE") return;
+      if ("children" in node) for (const child of [...node.children]) visit(child);
+      const nodeAny = node;
+      if (nodeAny.isMask !== true) return;
+      if (!hasVisiblePaint(nodeAny.fills) && !hasVisiblePaint(nodeAny.strokes)) return;
+      const parent = node.parent;
+      if (!parent || !("insertChild" in parent)) return;
+      try {
+        const twin = node.clone();
+        twin.isMask = false;
+        const index = parent.children.indexOf(node);
+        parent.insertChild(index >= 0 ? index : 0, twin);
+        twin.relativeTransform = node.relativeTransform;
+        if (Math.abs(twin.x - node.x) > 0.01 || Math.abs(twin.y - node.y) > 0.01) {
+          console.warn(
+            "[mg-mask] twin did not land on its mask:",
+            node.name,
+            `twin=(${twin.x},${twin.y}) mask=(${node.x},${node.y})`
+          );
+        }
+        added++;
+      } catch (error) {
+        console.warn("Unable to paint filled mask:", node.name, error);
+      }
+    };
+    for (const page of session.restoredPages) for (const child of [...page.children]) visit(child);
+    if (added > 0) console.info("[mg-mask] painted filled masks:", added);
+    return added;
+  }
   function applyInstanceChildOverrides(instance, record, layers, rescaled) {
     return __async(this, null, function* () {
       const pairs = [];
@@ -3534,8 +3607,54 @@ ${style}`;
           } catch (error) {
           }
         }
+        if (props.layout && "layoutMode" in node && INSTANCE_LAYOUT_OVERRIDE_KEYS.some((key) => typeof props.layout[key] === "number")) {
+          pendingInstanceLayoutOverrides.push({ node, layout: props.layout });
+        }
       }
     });
+  }
+  var pendingInstanceLayoutOverrides = [];
+  var INSTANCE_LAYOUT_OVERRIDE_KEYS = ["itemSpacing", "paddingLeft", "paddingRight", "paddingTop", "paddingBottom"];
+  function flushInstanceChildLayoutOverrides(final) {
+    let applied = 0, deferred = 0, rejected = 0;
+    const keep = [];
+    for (const entry of pendingInstanceLayoutOverrides) {
+      const node = entry.node;
+      if (!node || node.removed) continue;
+      if (node.layoutMode === "NONE" || node.layoutMode === void 0) {
+        keep.push(entry);
+        deferred++;
+        continue;
+      }
+      keep.push(entry);
+      for (const key of INSTANCE_LAYOUT_OVERRIDE_KEYS) {
+        const want = entry.layout[key];
+        if (typeof want !== "number" || !isFinite(want)) continue;
+        if (Math.abs(node[key] - want) <= 0.01) continue;
+        try {
+          node[key] = want;
+        } catch (error) {
+          rejected++;
+          console.warn("[mg-instance] auto-layout override rejected:", node.name, key, error);
+          continue;
+        }
+        if (Math.abs(node[key] - want) > 0.01) {
+          rejected++;
+          console.warn("[mg-instance] auto-layout override did not stick:", node.name, key, "got", node[key], "wanted", want);
+          continue;
+        }
+        applied++;
+      }
+    }
+    pendingInstanceLayoutOverrides.length = 0;
+    if (!final) for (const entry of keep) pendingInstanceLayoutOverrides.push(entry);
+    if (applied || deferred || rejected) {
+      console.info(
+        "[mg-instance] instance-child auto-layout overrides:",
+        JSON.stringify({ pass: final ? "finalize" : "page", applied, deferred, rejected, queued: keep.length })
+      );
+    }
+    return applied;
   }
   function comparablePaintKey(paints) {
     if (!Array.isArray(paints)) return null;

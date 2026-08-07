@@ -223,3 +223,40 @@ test("container meta padding spellings: explicit, empty object, absent object", 
   assert.equal(m3.subtype, "BOOLEAN_OPERATION");
   assert.equal(m3.paddingsMissing, true);
 });
+
+// The plugin UI converts .mg with { slimInstanceDescendants: true } to survive
+// large files, so instance-descendant records reach applyInstanceChildOverrides
+// STRIPPED. The compare tool converts unslimmed and is blind to that — this is
+// the only check that the keep-list still covers what the matcher reads.
+// (Regression: auto-layout spacing was dropped, so the 0806 tab bar rendered
+// the component's gap 38 / padding 40 instead of the instance's 20 / 24.)
+test("instance-descendant slimming keeps every field the override matcher reads", () => {
+  const slim = __test.slimInstanceDescendantProps({
+    type: "FRAME", sourceType: "FRAME", restoreType: "FRAME", name: "组 370",
+    characters: "生活", booleanOperation: null, shellPlaceholder: true,
+    scence: { visible: false, locked: false },
+    blend: { opacity: 0.4, isMask: false, blendMode: "NORMAL", effects: [] },
+    geometry: { fills: [{ type: "SOLID" }], strokes: [{ type: "SOLID" }], strokeWeight: 3 },
+    layout: {
+      x: 1, y: 2, width: 3, height: 4, relativeTransform: [[1, 0, 1], [0, 1, 2]], rotation: 0,
+      itemSpacing: 20, paddingLeft: 24, paddingRight: 24, paddingTop: 24, paddingBottom: 0,
+      layoutMode: "HORIZONTAL"
+    },
+    vectorNetwork: { segments: [], vertices: [] }
+  });
+
+  assert.equal(slim.scence.visible, false);
+  assert.equal(slim.blend.opacity, 0.4);
+  assert.equal(slim.characters, "生活");
+  assert.equal(slim.geometry.fills.length, 1);
+  assert.equal(slim.geometry.strokes.length, 1);
+  for (const [key, want] of Object.entries({
+    itemSpacing: 20, paddingLeft: 24, paddingRight: 24, paddingTop: 24, paddingBottom: 0,
+    x: 1, y: 2, width: 3, height: 4
+  })) {
+    assert.equal(slim.layout[key], want, `layout.${key} must survive slimming`);
+  }
+  // Still slim: the payload that OOMs large files must NOT come back.
+  assert.equal(slim.vectorNetwork, undefined);
+  assert.equal(slim.geometry.strokeWeight, undefined);
+});

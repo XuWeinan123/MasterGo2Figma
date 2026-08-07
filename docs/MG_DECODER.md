@@ -42,6 +42,20 @@ MasterGo's share/partial `.mg` differs structurally from full editor exports:
   tag `26`, an ABSOLUTE accumulated float; absent = unscaled). Size-like scalars (strokeWeight,
   corners, fontSize, dash, effect radii, VN coordinates) scale the same way — but only values
   INHERITED from the template; values read from a node's own record are final.
+- **Trailer tag `26` is an AMBIENT scale, not an "instance" scale** (2026-08-06, 汇总 fixture).
+  It appears on ORDINARY nodes too: every node under the 750→404 scaled frame `首页普通版`
+  carries `26 = 0.538667`, root frame included. It says "this record lives in a coordinate
+  space scaled by S" — nothing more. A plain node's own scalars are already final, so applying
+  it there is simply wrong; it is only the multiplier for values BORROWED from somewhere at a
+  different ambient scale (a component template). Consequences, all learned the hard way:
+  - `mgNativeProps` must read `n.effScale` alone. The old `effScale || trailer.scaleFactor || 1`
+    fallback shrank every vectorNetwork, default strokeWeight and blur radius on that frame by
+    0.539 (4 600 deep-diff rows).
+  - A SYNTHESIZED instance child copies every key off the template — trailer included — so its
+    `26` is the ambient scale INSIDE THE COMPONENT (`核心功能 2` stores 1.111). Only a REAL
+    override record's `26` describes the clone. `mgExpandTemplateInstances` gates on that.
+  - The effective scale for a clone is the INSTANCE's ambient, not the template's, and not the
+    product of the two: `核心功能 2`'s corners are template 16 → 8.62 (× 0.539), never × 1.111.
 - **Component trees contain their own nested-instance override records** (`2:0748/2:0018`),
   which take precedence over the raw template child during expansion.
 - Slot-positional fields (constraints, visibility) inherit from the template CHILD (the id's
@@ -69,7 +83,10 @@ Fields cracked with this fixture (all in `mgWalkScalarFields` / record grammar b
   entirely; blur kinds used to default 0 and lose the style radius). Kind enum (0712-3):
   **0=INNER_SHADOW (zero-compressed → the whole `05` field is OMITTED), 1=DROP_SHADOW,
   2=LAYER_BLUR, 3=BACKGROUND_BLUR**; `0f` is a second spread spelling (spread 1/−2/−4 all
-  use it — an unknown-tag bail there used to drop whole effect lists). Tag 17 doubles as the
+  use it — an unknown-tag bail there used to drop whole effect lists). **`11 <b>`** is a third
+  one-byte flag of unknown meaning (always `01` in the 汇总 fixture, 20/20 occurrences spelled
+  `11 01 18 …`, i.e. consuming it lands exactly on the `18` terminator) — bailing on it dropped
+  40 blurs, the same failure mode as `0f` in 2026-07-12. Tag 17 doubles as the
   legacy corner-style ref in full exports — only treat as corner when it resolves to no effects;
 - paint records: `09 <f>` = paint **opacity**; gradients may omit the handle fields
   (default = vertical top→bottom); image scaleMode enum `2=TILE 3=CROP` plus **4=TILE**
@@ -341,6 +358,94 @@ styledTextSegments than the materialized control, 1 node-level fontName covered 
 - Records may omit the `02` parent field entirely (`01 <id> 00 03 <code> …`); parent falls
   back to the `1b` owner token, which is how page roots attach to the page.
 
+## Library-master copies & instance-child inheritance — CRACKED ✓ (2026-08-05, 可同步测试集 0806)
+Fixture `可同步测试集/插件测试 汇总.mg` + `mastergo2figma-partial-pages-2026-08-06…zip` (2 pages:
+the old coverage demo 344/344 and a new real screen `0806` 102 records). Findings:
+
+- **Paint opacity has TWO spellings.** Field `08 <a><r><g><b>` — the ALPHA channel IS the paint
+  opacity in most records (`08 <0.1> <1> <0> <0>` = red @10%); the standalone `09 <f>` field is
+  the other spelling. A default-1 `09` must never overwrite the alpha — doing so flattened every
+  translucent fill/stroke on the page (51 paints) to fully opaque.
+- **Scalar tag `17` is the EFFECT-STYLE ref, full stop.** The old "resolves to no effects ⇒ corner
+  radius 10" fallback was a leftover from before the style library was cracked: on 0806 half the
+  page points tag 17 at the style-library root (an effect style with no children), and all 29
+  nodes it hit are radius 0. Corner radius only ever comes from the RECTANGLE object, the
+  container `04 04` per-corner array, or vertex radii.
+- **blendMode byte `0xff` = NORMAL** (omitted = PASS_THROUGH; `0f` = LUMINOSITY etc. unchanged).
+  Cross-tab: 6/6.
+- **Sort codes are NOT `[0-9A-Za-z]`.** `a!` and `a ` (trailing space) both occur. The node
+  scanner already used `[^\x00]+`; the paint / effect / font-style / style-def scanners did not,
+  so those registry records were silently skipped (2 text nodes lost their whole style entry).
+- **Font-style entry: field `03` is the DISPLAY family, field `0c` the PostScript name.** Only the
+  STYLE comes from the PostScript name — deriving the family from it too yielded `PingFangSC` /
+  `InstrumentSerif` and sent those runs to the fallback font. Field 03 can repeat the style suffix
+  (`Noto Sans SC-Medium`, 0804 fixture) — strip it. When 0c is absent the two strings are equal
+  and the PostScript split stays authoritative (`Roboto-Regular` → Roboto/Regular); an entry with
+  neither a display family nor a run font string is reported verbatim by MasterGo itself
+  (`SFProText-Semibold` / Regular — one accepted residual).
+- **Container field `07 03 <libraryFileId+nodeId>` = an EXTERNAL library component master**;
+  `07 04 <varint>` = a local one. Cross-tab on the fixture: 22/22 (7 library masters, all absent
+  from MasterGo's own page traversal; 15 local ones, all present). The decoder marks those records
+  `libraryMaster` and still emits them as page roots — instances need them alive to re-link — and
+  the importer removes them in its cleanup phase, so they never show up on the Figma canvas.
+- **Container field `1a <b>`** — unknown one-byte flag on auto-layout frames. Consuming it is what
+  makes the object terminator (and therefore the ANCHORED record trailer) reachable at all.
+- **Trailer `20 <float>` = layoutGrow** ("fill container"). Cross-tab: 7/7 present ⇒ 1, 439/439
+  absent ⇒ 0. Trailer fields `20`/`21`/`22` carry ZERO-COMPRESSED FLOATS, not one-byte values —
+  stepping over them 2 bytes at a time landed mid-float and truncated the walk, losing the 21/22
+  sizing markers behind it.
+- **A slash id IS a template link.** `24:706/24:665` overrides `24:665` whether or not the record
+  also carries a tag-`1a` ref; requiring the explicit ref left every stub of an instance whose
+  master has no 1a chain (an external-library status bar) with none of the component's
+  strokeAlign / constraints / layout / vectorNetwork values (133 diff rows on one instance).
+- **Container-meta fields an instance-child stub OMITS belong to the template child.** The stub
+  spells out only what the instance overrode: the 0806 tab bar carries its own itemSpacing 20 and
+  padding 24 but no layoutMode / align / clipsContent, and the status-bar group stubs carry no
+  padding at all — which the full-export "missing means 10" rule then invented.
+- **An unnamed instance of a VARIANT is named after the component SET**, not the variant slot
+  (`标签栏`, not `属性 1[a5]=首页`). Instances with their own name keep it (12/12).
+- **The VECTOR object's geometry hash can sit behind a `04 <float>`** (`1c 01 04 <f> 07 <32-hex>`)
+  — the same unknown scalar the TEXT object carries. Bailing on it dropped the node's whole
+  vectorNetwork, i.e. an invisible layer on canvas (0806 tab-bar `logo`).
+- **Font runs spell an empty font string as `06 00`.** Only `06 01 <string>` was consumed, so `p`
+  stayed parked on the `06`, the next run's `01` tag never matched, and the whole multi-run parse
+  bailed to the legacy single-string fallback — the status bar's two runs (`9:4` + `1`) came back
+  as just `1`. Consume `06 00` like the other explicit-empty spellings.
+- **The scalar `19` override mask is a full 64-bit LEB128** — library-bearing exports write NINE
+  bytes. `mgReadVarint`'s 35-bit guard returned NaN, the scalar walk broke there, and EVERY field
+  behind it was silently lost: `1a` templateRef, `1b` owner, the whole tail. On the 0806 tab bar
+  that cost the row its template link; on the 大文件 fixture it cost 6 records their page
+  reachability. Only the low bits are ever tested and float accumulation rounds them away past
+  2^53, so accumulate the low 32 bits with integer ops.
+- **An instance shell MERGES its component's container meta, it does not adopt it.** Taking the
+  component's meta wholesale threw away the instance's own explicit-zero padding/spacing, which
+  then came back as the runtime default 10. Merge per field (`mgFillContainerMeta`), and remember
+  which side each value came from: the instance's own values are FINAL, only borrowed ones still
+  take the instance scale (a rescaled instance's padding 11.62 was otherwise scaled twice).
+- **A stub whose trailer mentions neither `21` nor `22` said nothing about sizing** — the
+  component's markers stand. Cross-tab: the only stub in that state (0806 tab-bar row) is
+  FIXED/AUTO in the baseline, exactly its template's markers; stubs where both sides are silent
+  (20 rows) are unaffected.
+- **MasterGo PAINTS a mask layer's own fill; Figma's masks only contribute alpha.** Both the .mg
+  and the zip carry `isMask: true` on the tab bar's gradient circle (圆形 865), so this is a
+  renderer-semantics gap, not a decode gap — the circle simply vanished on import either way.
+  `paintFilledMaskTwins` (importer, session finalize) inserts a plain non-mask twin directly
+  BELOW each filled mask: the mask still clips the siblings above it, the twin supplies the paint.
+  It runs after every instance is created and override-matched, so adding the twin to a COMPONENT
+  propagates into its instances by itself. Fixture census: 2 filled masks per import.
+- **Instance-child auto-layout spacing must be replayed AFTER the deferred layout pass.**
+  `applyDeferredLayoutRestores` gives the COMPONENT side its `layoutMode`, and it runs *after*
+  instances are created — so assigning `itemSpacing`/`padding*` inside
+  `applyInstanceChildOverrides` hits nodes that are still `layoutMode: "NONE"` and silently
+  no-ops. The overrides are queued there and flushed by `flushInstanceChildLayoutOverrides()`
+  right after the deferred pass (0806 tab bar: without the flush the five items keep the
+  component's 103.6 instead of the instance's 124.4 — a visible ~20%/item error).
+- **Instance-child auto-layout spacing is an OVERRIDE, not component state.** The 0806 tab bar's
+  child frame stores gap 20 / padding 24 against the component's 38 / 40 — which is exactly what
+  makes its five grow items 124.4 wide instead of 103.6. Figma allows overriding those on instance
+  sublayers, so `applyInstanceChildOverrides` now replays itemSpacing/padding positionally
+  (individually guarded, like the paint overrides beside it).
+
 ## Number codec — CRACKED ✓ (verified both directions)
 - decode([s0,s1,s2,s3]): `S=[s0,s3,s2,s1]`; `value = float32_be( rotr1(uint32_be(S)) )` (rotate
   keeps the sign bit; see `mgDecFloat`).
@@ -362,7 +467,15 @@ Tagged field stream; field ids increase within an object, reset inside nested ob
 null-terminated. Native node record, top-level fields in order:
 - `01` <recId> — NON-annotated: recId == real/zip node id. Annotated carrier: name starts `[PROPS]`.
 - `02` <parentId> — first `02` after recId; omitted for page-level roots (owner used instead).
-- `03` <sortCode> — fractional index; sibling order = lexicographic.
+- `03` <sortCode> — fractional index; sibling order = lexicographic. **PRINTABLE ASCII only**
+  (base-95 key, 2–5 chars: `a0`, `a;`, `a P`, `a!`). The 2026-08-05 widening to `[^\x00]+` — made
+  to admit `a!`/`a ` — was too loose: the file also carries an **id-link table**
+  `01 <id> 00 02 <id> 00 03 <01|03> 04 01 05 <id>:6:<n> 00 00` whose `03` is a ONE-BYTE ENUM with
+  no NUL behind it, so a greedy code swallowed the trailing `…:6:1` string and minted 38 phantom
+  records. Each phantom's "id" was exactly the clone id an instance child needed, so
+  `mgExpandTemplateInstances` reused the typeless phantom instead of synthesizing, and
+  `subtreeOf`'s `!nodes[id].type` gate dropped it plus its whole subtree — 255 records, four
+  blocks (容器 359 / 容器 537145 / 特色服务 / 容器 537143) blank on the canvas.
 - `04` <string> — name (TEXT keeps characters in the nested `05` run blob).
 - Scalar enum/flag fields between name and the type tag — CRACKED ✓ (`mgWalkScalarFields` walks
   them sequentially, which is immune to the payload/tag-byte collision below):
@@ -389,6 +502,12 @@ null-terminated. Native node record, top-level fields in order:
 - `18 01 <x4> [02 <y4>] [03 <m00> 04 <m11> 05 <m01> 06 <m10>]` — transform. Matrix fields are
   **optional with defaults** m00=m11=1, m01=m10=0 (a 180°-rotated group stores only `03 <-1.0>`).
   `18 02 <y4>` stores Y only when X is 0. Normalize rotation +180 → -180 (Figma convention).
+  **`rotation = atan2(-m10, m00)`** — the FIRST COLUMN, i.e. the image of the x axis
+  (`mgRotationFromMatrix`). The first-row form `atan2(m01, m00)` gives the same answer for a
+  pure rotation, where `m01 == -m10`, and only for that: MasterGo also stores plain SKEWS.
+  `预存电费送积分` (`[[1,-0.141],[0,0.990]]`) got an invented −8.02° and `路径 1737`
+  (`[[0.998,0],[-0.069,1]]`) got 0° where the baseline says 3.94° — 36 rows and 6 000 vector
+  coordinates rode on the second one, because the wrong rotation came with the wrong scale.
 - `1b` <id> = owner (page id in native records).
 - `1c` <typeByte> + nested object: 1=VECTOR, 2=LINE, 3=RECTANGLE, 4=ELLIPSE, 5=POLYGON, 6=STAR,
   7=container, 8=TEXT, 10=SLICE.
@@ -631,7 +750,17 @@ Paint child record body (after `01 <id> 00 02 <ref> 00 03 <sort> 00`), see `mgPa
 - `0b { 01 <scaleMode: 0=FILL 1=FIT 2=CROP? 3=TILE?> 02 <ratio> 03 <image path> 00
   04 { <crop rect floats> } 07 <w> 08 <h> } 00` — image paint guts. imageRef = path basename
   (content-hash filename, resolves through `manifest.assets` and `images/`).
-- `0c <b> 0d <b>` trailer flags; `00` end.
+- `0c <b>` trailer flag; `00` end.
+- **`0d { <bitfield> <float> … } 00` = image adjustments** (2026-08-06, 汇总 fixture). Field ids
+  are BITS, not a counter: `01` contrast, `02` exposure, `04` saturation, `08` hue — Figma's
+  remaining filters (temperature/tint/highlights/shadows) are the higher bits, unobserved so far.
+  Values are signed, roughly [−1, 1]. This was read as a one-byte flag for a year and never
+  failed, because an unadjusted paint spells it `0d 00` (empty object) and the flag reading
+  consumes the same two bytes by accident. The first paint with a real adjustment made the walk
+  land inside the float payload → unknown tag → **the whole paint was discarded**, so three
+  retouched photos on the 汇总 page imported with no fill at all. Non-power-of-two field ids are
+  the tell that a record is not a paint at all (garbage records reach the object with id `0x24`),
+  so the parser rejects them.
 - A paint-shaped record with **no color and no kind** (only the empty gradient/trailer shell) is
   MasterGo's **default fill**: SOLID #D8D8D8 (float32 216/255) — seen on mask rectangles.
 

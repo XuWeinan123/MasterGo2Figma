@@ -55,6 +55,13 @@ type ImportSession = {
   // sort can't reorder those). They restore as frame shells first and get
   // swapped for real instances after the page finishes.
   deferredInstanceRelinks: { id: string; node: SceneNode }[];
+  // Off-canvas shared-library component masters (record.libraryMaster). They
+  // are restored so instances can re-link, then removed once every page has
+  // finished relinking — MasterGo does not show them on its canvas either.
+  libraryMasterNodes: SceneNode[];
+  // Layers those masters account for, so the result count reports what is
+  // actually left on the canvas.
+  libraryMasterLayerCount: number;
   // library style ref (prefixed .mg style record id) → created Figma style id
   // (native .mg imports ship a styles.json payload; records reference styles
   // via fillStyleRef/strokeStyleRef/effectStyleRef/textStyleRef)
@@ -280,6 +287,8 @@ async function startImportSession(message: any) {
     clientTimings: message.clientTimings || null,
     restoredNodeById: {},
     deferredInstanceRelinks: [],
+    libraryMasterNodes: [],
+    libraryMasterLayerCount: 0,
     figmaStyleIdByRef: {}
   };
 
@@ -636,6 +645,7 @@ async function restoreImportPageData(importPage: ImportPageIndex, layers: { [id:
   const relinkStartedAt = Date.now();
   await retryDeferredInstanceRelinks(layers);
   addImportTiming(session, "restore.deferredRelinkMs", Date.now() - relinkStartedAt);
+  collectLibraryMasterNodes(session, layers);
 
   await reportPagePostprocessProgress(session, pageIndex, postprocessStart, pageNodeCount, 0, 0, 1);
   const layoutStartedAt = Date.now();
@@ -643,6 +653,7 @@ async function restoreImportPageData(importPage: ImportPageIndex, layers: { [id:
     return reportPagePostprocessProgress(session, pageIndex, postprocessStart, pageNodeCount, 0, done, total);
   });
   addImportTiming(session, "postprocess.deferredLayoutMs", Date.now() - layoutStartedAt);
+  flushInstanceChildLayoutOverrides(false);
   const cleanupStartedAt = Date.now();
   await cleanupImportedContainerShells(restoredPage, (done, total) => {
     return reportPagePostprocessProgress(session, pageIndex, postprocessStart, pageNodeCount, 1, done, total);
@@ -715,6 +726,15 @@ async function completeImportSession(message: any) {
     addImportTiming(session, "finalize.missingFontsMs", Date.now() - missingFontStartedAt);
     postFinalizeProgress(session, 2, 4);
 
+    // Re-assert instance-sublayer auto-layout overrides now that every page's
+    // deferred layout has settled (see flushInstanceChildLayoutOverrides), give
+    // filled mask layers back their paint, then drop the off-canvas library
+    // masters now that every page has re-linked its instances (Figma keeps
+    // instances of a removed component working).
+    flushInstanceChildLayoutOverrides(true);
+    paintFilledMaskTwins(session);
+    removeLibraryMasterNodes(session);
+
     const viewportStartedAt = Date.now();
     if (session.restoredPages.length > 0) {
       await figma.setCurrentPageAsync(session.restoredPages[0]);
@@ -727,7 +747,7 @@ async function completeImportSession(message: any) {
       type: "complete",
       transferId: session.transferId,
       pageCount: session.restoredPages.length,
-      layerCount: session.restoredNodes,
+      layerCount: session.restoredNodes - session.libraryMasterLayerCount,
       missingImageAssetCount: state.missingImageAssetCount,
       fallbackConnectorCount: state.fallbackConnectorCount,
       restoredMissingFontTextNodeCount: missingFontRestoreResult.restoredTextNodeCount,
@@ -1250,6 +1270,102 @@ function countRecordDescendants(record: ImportLayerRecord, layers: { [id: string
   return count;
 }
 
+// Off-canvas copies of shared-library component masters (.mg container field
+// `07 03 <libraryFileId+nodeId>`). MasterGo keeps them outside its own page
+// traversal, so they must not end up on the Figma canvas — but instances need
+// them alive while re-linking, so they are queued here and removed once the
+// whole session has finished (see removeLibraryMasterNodes).
+function collectLibraryMasterNodes(session: ImportSession, layers: { [id: string]: ImportLayerRecord }): void {
+  for (const id in layers) {
+    const record = layers[id];
+    if (!record || !record.libraryMaster) continue;
+    const parentId = record.parentId;
+    if (parentId && layers[parentId] && layers[parentId].libraryMaster) continue; // nested variant: the root takes it
+    // A COMPONENT_SET is rebuilt by figma.combineAsVariants (or kept as a frame
+    // fallback) and never lands in restoredNodeById — in both spellings the
+    // restored variants' PARENT is the node standing for this record.
+    let node = session.restoredNodeById[id];
+    if (!node) {
+      for (const childId of record.childIds || []) {
+        const childNode = session.restoredNodeById[childId];
+        const childParent = childNode && !childNode.removed ? childNode.parent : null;
+        if (childParent && childParent.type !== "PAGE" && childParent.type !== "DOCUMENT") {
+          node = childParent as SceneNode;
+          break;
+        }
+      }
+    }
+    if (!node || node.removed) continue;
+    session.libraryMasterNodes.push(node);
+    session.libraryMasterLayerCount += 1 + countRecordDescendants(record, layers);
+  }
+}
+
+function removeLibraryMasterNodes(session: ImportSession): number {
+  let removed = 0;
+  for (const node of session.libraryMasterNodes) {
+    if (!node || node.removed) continue;
+    // A variant is removed together with its set; skip whatever already went.
+    safeRemove(node);
+    removed++;
+  }
+  session.libraryMasterNodes = [];
+  if (removed > 0) console.info("[mg-instance] removed library masters:", removed);
+  return removed;
+}
+
+// MasterGo PAINTS a mask layer's own fill; a Figma mask only contributes alpha,
+// so a filled mask — the gradient circle sitting behind the tab-bar logo — just
+// disappears on import (both the .mg and the zip carry `isMask: true`, so this
+// is a renderer-semantics gap, not a decode gap). Reproduce the MasterGo render
+// by inserting a plain, non-mask twin directly BELOW each filled mask: the mask
+// still clips the siblings above it, the twin supplies the paint.
+//
+// Runs at session finalize so it happens after every instance has been created
+// and positionally override-matched — adding the twin to a COMPONENT then
+// propagates into its instances on its own.
+function paintFilledMaskTwins(session: ImportSession): number {
+  let added = 0;
+  const hasVisiblePaint = (paints: any): boolean =>
+    Array.isArray(paints) && paints.some((paint: any) =>
+      paint && paint.visible !== false && (paint.opacity === undefined || paint.opacity > 0));
+
+  const visit = (node: SceneNode) => {
+    // Instance children are locked; their component already got the twin.
+    if (node.type === "INSTANCE") return;
+    if ("children" in node) for (const child of [...(node as ChildrenMixin).children]) visit(child);
+    const nodeAny = node as any;
+    if (nodeAny.isMask !== true) return;
+    if (!hasVisiblePaint(nodeAny.fills) && !hasVisiblePaint(nodeAny.strokes)) return;
+    const parent = node.parent;
+    if (!parent || !("insertChild" in parent)) return;
+    try {
+      const twin = (node as any).clone() as SceneNode;
+      (twin as any).isMask = false;
+      const index = parent.children.indexOf(node);
+      parent.insertChild(index >= 0 ? index : 0, twin);
+      // clone() parents the copy under figma.currentPage and insertChild
+      // re-interprets its x/y against the new parent — and inserting into a
+      // GROUP re-normalizes every sibling's coordinates on top of that. Re-anchor
+      // the twin onto the mask AFTER insertion, when the two finally share a
+      // parent and a coordinate space (0806 tab bar: the circle otherwise lands
+      // 14px left of the mask it duplicates).
+      (twin as any).relativeTransform = (node as any).relativeTransform;
+      if (Math.abs(twin.x - node.x) > 0.01 || Math.abs(twin.y - node.y) > 0.01) {
+        console.warn("[mg-mask] twin did not land on its mask:", node.name,
+          `twin=(${twin.x},${twin.y}) mask=(${node.x},${node.y})`);
+      }
+      added++;
+    } catch (error) {
+      console.warn("Unable to paint filled mask:", node.name, error);
+    }
+  };
+
+  for (const page of session.restoredPages) for (const child of [...page.children]) visit(child);
+  if (added > 0) console.info("[mg-mask] painted filled masks:", added);
+  return added;
+}
+
 // Positional override application: walk the instance's real children next to
 // the record tree; on any structural drift (count mismatch) skip that subtree
 // — the component state is still a faithful base. Only override-safe
@@ -1339,7 +1455,76 @@ async function applyInstanceChildOverrides(
         }
       } catch (error) { /* not overridable */ }
     }
+    // Auto-layout spacing/padding is overridable on instance sublayers and
+    // MasterGo stores the instance's own value on the child record (0806 tab
+    // bar: gap 20 / padding 24 against the component's 38 / 40, which is what
+    // makes its five items 124.4 wide instead of 103.6). It cannot be applied
+    // HERE: the component side gets its auto-layout from
+    // applyDeferredLayoutRestores, which runs after instances are created, so
+    // right now every one of these nodes is still layoutMode NONE and the
+    // assignment would silently no-op. Queue it for the post-layout flush.
+    if (props.layout && "layoutMode" in node &&
+        INSTANCE_LAYOUT_OVERRIDE_KEYS.some(key => typeof props.layout[key] === "number")) {
+      pendingInstanceLayoutOverrides.push({ node: node, layout: props.layout });
+    }
   }
+}
+
+// See applyInstanceChildOverrides: instance-sublayer spacing has to land after
+// the deferred auto-layout pass has given the component side a layoutMode.
+const pendingInstanceLayoutOverrides: Array<{ node: SceneNode; layout: any }> = [];
+// Must stay in sync with MG_SLIM_LAYOUT_KEYS in src/ui/mgPackage.js — the UI
+// converts .mg with slimInstanceDescendants, so anything not on that keep-list
+// arrives here as undefined and the override silently never happens.
+const INSTANCE_LAYOUT_OVERRIDE_KEYS = ["itemSpacing", "paddingLeft", "paddingRight", "paddingTop", "paddingBottom"];
+
+// Runs TWICE: once per page right after the deferred layout pass, then again at
+// session finalize. The retry is not belt-and-braces — writing the component's
+// layoutMode makes Figma re-push the component's spacing onto every instance,
+// and that push lands after this synchronous write, silently restoring the
+// component's gap. The finalize pass re-checks once everything has settled.
+// Idempotent by construction: it only writes values that differ.
+function flushInstanceChildLayoutOverrides(final: boolean): number {
+  let applied = 0, deferred = 0, rejected = 0;
+  const keep: Array<{ node: SceneNode; layout: any }> = [];
+  for (const entry of pendingInstanceLayoutOverrides) {
+    const node = entry.node as any;
+    if (!node || node.removed) continue;
+    // The component side gets its layoutMode from applyDeferredLayoutRestores;
+    // until that has run, writing spacing here is a no-op. Retry at finalize.
+    if (node.layoutMode === "NONE" || node.layoutMode === undefined) {
+      keep.push(entry);
+      deferred++;
+      continue;
+    }
+    keep.push(entry);
+    for (const key of INSTANCE_LAYOUT_OVERRIDE_KEYS) {
+      const want = entry.layout[key];
+      if (typeof want !== "number" || !isFinite(want)) continue;
+      if (Math.abs(node[key] - want) <= 0.01) continue;
+      try {
+        node[key] = want;
+      } catch (error) {
+        rejected++;
+        console.warn("[mg-instance] auto-layout override rejected:", node.name, key, error);
+        continue;
+      }
+      // Assignment can be silently ignored on a locked sublayer — verify.
+      if (Math.abs(node[key] - want) > 0.01) {
+        rejected++;
+        console.warn("[mg-instance] auto-layout override did not stick:", node.name, key, "got", node[key], "wanted", want);
+        continue;
+      }
+      applied++;
+    }
+  }
+  pendingInstanceLayoutOverrides.length = 0;
+  if (!final) for (const entry of keep) pendingInstanceLayoutOverrides.push(entry);
+  if (applied || deferred || rejected) {
+    console.info("[mg-instance] instance-child auto-layout overrides:",
+      JSON.stringify({ pass: final ? "finalize" : "page", applied, deferred, rejected, queued: keep.length }));
+  }
+  return applied;
 }
 
 // Canonical key for a paint list, tolerant of float noise; null = not

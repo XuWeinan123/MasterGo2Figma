@@ -285,6 +285,10 @@ export type ImportLayerRecord = {
     // Record id of the component this record is an instance of (native .mg
     // imports only). The importer re-links it via component.createInstance().
     mainComponentId?: string;
+    // Off-canvas copy of a shared-library component master (native .mg only).
+    // Restored so instances can re-link, then removed in the cleanup phase —
+    // MasterGo never shows it on its own canvas either.
+    libraryMaster?: boolean;
     // MasterGo instance uniform scale (trailer 26). Figma instance children
     // are geometry-locked to the component, so the importer replays this via
     // InstanceNode.rescale().
