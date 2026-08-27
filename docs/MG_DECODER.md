@@ -464,6 +464,78 @@ the old coverage demo 344/344 and a new real screen `0806` 102 records). Finding
   sublayers, so `applyInstanceChildOverrides` now replays itemSpacing/padding positionally
   (individually guarded, like the paint overrides beside it).
 
+## 临时测试 fixture pass (2026-08-26) — fonts / corners / paint blend / export settings
+Fixture `测试集/临时测试/临时测试.mg` + `mastergo2figma-partial-pages-2026-08-26T08-20-53-958Z.zip`
+(editor export with share-style slash overrides; 788 baseline records + 124 library masters).
+Result: deep-prop 1304 → 60, font 166 → 4, geometry/transform/index → 0. Findings:
+
+- **Text-style entry family/psName strings contain DOTS** ("Alibaba PuHuiTi 3.0",
+  "ReeJi-BigRuixain-BlackGBV1.0"). The `[A-Za-z0-9 +-]` validation regexes rejected them and
+  dropped 22 of the 27 entries — with them every fontSize/lineHeight/letterSpacing/weight on
+  those texts (the single biggest visual break: 16px default text overflowing 11px boxes).
+- **Entry field `12` can be a JSON blob** `{"fontStyle":"65 Medium","opsz":"auto"}`. The
+  fontStyle is MasterGo's UI display name and is authoritative ONLY when it names the same
+  style as the psName modulo spacing ("65 Medium" vs `…-65Medium` → use the JSON spacing,
+  verbatim, no camel-case pass). A localized alias ("中黑体" where the psName says Medium)
+  is NOT what the plugin API reports — the psName's English style wins (0806 cross-tab:
+  20 PingFang rows English; the 2 CKTKingKong rows where the API really says 粗体 stay the
+  known residual).
+- **Entry field `0f` spells a MISSING font-file hash as the sentinel `EMPTYHASHFFFFFFF`** —
+  consume it (bailing hid field 12 behind it) but only real hex marks a computed entry.
+- **Style-DEFINITION records may carry a `04 <name>` field** between the sort code and the
+  `05 <kind>` byte (`01 3:0642 00 02 中文 /正文/… 00 03 Z| 00 04 中文 00 05 03 …`) — the
+  scanner regex accepts the optional 04.
+- **fontWeight for numbered CJK style names**: strip the numeric weight-class prefix and
+  trailing `L<n>` token before the weight lookup ("65 Medium" → 500, "55 Regular L3" → 400).
+  Texts whose font MasterGo itself could not resolve export fontWeight **0** in the baseline
+  (FF DIN Pro / ReeJi rows) — no package-side signal, accepted residual (ours is truer).
+- **RECTANGLE `1c 03 01 04` introduces a PER-CORNER array** of 4 zero-compressed floats
+  [topLeft, topRight, bottomLeft, bottomRight]; mixed values export per-corner radii with the
+  `cornerRadius: -1` sentinel. The old single-raw-float read only survived uniform rectangles —
+  a zero-compressed first corner (`00`) landed it mid-payload and minted denormal garbage
+  (2.31e-41). Template inheritance carries the array like the uniform radius.
+- **Trailer `24 <float>` = cornerSmoothing** (0.6 squircles). Emitted for RECTANGLE-family
+  only — VECTORs carry the byte too but the API reports 0 there (cross-tab 6/6 vs 33/33).
+- **A VECTOR's `cornerRadius` mirrors its vertex radii**: one shared value exports as the
+  scalar, differing radii export the `-1` mixed sentinel (per-corner slots stay 0).
+- **Export-settings registry cracked**: entries share the paint-table header but the `02`
+  parent is the OWNING NODE id: `01 <entryId> 00 02 <nodeId> 00 03 <sort> 00 06 <scale float>
+  [07 <format: 2=SVG, omitted=PNG>] [08 <fileName suffix> 00] [09 <b> isSuffix] 00`.
+  The exporter lists PNG before SVG regardless of entry sort codes (0806 `0:100`). Instance
+  clones never inherit exportSettings (baseline clone slices are `[]`).
+- **SLICE strokeWeight defaults to 0**, not the paintable-node default 1.
+- **Container `07 01 <description> 00 03 <library key>`** — a component/set DESCRIPTION can
+  precede the external library key; missing it left MGLogo外描边 unflagged (visible canvas
+  extra + shifted page-root indexes). Library-master page roots are excluded from sibling
+  index numbering entirely (the importer removes them, so real roots number consecutively).
+  **The key alone does NOT make a record an off-canvas master** — genuine CANVAS components
+  carry it too (组 16567 inside 首页/正, 组 16709 inside 关注-公示: both synced-from-library
+  components living in a frame; flagging them by key deleted whole card blocks from the
+  import). `record.libraryMaster` is gated on PAGE-ROOT parentage (`!nodes[n.parent]` — the
+  parent is the unresolvable page owner token), matching the doctrine that off-canvas
+  registry masters merely share the page owner and never appear in MasterGo's own traversal.
+- **A share-style slash override record scales against ITS OWN parent context, not the
+  component**: `3:0877/3:0817` stores the resized 50 (final in the 头像@50 instance), and
+  mapping it against component 3:0816's 64 re-applied the resize (avatar subtree → 39.06 =
+  50 × 50/64). `mgExpandTemplateInstances` passes `nodes[t.parent]` as the constraint-scaling
+  parent for overrideKey/rootKey hits; bare mirrors (full exports) keep template semantics.
+- **MasterGo trims trailing whitespace off text auto-names** (characters "施助人数 " → layer
+  name "施助人数") while keeping it in the characters.
+- **`constrainProportions` inherits from the template slot** (方向一 stubs omit the `08` byte;
+  the component child carries `08 01`) — the scalar is tri-state now (absent = inheritable).
+
+### Import-side (both zip and mg paths — found by pixel-diff vs the reference PNG)
+- **A promoted single boolean child must take the OUTER record's paint.** MasterGo nests
+  booleans with the paint on the OUTER one (Mobile Signal / Wifi status icons: outer EXCLUDE
+  holds the solid, inner EXCLUDE holds none); `promoteSingleBooleanChild` dropped it and the
+  icons imported fully transparent (looked like a missing subtree — the tree was intact,
+  `fills: []`). Fills/strokes copy over only when the promoted BOOLEAN has no visible paint
+  of its own.
+- **No mask twin for the untouched-mask placeholder fill** SOLID #D8D8D8 (216/255): MasterGo
+  does NOT render it (tab row sits on white), so `paintFilledMaskTwins` skips masks whose
+  only fill is exactly that gray — user-painted masks (gradients, real colors) still get the
+  render-parity twin.
+
 ## Number codec — CRACKED ✓ (verified both directions)
 - decode([s0,s1,s2,s3]): `S=[s0,s3,s2,s1]`; `value = float32_be( rotr1(uint32_be(S)) )` (rotate
   keeps the sign bit; see `mgDecFloat`).
@@ -563,7 +635,13 @@ grammar, byte-identical across all 131 records in the 0711-2 fixture:
 ## Record trailer — CRACKED ✓ (`1d 01` after the `1c` object, `mgParseTrailer`)
 Ascending fields, `00`-terminated; floats/text-runs can fake a `1d 01`, so candidates are
 validated by forward-parsing to a clean terminator:
-- `1e <b>` unknown; **`21` = primaryAxisSizingMode, `22` = counterAxisSizingMode** — field
+- **`1e 01` = 该图层自身参与渲染填充**（对蒙版即"蒙版也画出自己的 fill"）。交叉表证据
+  （0806 + 临时测试，2026-08-26）：实证被 MasterGo 渲染的 tab-bar `圆形 865` 带 `1e 01`；
+  实证不渲染的橙卡 `矩形 148535`（SOLID #FFB283）与默认灰 `矩形 148830` 都没有；
+  0806 蒙版 14/17 带、临时测试 4/4 不带。解码器对 isMask 记录发 record 级
+  `maskRendersFill`（比较器不可见），importer 的 paintFilledMaskTwins 仅在其不为
+  false 时补孪生。注意 `1e 01` 也出现在大量非蒙版节点上（0806: 648 个），非蒙版语义未消费；
+  **`21` = primaryAxisSizingMode, `22` = counterAxisSizingMode** — field
   present (value 0) = FIXED, omitted = AUTO (explains AUTO on groups/booleans and hug-content
   frames; instances inherit from their component instead);
 - `23 <str>` style id; `2a <str>` design-tokens JSON;
@@ -700,7 +778,12 @@ Paint child record body (after `01 <id> 00 02 <ref> 00 03 <sort> 00`), see `mgPa
 - `05 <kind>` 1=LINEAR 2=RADIAL 3=ANGULAR 4=DIAMOND 5=IMAGE (absent = SOLID).
 - `06 <b>` **visibility**: `06 00` = visible:false (MasterGo default invisible strokes are
   SOLID #979797 0.592 with this flag).
-- `07 <b>` unknown flag. `08 <a><r><g><b>` solid / gradient-fallback color (zero-compressed).
+- **`07 <b>` = the paint's own blend mode** — same enum/convention as node scalar `0d`:
+  `07 ff` = explicit NORMAL, omitted = PASS_THROUGH (临时测试 2026-08-26 cross-tab: all 45
+  baseline-NORMAL fills carry `07 ff`, every PASS_THROUGH paint omits the field). NOTE the
+  styledTextSegments quirk: SEGMENT-level fills report NORMAL where the node-level copy of
+  the same paint says PASS_THROUGH — the converter rewrites per level.
+  `08 <a><r><g><b>` solid / gradient-fallback color (zero-compressed).
   `09 <float>` unknown.
 - `0a { 01 <kind> 03 <p0.x p0.y> 04 <p1.x p1.y> 05 <n stops> 06 { … } } 00` —
   gradient geometry. Stop record: `[01 <position>] 02 <argb> 00`. p0/p1 are the gradient handles
@@ -925,7 +1008,8 @@ paint/effect/text/font/vector-network mismatches. The remaining comparator outpu
   the raw comma join after stripping to `Variant[a0]`). Non-default variants pass through raw.
   Gated to COMPONENT records inside a COMPONENT_SET. Known era exception: set0's same-shaped
   default variant is NOT washed in its 07-10 zip (1 accepted residual row on the retired set).
-- Unknown fields: trailer `1e/25/27/2b/37`, paint fields `07/0c/0d`, vertex flag `03` values,
+- Unknown fields: trailer `25/27/2b/37`（`1e` 已破解为"自身渲染填充"，见 trailer 一节；
+  非蒙版节点上的 `1e` 语义未消费）, paint field `0c`, vertex flag `03` values,
   scalar `19` flag-bit meanings,
   text-style entry field `13` (`{02 <varint> 06 <varint>}` sub-object with identical
   timestamp-like values across files — metadata, not style), TEXT-object leading `08 <b>`,

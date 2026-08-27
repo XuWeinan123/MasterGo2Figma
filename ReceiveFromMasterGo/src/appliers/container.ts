@@ -2,6 +2,7 @@ import { state } from "../state";
 import { safeResize, safeSet } from "../../../shared/utils";
 import { ImportLayerRecord } from "../../../shared/types";
 import { appendRestoredNode, safeRemove, hasUsableVectorNetwork } from "../nodeCreator";
+import { normalizeImageFills, normalizeImageStrokes, safeSetFills, safeSetStrokes } from "./universal";
 
 export function shouldRestoreBooleanVectorAsFrame(data: any, layerRecord: ImportLayerRecord): boolean {
     if (!data || data.sourceType !== "BOOLEAN_OPERATION") return false;
@@ -519,11 +520,33 @@ export async function promoteSingleBooleanChild(
         (parent as any).insertChild(parentIndex >= 0 ? parentIndex : parent.children.length, child);
         if (transform) safeSet(child, "relativeTransform", transform);
         safeSet(child, "name", data?.name || child.name);
+        applyOuterBooleanPaint(child, data);
         safeRemove(shell);
         return child;
     } catch (error) {
         console.warn("Unable to promote single-child boolean operation:", data?.name || data?.id || "Untitled", error);
         return null;
+    }
+}
+
+// A Figma boolean node renders with ITS OWN paint. MasterGo nests booleans with
+// the paint on the OUTER one (Mobile Signal/Wifi status icons: outer EXCLUDE
+// carries the solid, inner EXCLUDE carries none) — promoting the single child
+// without the outer record's fills imported them invisible.
+function applyOuterBooleanPaint(child: SceneNode, data: any) {
+    if (child.type !== "BOOLEAN_OPERATION") return;
+    const geometry = data && data.geometry;
+    const outerFills = geometry && geometry.fills;
+    if (!Array.isArray(outerFills) || !outerFills.some((f: any) => f && f.visible !== false)) return;
+    const childFills = (child as any).fills;
+    const childHasFill = Array.isArray(childFills) &&
+        childFills.some((f: any) => f && f.visible !== false);
+    if (childHasFill) return;
+    safeSetFills(child, normalizeImageFills(outerFills, child, data.layout));
+    const outerStrokes = geometry.strokes;
+    if (Array.isArray(outerStrokes) && outerStrokes.length > 0) {
+        safeSetStrokes(child, normalizeImageStrokes(outerStrokes, child, data.layout));
+        if (geometry.strokeWeight !== undefined) safeSet(child, "strokeWeight", geometry.strokeWeight);
     }
 }
 

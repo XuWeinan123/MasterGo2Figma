@@ -62,6 +62,9 @@ type ImportSession = {
   // Layers those masters account for, so the result count reports what is
   // actually left on the canvas.
   libraryMasterLayerCount: number;
+  // Node ids of masks whose record says MasterGo does NOT render their own
+  // fill (record.maskRendersFill === false) — paintFilledMaskTwins skips them.
+  maskFillSuppressedNodeIds: { [nodeId: string]: true };
   // library style ref (prefixed .mg style record id) → created Figma style id
   // (native .mg imports ship a styles.json payload; records reference styles
   // via fillStyleRef/strokeStyleRef/effectStyleRef/textStyleRef)
@@ -289,6 +292,7 @@ async function startImportSession(message: any) {
     deferredInstanceRelinks: [],
     libraryMasterNodes: [],
     libraryMasterLayerCount: 0,
+    maskFillSuppressedNodeIds: {},
     figmaStyleIdByRef: {}
   };
 
@@ -646,6 +650,12 @@ async function restoreImportPageData(importPage: ImportPageIndex, layers: { [id:
   await retryDeferredInstanceRelinks(layers);
   addImportTiming(session, "restore.deferredRelinkMs", Date.now() - relinkStartedAt);
   collectLibraryMasterNodes(session, layers);
+  for (const id in layers) {
+    if (layers[id] && layers[id].maskRendersFill === false) {
+      const maskNode = session.restoredNodeById[id];
+      if (maskNode && !maskNode.removed) session.maskFillSuppressedNodeIds[maskNode.id] = true;
+    }
+  }
 
   await reportPagePostprocessProgress(session, pageIndex, postprocessStart, pageNodeCount, 0, 0, 1);
   const layoutStartedAt = Date.now();
@@ -1329,6 +1339,16 @@ function paintFilledMaskTwins(session: ImportSession): number {
   const hasVisiblePaint = (paints: any): boolean =>
     Array.isArray(paints) && paints.some((paint: any) =>
       paint && paint.visible !== false && (paint.opacity === undefined || paint.opacity > 0));
+  // MasterGo's untouched-mask placeholder fill is SOLID #D8D8D8 (216/255).
+  // MasterGo does NOT render it (临时测试 tab row: masked labels sit on white),
+  // so a twin for it paints a gray bar that isn't in the design. Only
+  // user-painted masks (gradients, real colors) get the render-parity twin.
+  const isDefaultMaskFill = (paints: any): boolean =>
+    Array.isArray(paints) && paints.length === 1 && paints[0] &&
+    paints[0].type === "SOLID" && paints[0].color &&
+    Math.abs(paints[0].color.r - 216 / 255) < 1e-3 &&
+    Math.abs(paints[0].color.g - 216 / 255) < 1e-3 &&
+    Math.abs(paints[0].color.b - 216 / 255) < 1e-3;
 
   const visit = (node: SceneNode) => {
     // Instance children are locked; their component already got the twin.
@@ -1336,7 +1356,12 @@ function paintFilledMaskTwins(session: ImportSession): number {
     if ("children" in node) for (const child of [...(node as ChildrenMixin).children]) visit(child);
     const nodeAny = node as any;
     if (nodeAny.isMask !== true) return;
+    // Native .mg records carry the render bit explicitly (trailer `1e 01`);
+    // a mask without it is shape-only — MasterGo never draws its fill (临时测试
+    // 橙卡: the twin painted a #FFB283 base the design doesn't have).
+    if (session.maskFillSuppressedNodeIds[node.id]) return;
     if (!hasVisiblePaint(nodeAny.fills) && !hasVisiblePaint(nodeAny.strokes)) return;
+    if (isDefaultMaskFill(nodeAny.fills) && !hasVisiblePaint(nodeAny.strokes)) return;
     const parent = node.parent;
     if (!parent || !("insertChild" in parent)) return;
     try {

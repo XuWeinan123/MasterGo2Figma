@@ -289,6 +289,10 @@ export type ImportLayerRecord = {
     // Restored so instances can re-link, then removed in the cleanup phase —
     // MasterGo never shows it on its own canvas either.
     libraryMaster?: boolean;
+    // Whether MasterGo renders this mask layer's own fill (native .mg trailer
+    // flag `1e 01`). false = shape-only mask: the importer must NOT re-paint
+    // its fill via a twin. Absent (zip exports) = unknown, twin as before.
+    maskRendersFill?: boolean;
     // MasterGo instance uniform scale (trailer 26). Figma instance children
     // are geometry-locked to the component, so the importer replays this via
     // InstanceNode.rescale().

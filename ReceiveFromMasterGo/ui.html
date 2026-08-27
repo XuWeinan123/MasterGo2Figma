@@ -755,7 +755,16 @@
       // translucent fill/stroke on the page to fully opaque.
       let opacity = null;
       let filters = null;
+      // Paint field `07 <b>` = the paint's own blend mode, same enum as node
+      // scalar 0d (0xff = explicit NORMAL; omitted = PASS_THROUGH). Cross-tab
+      // 临时测试: all 45 baseline-NORMAL fills carry `07 ff`, every
+      // PASS_THROUGH paint omits the field.
+      let blendByte = null;
       function zfloat() { const r = mgReadZFloatAt(bytes, p); p = r.next; return r.value; }
+      function finishPaint(paint) {
+        paint.blendMode = (blendByte !== null && MG_BLEND_MODES[blendByte]) || "PASS_THROUGH";
+        return paint;
+      }
 
       function parseGradientObject() {
         const g = { kind: 0, p0: null, p1: null, stops: null, ratio: 0, ratioNorm: 0, majorLen2: 0 };
@@ -867,7 +876,7 @@
         if (t === 0x04) { p++; continue; } // leading flag, 0711-3 style-library paint children
         if (t === 0x05) { kind = bytes[p++]; continue; }
         if (t === 0x06) { visible = bytes[p++] !== 0x00; continue; }
-        if (t === 0x07) { p++; continue; }
+        if (t === 0x07) { blendByte = bytes[p++]; continue; }
         if (t === 0x08) { color = { a: zfloat(), r: zfloat(), g: zfloat(), b: zfloat() }; continue; }
         if (t === 0x09) { opacity = zfloat(); continue; } // paint opacity
         if (t === 0x0a) { gradient = parseGradientObject(); if (!gradient) return null; continue; }
@@ -920,7 +929,7 @@
             h: image.cropRect.h
           };
         }
-        return paint;
+        return finishPaint(paint);
       }
       if (kind >= 1 && kind <= 4 && gradient && gradient.stops && gradient.stops.length >= 2) {
         // Share exports omit the gradient handles for the default vertical
@@ -958,20 +967,20 @@
         // stays as the fallback for node-less paints (style library).
         if (kind === 1) paint.__mgLinearMeta = { p0: { x: p0.x, y: p0.y }, p1: { x: p1.x, y: p1.y } };
         Object.defineProperty(paint, "__mgGradientDebug", { value: gradient, enumerable: false });
-        return paint;
+        return finishPaint(paint);
       }
       if (color) {
         // mgMakeSolidPaint already folded the `08` alpha into opacity.
         const paint = mgMakeSolidPaint(color.r, color.g, color.b, color.a);
         paint.visible = visible;
         if (opacity !== null) paint.opacity = opacity;
-        return paint;
+        return finishPaint(paint);
       }
       // Paint-shaped record with no color/kind at all: MasterGo's default fill.
       if (sawTail) {
         const paint = mgMakeSolidPaint(MG_DEFAULT_FILL_GRAY, MG_DEFAULT_FILL_GRAY, MG_DEFAULT_FILL_GRAY, 1);
         paint.visible = visible;
-        return paint;
+        return finishPaint(paint);
       }
       return null;
     }
@@ -999,6 +1008,73 @@
         paints[ref] = paints[ref].map(entry => entry.paint);
       }
       return paints;
+    }
+
+    // Export-settings registry (临时测试, 2026-08-26): entries share the
+    // paint-table record header but their `02` parent is the OWNING NODE id:
+    //   01 <entryId> 00 02 <nodeId> 00 03 <sort> 00
+    //   06 <scale float, twisted>  [08 <fileName suffix> 00]  [09 <b> isSuffix]  00
+    // 首页/正 stores `06 <2.0> 08 "@2x" 00 09 01`, every exportable slice
+    // stores `06 <1.0> 09 01`. Format is PNG on all observed entries (no
+    // format tag seen yet — reject unknown tags so a future JPG spelling
+    // fails closed instead of minting a wrong PNG setting).
+    function mgScanExportSettings(bytes, str) {
+      const table = {};
+      const ID = "(?::[0-9A-Za-z]+|[0-9]+:[0-9A-Za-z]+)";
+      const markRe = new RegExp("\\x01(" + ID + ")\\x00\\x02(" + ID + ")\\x00\\x03([^\\x00]+)\\x00\\x06", "g");
+      let m;
+      while ((m = markRe.exec(str))) {
+        let p = m.index + m[0].length;
+        const r = mgReadZeroFloat(bytes, p);
+        if (!isFinite(r.value) || r.value < 0.1 || r.value > 10) continue;
+        p = r.next;
+        let fileName = "";
+        let format = "PNG";
+        let ok = true;
+        for (;;) {
+          const t = bytes[p];
+          if (t === 0x00) break;
+          if (t === 0x07) {
+            // Format enum; omitted = PNG. Only `07 02` = SVG is baselined
+            // (0806 0:100); 1/3 presumed JPG/PDF — fail closed on others.
+            const fmt = { 1: "JPG", 2: "SVG", 3: "PDF" }[bytes[p + 1]];
+            if (!fmt) { ok = false; break; }
+            format = fmt;
+            p += 2;
+            continue;
+          }
+          if (t === 0x08) {
+            const c = mgReadCString(bytes, p + 1, Math.min(bytes.length, p + 80));
+            if (!c) { ok = false; break; }
+            fileName = c.text;
+            p = c.end + 1;
+            continue;
+          }
+          if (t === 0x09) { p += 2; continue; }
+          ok = false;
+          break;
+        }
+        if (!ok) continue;
+        (table[m[2]] = table[m[2]] || []).push({
+          code: m[3],
+          format: format,
+          setting: {
+            format: format,
+            constraint: { type: "SCALE", value: r.value },
+            isSuffix: true,
+            fileName: fileName
+          }
+        });
+      }
+      // The exporter lists PNG before SVG regardless of entry sort codes
+      // (0806 0:100: codes say [SVG,PNG], the baseline says [PNG,SVG]).
+      const FMT_ORDER = { PNG: 0, JPG: 1, SVG: 2, PDF: 3 };
+      for (const ref in table) {
+        table[ref].sort((a, b) => (FMT_ORDER[a.format] - FMT_ORDER[b.format]) ||
+          (a.code < b.code ? -1 : a.code > b.code ? 1 : 0));
+        table[ref] = table[ref].map(entry => entry.setting);
+      }
+      return table;
     }
 
     // Effect registry (share exports): nodes reference it via tag 17. Child
@@ -1432,6 +1508,13 @@
             fields.sideWeights = w;
             continue;
           }
+          if (t === 0x24) { // cornerSmoothing ratio (临时测试: 0.6 squircles)
+            const r = mgReadZeroFloat(bytes, p + 1);
+            if (!isFinite(r.value) || r.value < 0 || r.value > 1) return null;
+            fields.cornerSmoothing = r.value;
+            p = r.next;
+            continue;
+          }
           if (t === 0x26) { // instance scale factor (share exports), 0-compressed float
             const r = mgReadZeroFloat(bytes, p + 1);
             if (!isFinite(r.value) || Math.abs(r.value) > 1e4) return null;
@@ -1453,6 +1536,7 @@
             continue;
           }
           if (t >= 0x1e && t <= 0x3f) {
+            if (t === 0x1e) fields.t1e = bytes[p + 1];
             if (t === 0x2c) fields.strokeCap = bytes[p + 1];
             // 2e 01 = layoutPositioning ABSOLUTE (ignore auto-layout).
             // Cross-tab on 统一集: all 5 v2-ABSOLUTE nodes carry it, none of
@@ -1618,6 +1702,15 @@
         if (bytes[p + 1] === 0x03) {
           const libKey = mgReadCString(bytes, p + 2, Math.min(off + 512, p + 200));
           if (libKey && libKey.text.indexOf("+") > 0) meta.libraryKey = libKey.text;
+        } else if (bytes[p + 1] === 0x01) {
+          // 临时测试 spelling: `07 01 <description string> 00 03 <library key>`
+          // — a component-set DESCRIPTION precedes the external key
+          // (MGLogo外描边 imported as a visible canvas extra without this).
+          const desc = mgReadCString(bytes, p + 2, Math.min(off + 512, p + 300));
+          if (desc && bytes[desc.end + 1] === 0x03) {
+            const libKey = mgReadCString(bytes, desc.end + 2, Math.min(off + 768, desc.end + 200));
+            if (libKey && libKey.text.indexOf("+") > 0) meta.libraryKey = libKey.text;
+          }
         }
         if (meta.subtype === "COMPONENT") {
           p++;
@@ -1933,7 +2026,7 @@
       // never match the third spelling: they carry a 04 name field between
       // the code and the scalars, and the `03 <family>` body check rejects
       // any impostor.
-      const re = new RegExp("\\x01(" + ID + ")\\x00(?:\\x02\\x00\\x03\\x00\\x04\\x00|\\x02[^\\x00]+\\x00\\x03[^\\x00]+\\x00)?\\x05[\\x01-\\x07]", "g");
+      const re = new RegExp("\\x01(" + ID + ")\\x00(?:\\x02\\x00\\x03\\x00\\x04\\x00|\\x02[^\\x00]+\\x00\\x03[^\\x00]+\\x00(?:\\x04[^\\x00]+\\x00)?)?\\x05[\\x01-\\x07]", "g");
       let m;
       while ((m = re.exec(str))) {
         let p = m.index + m[0].length;
@@ -1958,7 +2051,11 @@
         let q = p + 1;
         while (q < bytes.length && bytes[q] !== 0x00) q++;
         const family = str.slice(p + 1, q);
-        if (!/^[A-Za-z][A-Za-z0-9 +-]{1,40}$/.test(family)) continue;
+        // Dots are legal family characters ("Alibaba PuHuiTi 3.0",
+        // "ReeJi-BigRuixain-BlackGBV1.0") — rejecting them dropped 22 of the
+        // 临时测试 fixture's 27 text-style entries, and with them every
+        // fontSize/lineHeight/letterSpacing on those texts.
+        if (!/^[A-Za-z][A-Za-z0-9 .+-]{1,40}$/.test(family)) continue;
         entry.psName = family; // legacy field name: full-export entries put the PostScript name here
         entry.family = family;
         p = q + 1;
@@ -1989,8 +2086,25 @@
             continue;
           }
           if (tag === 0x0c || tag === 0x12) {
-            const c = mgReadCString(bytes, p + 1, Math.min(bytes.length, p + 80));
-            if (!c || !/^[A-Za-z][A-Za-z0-9 +-]{0,60}$/.test(c.text)) break;
+            const c = mgReadCString(bytes, p + 1, Math.min(bytes.length, p + 96));
+            if (!c) break;
+            // 临时测试 spelling: field 12 is a JSON blob
+            // `{"fontStyle":"65 Medium","opsz":"auto"}` — the display style
+            // name lives in its fontStyle key.
+            if (tag === 0x12 && c.text.charCodeAt(0) === 0x7b) {
+              try {
+                const meta12 = JSON.parse(c.text);
+                if (meta12 && typeof meta12.fontStyle === "string") {
+                  entry.styleName = meta12.fontStyle;
+                  // MasterGo's own display string ("75 SemiBold") - the
+                  // camel-case spacing pass must not rewrite it.
+                  entry.styleNameVerbatim = true;
+                }
+              } catch (e) { break; }
+              p = c.end + 1;
+              continue;
+            }
+            if (!/^[A-Za-z][A-Za-z0-9 .+-]{0,60}$/.test(c.text)) break;
             if (tag === 0x0c) entry.psName = c.text;
             else entry.styleName = c.text;
             p = c.end + 1;
@@ -2000,8 +2114,11 @@
           if (tag === 0x0e) { const r = mgReadZeroFloat(bytes, p + 1); p = r.next; continue; }
           if (tag === 0x0f) { // font-file hash: marks a per-node COMPUTED entry
             const c = mgReadCString(bytes, p + 1, Math.min(bytes.length, p + 40));
-            if (!c || !/^[0-9A-F]{16,32}$/i.test(c.text)) break;
-            entry.fontFileHash = c.text;
+            // 临时测试 spells a MISSING hash as the sentinel "EMPTYHASHFFFFFFF"
+            // — consume it (breaking here hid the field-12 styleName behind
+            // it) but only real hex marks a computed entry.
+            if (!c || !/^[0-9A-Za-z]{8,32}$/.test(c.text)) break;
+            if (/^[0-9A-F]{16,32}$/i.test(c.text)) entry.fontFileHash = c.text;
             p = c.end + 1;
             continue;
           }
@@ -2029,8 +2146,26 @@
     function mgFontNameFromStyleEntry(entry) {
       if (!entry) return null;
       if (entry.styleName) {
-        const spaced = entry.styleName.replace(/([a-z])([A-Z])/g, "$1 $2");
-        return mgNormalizeFontName({ family: entry.family || entry.psName, style: spaced });
+        // A field-12 JSON fontStyle is MasterGo's UI display name. It is only
+        // authoritative when it's the SAME name as the PostScript style (then
+        // it carries the correct spacing: "65 Medium" vs psName "65Medium").
+        // A localized alias ("中黑体" where the psName says Medium) is NOT what
+        // the plugin API reports — the psName's English style wins there
+        // (0806 cross-tab: 20 PingFang rows English, vs the JSON alias).
+        if (entry.styleNameVerbatim) {
+          const psStyle = entry.psName && entry.psName.lastIndexOf("-") > 0
+            ? entry.psName.slice(entry.psName.lastIndexOf("-") + 1)
+            : null;
+          const sameName = psStyle &&
+            psStyle.replace(/[\s_]/g, "").toLowerCase() === entry.styleName.replace(/[\s_]/g, "").toLowerCase();
+          if (sameName || !psStyle) {
+            return mgNormalizeFontName({ family: entry.family || entry.psName, style: entry.styleName });
+          }
+          // fall through to the psName branch below
+        } else {
+          const spaced = entry.styleName.replace(/([a-z])([A-Z])/g, "$1 $2");
+          return mgNormalizeFontName({ family: entry.family || entry.psName, style: spaced });
+        }
       }
       // Field 03 holds the DISPLAY family ("PingFang SC"), field 0c the
       // PostScript name ("PingFangSC-Medium"). Only the STYLE comes from the
@@ -2101,6 +2236,7 @@
       const geoms = mgScanGeometryBlobs(bytes, str);
       const fontStyles = mgScanFontStyles(bytes, str);
       const effectTable = mgScanEffects(bytes, str);
+      const exportTable = mgScanExportSettings(bytes, str);
       // The sort code is PRINTABLE ASCII (a base-95 key: `a0`, `a;`, `a P`,
       // `a!`). `[^\x00]+` was too loose: the file also holds an id-link table
       // shaped `01 <id> 00 02 <id> 00 03 <01|03> 04 01 05 <id>:6:<n> 00 00`,
@@ -2204,10 +2340,30 @@
         const containerMeta = typeByte === 7 ? mgParseContainerMeta(bytes, fb + jt + 2) : null;
         const geomHash = typeByte === 1 ? mgReadVectorGeomHash(bytes, fb + jt + 2, end) : null;
         let cornerRadius = 0;
+        let cornerRadii = null;
         if (jt >= 0 && type === "RECTANGLE") {
           const local = fb + jt;
           if (bytes[local + 2] === 0x01 && bytes[local + 3] === 0x04) {
-            cornerRadius = mgDecFloat(bytes, local + 4);
+            // `01 04` introduces a PER-CORNER array of 4 zero-compressed
+            // floats [topLeft, topRight, bottomLeft, bottomRight] (临时测试:
+            // [0,0,4,4] tab-card caps, [4,4,0,0] photo tops). The old
+            // single-raw-float read only survived uniform rectangles — a
+            // zero-compressed first corner (`00`) landed it mid-payload and
+            // minted denormal garbage (2.3e-41).
+            const radii = [];
+            let rp = local + 4;
+            for (let ri = 0; ri < 4; ri++) {
+              const r = mgReadZeroFloat(bytes, rp);
+              if (!isFinite(r.value) || r.value < 0 || r.value > 1e4) { radii.length = 0; break; }
+              radii.push(r.value);
+              rp = r.next;
+            }
+            if (radii.length === 4) {
+              cornerRadii = radii;
+              cornerRadius = radii[0];
+            } else {
+              cornerRadius = mgDecFloat(bytes, local + 4);
+            }
           }
         }
         let name = null;
@@ -2318,7 +2474,7 @@
           strokeWeight: scalar.strokeWeight !== undefined ? scalar.strokeWeight : 0,
           strokeWeightExplicit: scalar.strokeWeight !== undefined,
           opacity: scalar.opacity,
-          cornerRadius: cornerRadius, name: name, code: mk.code,
+          cornerRadius: cornerRadius, cornerRadii: cornerRadii, name: name, code: mk.code,
           relativeTransform: transform.relativeTransform, rotation: mgNormalizeRotation(transform.rotation),
           containerMeta: containerMeta, geomHash: geomHash,
           templateRef: scalar.templateRef || null,
@@ -2335,7 +2491,9 @@
           // (05=1 → baseline name is NEVER the characters; 05=0/absent →
           // never the record name).
           nameLocked: scalar.t05,
-          constrainProportions: scalar.t08 === 1,
+          // Tri-state: absent = inheritable from the template slot (方向一
+          // instance stubs omit the byte; the component child carries 08 01).
+          constrainProportions: scalar.present[0x08] ? scalar.t08 === 1 : undefined,
           isMask: scalar.t09 === 1,
           visibleByte: scalar.t07,
           strokeCapByte: scalar.t11,
@@ -2367,7 +2525,7 @@
         if (textDetails.styledRuns) nodes[mk.recId].styledRuns = textDetails.styledRuns;
       }
       for (const id in nodes) if (!nodes[id].parent) nodes[id].parent = nodes[id].owner;
-      return { nodes: nodes, paints: paints, geoms: geoms, fontStyles: fontStyles, effectTable: effectTable };
+      return { nodes: nodes, paints: paints, geoms: geoms, fontStyles: fontStyles, effectTable: effectTable, exportTable: exportTable };
     }
 
     function mgResolveNativeTypes(n, fallbackType) {
@@ -2593,9 +2751,12 @@
     // sourceType=INSTANCE and stale fills onto freshly decoded records. The
     // underlying fields (effects, layoutPositioning, paddings) are decoded
     // for real now.
+    // Native paints carry their FINAL blend mode since the `07 <b>` paint
+    // field was cracked (0xff = explicit NORMAL, omitted = PASS_THROUGH) —
+    // only fill in a missing value, never flatten an explicit one.
     function mgNormalizePaintBlend(paints) {
       if (!Array.isArray(paints)) return;
-      paints.forEach(p => { if (p) p.blendMode = "PASS_THROUGH"; });
+      paints.forEach(p => { if (p && !p.blendMode) p.blendMode = "PASS_THROUGH"; });
     }
 
     function mgApplyCommonVisualDefaults(props) {
@@ -2639,7 +2800,11 @@
     };
     function mgFontWeightFromStyle(style) {
       const key = String(style || "").toLowerCase().replace(/[\s_-]|italic/g, "");
-      return MG_FONT_WEIGHTS[key] || 400;
+      if (MG_FONT_WEIGHTS[key]) return MG_FONT_WEIGHTS[key];
+      // CJK families use numbered style names ("65 Medium", "55 Regular L3"):
+      // strip the numeric weight-class prefix and trailing variant tokens.
+      const bare = key.replace(/^[0-9]+/, "").replace(/l[0-9]+$/, "");
+      return MG_FONT_WEIGHTS[bare] || 400;
     }
 
     function mgApplyTextFallbacks(props) {
@@ -2672,7 +2837,7 @@
     }
 
     // Build v2 props from a decoded native node.
-    function mgNativeProps(n, nodes, paints, geoms, fontStyles, effectTable) {
+    function mgNativeProps(n, nodes, paints, geoms, fontStyles, effectTable, exportTable) {
       const t = n.type || "FRAME";
       const types = mgResolveNativeTypes(n, t);
       if (t === "VECTOR" && types.sourceType === "VECTOR") types.sourceType = "PEN";
@@ -2752,9 +2917,12 @@
       // Values read from the node's OWN record are final; template-inherited
       // and default values still need the instance scale.
       const ownFinal = !n.templateValues;
-      const strokeWeight = n.strokeWeightExplicit && !n.strokeWeightInherited && ownFinal
-        ? n.strokeWeight
-        : (n.strokeWeightExplicit ? n.strokeWeight : (n.strokeWeight || 1)) * scale;
+      // Slices have no stroke; the default-1 rule is for paintable nodes only.
+      const strokeWeight = t === "SLICE"
+        ? (n.strokeWeightExplicit ? n.strokeWeight : 0)
+        : (n.strokeWeightExplicit && !n.strokeWeightInherited && ownFinal
+          ? n.strokeWeight
+          : (n.strokeWeightExplicit ? n.strokeWeight : (n.strokeWeight || 1)) * scale);
       let meta = n.containerMeta;
       // Instance shells inherit corner/auto-layout meta from their component —
       // but only for the fields they DON'T spell out themselves. Taking the
@@ -2796,7 +2964,9 @@
           horizontal: MG_CONSTRAINT[n.constraintH] || "START",
           vertical: MG_CONSTRAINT[n.constraintV] || "START"
         },
-        exportSettings: [],
+        // Export settings live in a node-keyed registry; instance-expansion
+        // clones (slash ids) never inherit them (baseline: clone slices are []).
+        exportSettings: (exportTable && exportTable[n.id]) ? mgCloneJsonValue(exportTable[n.id]) : [],
         scence: { visible: n.visibleByte !== 0, locked: false },
         blend: {
           opacity: n.opacity !== undefined ? n.opacity : 1, isMask: !!n.isMask, blendMode: "NORMAL",
@@ -2810,11 +2980,40 @@
               })
             : []
         },
-        corner: {
-          topLeftRadius: cornerRadius, topRightRadius: cornerRadius,
-          bottomLeftRadius: cornerRadius, bottomRightRadius: cornerRadius,
-          cornerRadius: cornerRadius, cornerSmoothing: 0
-        },
+        corner: (function () {
+          // Trailer 24 rides on VECTORs too, but the API reports smoothing 0
+          // there (临时测试 cross-tab: RECTANGLE keeps 0.6 6/6, VECTOR drops
+          // it on all 33). A VECTOR's cornerRadius instead mirrors its vertex
+          // radii: one shared value, or the -1 mixed sentinel.
+          if (t === "VECTOR" || t === "LINE") {
+            let vertexRadius = 0;
+            if (geomVn && Array.isArray(geomVn.vertices) && geomVn.vertices.length > 0) {
+              const radiiSet = geomVn.vertices.map(v => v.cornerRadius || 0);
+              vertexRadius = radiiSet.every(v => Math.abs(v - radiiSet[0]) < 1e-6) ? radiiSet[0] : -1;
+            }
+            return {
+              topLeftRadius: 0, topRightRadius: 0,
+              bottomLeftRadius: 0, bottomRightRadius: 0,
+              cornerRadius: vertexRadius, cornerSmoothing: 0
+            };
+          }
+          const cs = trailer.cornerSmoothing || inheritedTrailer.cornerSmoothing || 0;
+          const radii = n.cornerRadii;
+          if (radii) {
+            const r = radii.map(v => v * (cornerOwnFinal ? 1 : scale));
+            const mixed = r.some(v => Math.abs(v - r[0]) > 1e-6);
+            return {
+              topLeftRadius: r[0], topRightRadius: r[1],
+              bottomLeftRadius: r[2], bottomRightRadius: r[3],
+              cornerRadius: mixed ? -1 : r[0], cornerSmoothing: cs
+            };
+          }
+          return {
+            topLeftRadius: cornerRadius, topRightRadius: cornerRadius,
+            bottomLeftRadius: cornerRadius, bottomRightRadius: cornerRadius,
+            cornerRadius: cornerRadius, cornerSmoothing: cs
+          };
+        })(),
         geometry: {
           fills: fills, strokes: strokes, strokeWeight: strokeWeight,
           strokeAlign: (t === "SLICE" ? "CENTER" : (MG_STROKE_ALIGN[n.strokeAlignByte] || "INSIDE")),
@@ -2910,10 +3109,13 @@
       if (meta) {
         if (meta.corners) {
           const c = meta.corners.map(v => v * (meta.__ownCorners ? 1 : scale));
+          const c4 = [c[0], c[1] !== undefined ? c[1] : c[0], c[2] !== undefined ? c[2] : c[0], c[3] !== undefined ? c[3] : c[0]];
+          const mixed = c4.some(v => Math.abs(v - c4[0]) > 1e-6);
           props.corner = {
-            topLeftRadius: c[0], topRightRadius: c[1] !== undefined ? c[1] : c[0],
-            bottomLeftRadius: c[2] !== undefined ? c[2] : c[0], bottomRightRadius: c[3] !== undefined ? c[3] : c[0],
-            cornerRadius: c[0], cornerSmoothing: 0
+            topLeftRadius: c4[0], topRightRadius: c4[1],
+            bottomLeftRadius: c4[2], bottomRightRadius: c4[3],
+            cornerRadius: mixed ? -1 : c4[0],
+            cornerSmoothing: trailer.cornerSmoothing || inheritedTrailer.cornerSmoothing || 0
           };
         }
         const frameFamily = types.type === "FRAME" || types.type === "COMPONENT" || types.type === "COMPONENT_SET";
@@ -3023,9 +3225,6 @@
             paints[colorRuns[0].paintRef] && colorRuns[0].paintRef !== n.paintRef && props.geometry) {
           props.geometry.fills = paints[colorRuns[0].paintRef].map(mgCloneJsonValue);
           mgFinalizeRadialPaints(props.geometry.fills, n.w, n.h);
-          for (const f of props.geometry.fills) {
-            if (f && f.blendMode === "NORMAL") f.blendMode = "PASS_THROUGH";
-          }
         }
         if ((fontRuns && fontRuns.length > 1) || (colorRuns && colorRuns.length > 1)) {
           const chars = props.characters || "";
@@ -3047,6 +3246,11 @@
               ? paints[cr.paintRef].map(mgCloneJsonValue)
               : ((props.geometry && props.geometry.fills) || []).map(mgCloneJsonValue);
             mgFinalizeRadialPaints(segFills, n.w, n.h);
+            // Segment-level fills report NORMAL where node-level paints say
+            // PASS_THROUGH (the plugin API's styledTextSegments spelling).
+            for (const f of segFills) {
+              if (f && f.blendMode === "PASS_THROUGH") f.blendMode = "NORMAL";
+            }
             segments.push({
               start: s,
               end: e,
@@ -3899,7 +4103,17 @@
             // component's 1.111 instead of the page's 0.539.
             const ownRecord = !!child;
             if (!child) {
-              child = mgSynthesizeInstanceChild(t, nodes[childTplId], cloneId, cur.cloneId, tplNode, cloneNode, inst.effScale);
+              // A slash-id override record stores values that are FINAL in its
+              // own instance context (临时测试: `3:0877/3:0817` spells the
+              // resized 50, not the component's 64). Mapping those against the
+              // COMPONENT parent re-applies the nested-instance resize —
+              // 头像@50's whole avatar subtree shrank to 39.06 (× 50/64 twice).
+              // Scale such a clone against the override's own parent context
+              // instead; bare mirrors (full exports) keep template semantics.
+              const shareOverrideParent = t !== nodes[childTplId] && !bareOv &&
+                t.id && t.id.indexOf("/") >= 0 && t.parent && nodes[t.parent]
+                ? nodes[t.parent] : null;
+              child = mgSynthesizeInstanceChild(t, nodes[childTplId], cloneId, cur.cloneId, shareOverrideParent || tplNode, cloneNode, inst.effScale);
               if (t.textStyleRef) child.textStyleInherited = true;
               nodes[cloneId] = child;
               added++;
@@ -3965,7 +4179,9 @@
           const slot = nodes[id.slice(id.lastIndexOf("/") + 1)];
           if (slot) lock = slot.nameLocked;
         }
-        if (lock !== 1) n.name = String(n.characters).replace(/\n/g, " ");
+        // MasterGo trims trailing whitespace off the auto-name (characters
+        // "施助人数 " → layer name "施助人数") while keeping it in the text.
+        if (lock !== 1) n.name = String(n.characters).replace(/\n/g, " ").replace(/\s+$/, "") || String(n.characters);
       }
     }
 
@@ -4177,6 +4393,7 @@
           }
           if (n.strokeAlignByte === undefined && t.strokeAlignByte !== undefined) n.strokeAlignByte = t.strokeAlignByte;
           if (n.strokeJoinByte === undefined && t.strokeJoinByte !== undefined) n.strokeJoinByte = t.strokeJoinByte;
+          if (n.constrainProportions === undefined && t.constrainProportions !== undefined) n.constrainProportions = t.constrainProportions;
           // Constraints and visibility are positional slot fields. A missing
           // slot value means the native default, not a component-root value.
           if (n.strokeCapByte === undefined && t.strokeCapByte !== undefined) n.strokeCapByte = t.strokeCapByte;
@@ -4198,6 +4415,7 @@
             n.textStyleRef = t.textStyleRef;
             n.textStyleInherited = true;
           }
+          if (!n.cornerRadii && !n.cornerRadius && t.cornerRadii) { n.cornerRadii = t.cornerRadii; n.cornerRadiusInherited = true; }
           if (n.cornerRadius === 0 && t.cornerRadius) { n.cornerRadius = t.cornerRadius; n.cornerRadiusInherited = true; }
           if (!n.inheritedMeta && t.containerMeta &&
               (t.containerMeta.subtype === "COMPONENT" || t.containerMeta.subtype === "FRAME")) {
@@ -4386,7 +4604,7 @@
       const metaBytes = getEntryByName(zipEntries, "meta.json");
       if (metaBytes) { try { meta = JSON.parse(decodeUtf8(metaBytes)); } catch (e) { /* ignore */ } }
 
-      const { nodes, paints, geoms, fontStyles, effectTable } = mgDecodeNativeNodes(documentBytes);
+      const { nodes, paints, geoms, fontStyles, effectTable, exportTable } = mgDecodeNativeNodes(documentBytes);
       const styleDefs = mgScanStyleDefs(documentBytes, new TextDecoder("latin1").decode(documentBytes));
       const embeddedProps = mgExtractEmbeddedProps(documentBytes);
       const embeddedIndex = mgBuildEmbeddedIndex(embeddedProps);
@@ -4500,7 +4718,17 @@
         // 0804 design system keeps every button/button-group master as a
         // coded canvas root.
         const roots = (childIds[pg.id] || []).filter(r => nodes[r] && nodes[r].type && !(isComponentMaster(r) && !nodes[r].code));
-        roots.forEach((rootId, rootIndex) => { rootIndexOverride[rootId] = rootIndex; });
+        // Library-master copies never appear in MasterGo's own page traversal
+        // (the importer removes them after re-linking), so they must not
+        // consume sibling indexes — the real canvas roots number consecutively.
+        let canvasIndex = 0;
+        const masterRoots = [];
+        for (const rootId of roots) {
+          const rootMeta = nodes[rootId] && nodes[rootId].containerMeta;
+          if (rootMeta && rootMeta.libraryKey) masterRoots.push(rootId);
+          else rootIndexOverride[rootId] = canvasIndex++;
+        }
+        for (const rootId of masterRoots) rootIndexOverride[rootId] = canvasIndex++;
         let count = 0;
         for (const r of roots) for (const id of subtreeOf(r)) { if (!reachable[id]) { reachable[id] = true; count++; } }
         // Keep empty pages too: MasterGo files legitimately contain pages with
@@ -4528,7 +4756,7 @@
       const nativeEmbeddedMatches = {};
       for (const id in reachable) {
         const n = nodes[id];
-        const props = mgNativeProps(n, nodes, paints, geoms, fontStyles, effectTable);
+        const props = mgNativeProps(n, nodes, paints, geoms, fontStyles, effectTable, exportTable);
         const preferredParentId = nativeEmbeddedMatches[n.parent] ? nativeEmbeddedMatches[n.parent].id : null;
         const overlay = mgFindEmbeddedOverlay(props, embeddedIndex, embeddedOverlayUsed, preferredParentId);
         if (overlay) nativeEmbeddedMatches[id] = overlay;
@@ -4633,7 +4861,19 @@
         // never yields it, so it must not survive on the Figma canvas — but
         // instances still need it to exist while they re-link, so it is
         // restored normally and removed in the import's cleanup phase.
-        if (n.containerMeta && n.containerMeta.libraryKey) record.libraryMaster = true;
+        // Off-canvas registry masters are PAGE-OWNED roots (parent = the page
+        // owner token, unresolvable in `nodes`). A library-keyed component
+        // nested inside a real frame is genuine canvas content — 临时测试's
+        // 组 16567 sits inside 首页/正 and was deleted from the canvas when the
+        // key alone set the flag (the importer removes flagged roots after
+        // instances re-link).
+        if (n.containerMeta && n.containerMeta.libraryKey && !nodes[n.parent]) record.libraryMaster = true;
+        // Trailer flag `1e 01` = MasterGo renders the mask's own fill (record
+        // level, invisible to the comparator). Cross-tab over 0806 + 临时测试:
+        // both proven-painted masks (tab-bar 圆形 865) carry it, both
+        // proven-unpainted ones (橙卡 矩形 148535, default-gray 矩形 148830)
+        // lack it. The importer only paints a mask twin when this is not false.
+        if (n.isMask === true) record.maskRendersFill = !!(n.trailer && n.trailer.t1e === 1);
         if (n.paintRef && styleDefs[n.paintRef]) record.fillStyleRef = n.paintRef;
         if (n.strokeRef && styleDefs[n.strokeRef]) record.strokeStyleRef = n.strokeRef;
         if (n.cornerRef && styleDefs[n.cornerRef]) record.effectStyleRef = n.cornerRef;

@@ -168,10 +168,16 @@ const FONT_STYLE_ALIASES: { [style: string]: string } = {
 };
 
 export function normalizeFontStyleForMatch(value: string): string {
-    const normalized = String(value || "")
+    let normalized = String(value || "")
         .toLowerCase()
         .replace(/[\s_-]+/g, "")
         .replace(/[^a-z0-9]/g, "");
+
+    // MasterGo may report a GB18030 charset-edition style ("55 Regular L3")
+    // while the installed face ships without the marker ("55 Regular"), or
+    // vice versa — same glyph design, so match them as one style.
+    const withoutCharsetMarker = normalized.replace(/l\d+$/, "");
+    if (withoutCharsetMarker) normalized = withoutCharsetMarker;
 
     return FONT_STYLE_ALIASES[normalized] || normalized;
 }

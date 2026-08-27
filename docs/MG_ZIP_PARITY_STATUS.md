@@ -1,6 +1,37 @@
 # MG / ZIP 导入一致性状态
 
-最后更新：2026-08-06（第三轮：拿 MasterGo 自己导出的 PNG 做视觉对照，抓出 5 处「两个包一致、导进 Figma 就不对」的缺陷）
+最后更新：2026-08-26（临时测试集：字体样式表正则、矩形逐角圆角、paint blendMode、导出设置注册表、
+嵌套实例 override 坐标系；importer 侧修掉「外层 boolean 填充丢失」与「默认灰蒙版孪生」）
+
+## 2026-08-26 测试集「临时测试」（当前主回归集）
+
+```bash
+node tools/compare_mg_import.js "测试集/临时测试/临时测试.mg" \
+  "测试集/临时测试/mastergo2figma-partial-pages-2026-08-26T08-20-53-958Z.zip"
+```
+
+| 指标 | 修复前 | 修复后 |
+|---|---|---|
+| deep-prop | 1304 | **60**（全部为已接受残差） |
+| font | 166 | **4**（Source Han Sans CN vs Source Han Sans 命名） |
+| geometry / transform / index | 15 / 6 / 2 | **0 / 0 / 0** |
+
+剩余 60 行 deep：缺失字体文本的 fontWeight 0（API quirk，我们的值更真）、导出器专属 SVG
+通道（svgMarkup/svgFallback ×1 矩形）、单行文本 '2' 的 paragraphSpacing。
+Extra 124 = 外部库 master（预期，importer 收尾删除）。
+0806 主回归集同步受益：deep 1396 → 1323、0 新增行。
+
+Importer 侧两处修复对 **zip 和 mg 两条路径同样生效**：
+1. `promoteSingleBooleanChild` 现在把外层 boolean 记录的填充搬给被提升的子 boolean
+   （状态栏 信号/WiFi 图标此前整组透明——子树完整，只是 boolean fills=[]）。
+2. `paintFilledMaskTwins` 跳过默认占位灰 #D8D8D8 的蒙版（标签行此前多一条灰底）。
+
+第二轮回归修复：`libraryMaster` 只对**页面根**生效（画布内的库同步组件 组 16567 /
+组 16709 曾被误删——比较器对 importer 的删除全盲，这类改动必须重导入验证画布）。
+
+规格见 `MG_DECODER.md`「临时测试 fixture pass (2026-08-26)」，过程见
+`MG_DECODER_JOURNAL.md` 同日期章节。
+
 
 ## 2026-08-06 可同步测试集「插件测试 汇总」（当前主回归集）
 
@@ -241,3 +272,10 @@ removed 必须全部属于本轮目标字段。
 auto-layout 覆盖静默失效了三轮。白名单必须覆盖 `applyInstanceChildOverrides` 读的每个字段
 （visible / opacity / characters / fills / strokes / itemSpacing / padding*），
 由 `tools/tests/mgPackage.test.js` 的单测把关。
+
+### 2026-08-26 第四轮补充：蒙版补漆改为按 trailer `1e` 位门控
+
+- `.mg` trailer `1e 01` = 蒙版自身渲染填充；无此位的蒙版是"仅形状"，importer 不再补漆孪生。
+- 临时测试橙色 banner 卡（矩形 148535）修复后与 MasterGo 参考图逐点最大通道差 1/255。
+- 比较器数字全部不变（record 级字段不可见）：临时测试 0/124/0/0/0/4/60，0806 同前。
+- zip 导入无此字段、维持全量补漆：临时测试橙卡在 zip 页仍过饱和（导出链无法拿到该位，mg 反超 zip）。

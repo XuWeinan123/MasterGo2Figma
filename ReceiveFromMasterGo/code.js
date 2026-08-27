@@ -382,7 +382,9 @@ ${style}`;
     100: "thin"
   };
   function normalizeFontStyleForMatch(value) {
-    const normalized = String(value || "").toLowerCase().replace(/[\s_-]+/g, "").replace(/[^a-z0-9]/g, "");
+    let normalized = String(value || "").toLowerCase().replace(/[\s_-]+/g, "").replace(/[^a-z0-9]/g, "");
+    const withoutCharsetMarker = normalized.replace(/l\d+$/, "");
+    if (withoutCharsetMarker) normalized = withoutCharsetMarker;
     return FONT_STYLE_ALIASES[normalized] || normalized;
   }
   function getNearbyAvailableFontsForLog(requested) {
@@ -2372,6 +2374,7 @@ ${style}`;
         parent.insertChild(parentIndex >= 0 ? parentIndex : parent.children.length, child);
         if (transform) safeSet(child, "relativeTransform", transform);
         safeSet(child, "name", (data == null ? void 0 : data.name) || child.name);
+        applyOuterBooleanPaint(child, data);
         safeRemove(shell);
         return child;
       } catch (error) {
@@ -2379,6 +2382,21 @@ ${style}`;
         return null;
       }
     });
+  }
+  function applyOuterBooleanPaint(child, data) {
+    if (child.type !== "BOOLEAN_OPERATION") return;
+    const geometry = data && data.geometry;
+    const outerFills = geometry && geometry.fills;
+    if (!Array.isArray(outerFills) || !outerFills.some((f) => f && f.visible !== false)) return;
+    const childFills = child.fills;
+    const childHasFill = Array.isArray(childFills) && childFills.some((f) => f && f.visible !== false);
+    if (childHasFill) return;
+    safeSetFills(child, normalizeImageFills(outerFills, child, data.layout));
+    const outerStrokes = geometry.strokes;
+    if (Array.isArray(outerStrokes) && outerStrokes.length > 0) {
+      safeSetStrokes(child, normalizeImageStrokes(outerStrokes, child, data.layout));
+      if (geometry.strokeWeight !== void 0) safeSet(child, "strokeWeight", geometry.strokeWeight);
+    }
   }
   function composeSingleBooleanChildTransform(shell, child, data) {
     var _a;
@@ -2618,6 +2636,7 @@ ${style}`;
         deferredInstanceRelinks: [],
         libraryMasterNodes: [],
         libraryMasterLayerCount: 0,
+        maskFillSuppressedNodeIds: {},
         figmaStyleIdByRef: {}
       };
       figma.ui.postMessage({
@@ -2949,6 +2968,12 @@ ${style}`;
       yield retryDeferredInstanceRelinks(layers);
       addImportTiming(session, "restore.deferredRelinkMs", Date.now() - relinkStartedAt);
       collectLibraryMasterNodes(session, layers);
+      for (const id in layers) {
+        if (layers[id] && layers[id].maskRendersFill === false) {
+          const maskNode = session.restoredNodeById[id];
+          if (maskNode && !maskNode.removed) session.maskFillSuppressedNodeIds[maskNode.id] = true;
+        }
+      }
       yield reportPagePostprocessProgress(session, pageIndex, postprocessStart, pageNodeCount, 0, 0, 1);
       const layoutStartedAt = Date.now();
       yield applyDeferredLayoutRestores((done, total) => {
@@ -3512,12 +3537,15 @@ ${style}`;
   function paintFilledMaskTwins(session) {
     let added = 0;
     const hasVisiblePaint = (paints) => Array.isArray(paints) && paints.some((paint) => paint && paint.visible !== false && (paint.opacity === void 0 || paint.opacity > 0));
+    const isDefaultMaskFill = (paints) => Array.isArray(paints) && paints.length === 1 && paints[0] && paints[0].type === "SOLID" && paints[0].color && Math.abs(paints[0].color.r - 216 / 255) < 1e-3 && Math.abs(paints[0].color.g - 216 / 255) < 1e-3 && Math.abs(paints[0].color.b - 216 / 255) < 1e-3;
     const visit = (node) => {
       if (node.type === "INSTANCE") return;
       if ("children" in node) for (const child of [...node.children]) visit(child);
       const nodeAny = node;
       if (nodeAny.isMask !== true) return;
+      if (session.maskFillSuppressedNodeIds[node.id]) return;
       if (!hasVisiblePaint(nodeAny.fills) && !hasVisiblePaint(nodeAny.strokes)) return;
+      if (isDefaultMaskFill(nodeAny.fills) && !hasVisiblePaint(nodeAny.strokes)) return;
       const parent = node.parent;
       if (!parent || !("insertChild" in parent)) return;
       try {
