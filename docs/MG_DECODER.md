@@ -404,8 +404,11 @@ the old coverage demo 344/344 and a new real screen `0806` 102 records). Finding
 - **Container field `07 03 <libraryFileId+nodeId>` = an EXTERNAL library component master**;
   `07 04 <varint>` = a local one. Cross-tab on the fixture: 22/22 (7 library masters, all absent
   from MasterGo's own page traversal; 15 local ones, all present). The decoder marks those records
-  `libraryMaster` and still emits them as page roots — instances need them alive to re-link — and
-  the importer removes them in its cleanup phase, so they never show up on the Figma canvas.
+  `libraryMaster`. Full-fidelity/CLI conversion emits them as page roots so instances can re-link,
+  and the importer removes them in its cleanup phase. The Figma UI conversion passes
+  `includeLibraryMasters: false` to omit page-root external masters before reachability is built;
+  this avoids materializing entire embedded team libraries in memory. A library-keyed component
+  nested under a real canvas node is preserved.
 - **Container field `1a <b>`** — unknown one-byte flag on auto-layout frames. Consuming it is what
   makes the object terminator (and therefore the ANCHORED record trailer) reachable at all.
 - **Trailer `20 <float>` = layoutGrow** ("fill container"). Cross-tab: 7/7 present ⇒ 1, 439/439

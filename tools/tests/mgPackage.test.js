@@ -2,6 +2,44 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { __test } = require("../../ReceiveFromMasterGo/src/ui/mgPackage.js");
 
+test("native imports exclude only off-canvas library masters when requested", () => {
+  const nodes = {
+    canvas: {
+      type: "FRAME",
+      parent: "page-token",
+      containerMeta: { subtype: "FRAME" }
+    },
+    localComponent: {
+      type: "FRAME",
+      parent: "page-token",
+      containerMeta: { subtype: "COMPONENT_SET" }
+    },
+    libraryMaster: {
+      type: "FRAME",
+      parent: "page-token",
+      containerMeta: {
+        subtype: "COMPONENT_SET",
+        libraryKey: "123456+78:90123"
+      }
+    },
+    nestedLibraryComponent: {
+      type: "FRAME",
+      parent: "canvas",
+      containerMeta: {
+        subtype: "COMPONENT",
+        libraryKey: "123456+78:90456"
+      }
+    }
+  };
+  const roots = ["canvas", "localComponent", "libraryMaster", "nestedLibraryComponent"];
+
+  assert.deepEqual(
+    __test.filterPageRoots(roots, nodes, { includeLibraryMasters: false }),
+    ["canvas", "localComponent", "nestedLibraryComponent"]
+  );
+  assert.deepEqual(__test.filterPageRoots(roots, nodes), roots);
+});
+
 test("instance visibility precedence preserves explicit scalar values", () => {
   assert.equal(__test.resolveInstanceVisibility(0, 0x04, 1, true), 0);
   assert.equal(__test.resolveInstanceVisibility(1, 0x00, 0, true), 1);

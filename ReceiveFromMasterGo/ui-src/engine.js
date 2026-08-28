@@ -347,7 +347,10 @@ export async function parseFiles(files) {
         // read for override matching in the plugin — full props (455MB of
         // vectorNetwork etc. on the Tesla fixture) OOM the Figma tab.
         // CLI/compare-tool conversions stay full-fidelity (no options).
-        zipEntries = window.MasterGoMg.convertMgPackageToV2Entries(zipEntries, file.name, { slimInstanceDescendants: true });
+        zipEntries = window.MasterGoMg.convertMgPackageToV2Entries(zipEntries, file.name, {
+          slimInstanceDescendants: true,
+          includeLibraryMasters: false
+        });
       }
 
       const manifestPath = findManifestPath(zipEntries);

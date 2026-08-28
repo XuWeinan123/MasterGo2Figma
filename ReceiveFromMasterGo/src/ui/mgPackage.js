@@ -4394,6 +4394,14 @@
       return slim;
     }
 
+    function mgFilterPageRoots(roots, nodes, options) {
+      if (!options || options.includeLibraryMasters !== false) return roots;
+      return roots.filter(id => {
+        const node = nodes[id];
+        return !(node && node.containerMeta && node.containerMeta.libraryKey && !nodes[node.parent]);
+      });
+    }
+
     function convertMgPackageToV2Entries(zipEntries, fileName, options) {
       const documentBytes = getEntryByName(zipEntries, "document");
       if (!documentBytes) throw new Error(`"${fileName}" 不是有效的 .mg 文件（缺少 document）`);
@@ -4515,7 +4523,11 @@
         // them lost all 20 of the Tesla fixture's components, and the 大文件
         // 0804 design system keeps every button/button-group master as a
         // coded canvas root.
-        const roots = (childIds[pg.id] || []).filter(r => nodes[r] && nodes[r].type && !(isComponentMaster(r) && !nodes[r].code));
+        const roots = mgFilterPageRoots(
+          (childIds[pg.id] || []).filter(r => nodes[r] && nodes[r].type && !(isComponentMaster(r) && !nodes[r].code)),
+          nodes,
+          options
+        );
         // Library-master copies never appear in MasterGo's own page traversal
         // (the importer removes them after re-linking), so they must not
         // consume sibling indexes — the real canvas roots number consecutively.
@@ -4916,6 +4928,7 @@
     isMgPackage: isMgPackage,
     convertMgPackageToV2Entries: convertMgPackageToV2Entries,
     __test: {
+      filterPageRoots: mgFilterPageRoots,
       resolveInstanceVisibility: mgResolveInstanceVisibility,
       shouldInheritStroke: mgShouldInheritStroke,
       decodeNativeNodes: mgDecodeNativeNodes,
