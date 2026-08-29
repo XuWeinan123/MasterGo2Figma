@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 1060" role="img" aria-labelledby="wf-title wf-desc">
+  <title id="wf-title">AW MG Import Parity 工作流</title>
+  <desc id="wf-desc">输入 mg、zip 与 Figma 三页面后：结构比对判定 Missing；解码器破解并全量回归；视觉三联对照分诊 zip 是否同错；importer 取证修复；文档同步交付并由用户重导入验证，问题复现则回到定位阶段。</desc>
+  <style>
+    .box { fill: #f4f7fb; stroke: #3b5b8c; stroke-width: 1.6; rx: 8; }
+    .decision { fill: #fff7e8; stroke: #b07a1e; stroke-width: 1.6; }
+    .stop { fill: #e9f7ee; stroke: #2e7d4f; stroke-width: 1.8; }
+    .label { font-family: -apple-system, "PingFang SC", "Helvetica Neue", sans-serif; font-size: 15px; fill: #16233a; }
+    .small { font-family: -apple-system, "PingFang SC", "Helvetica Neue", sans-serif; font-size: 12px; fill: #46536b; }
+    .edge { stroke: #3b5b8c; stroke-width: 1.6; fill: none; marker-end: url(#arrow); }
+    .back { stroke: #b0501e; stroke-width: 1.4; fill: none; stroke-dasharray: 6 4; marker-end: url(#arrowb); }
+    .edgetext { font-family: -apple-system, "PingFang SC", sans-serif; font-size: 12px; fill: #7a4a10; }
+  </style>
+  <defs>
+    <marker id="arrow" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#3b5b8c"/></marker>
+    <marker id="arrowb" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#b0501e"/></marker>
+  </defs>
+
+  <rect class="box" x="180" y="20" width="400" height="64" rx="8"/>
+  <text class="label" x="380" y="46" text-anchor="middle">阶段 0 · 定位输入</text>
+  <text class="small" x="380" y="68" text-anchor="middle">mg + zip 路径；Figma 三页（图片=渲染基准 / zip=结构 / mg=对象）</text>
+
+  <path class="edge" d="M380,84 L380,116"/>
+
+  <rect class="box" x="180" y="116" width="400" height="64" rx="8"/>
+  <text class="label" x="380" y="142" text-anchor="middle">阶段 1 · 结构比对 compare_mg_import</text>
+  <text class="small" x="380" y="164" text-anchor="middle">--json 按 prop path 分桶；dump_records.js 逐节点对照</text>
+
+  <path class="edge" d="M380,180 L380,212"/>
+
+  <polygon class="decision" points="380,212 520,262 380,312 240,262"/>
+  <text class="label" x="380" y="256" text-anchor="middle">Missing &gt; 0？</text>
+  <text class="small" x="380" y="278" text-anchor="middle">Extra=库 master 才是预期</text>
+
+  <text class="edgetext" x="398" y="336">否 / 修完丢失优先</text>
+  <path class="edge" d="M380,312 L380,352"/>
+
+  <rect class="box" x="180" y="352" width="400" height="64" rx="8"/>
+  <text class="label" x="380" y="378" text-anchor="middle">阶段 2 · 解码器破解 mgPackage.js</text>
+  <text class="small" x="380" y="400" text-anchor="middle">先读 MG_DECODER.md；hexdump_record.js + 已知答案交叉表</text>
+
+  <path class="edge" d="M380,416 L380,448"/>
+
+  <rect class="box" x="180" y="448" width="400" height="64" rx="8"/>
+  <text class="label" x="380" y="474" text-anchor="middle">阶段 3 · 全 fixture 回归</text>
+  <text class="small" x="380" y="496" text-anchor="middle">A/B 差集 added=0（git worktree）；单测；双端 build</text>
+
+  <path class="back" d="M180,480 C120,480 120,384 180,384"/>
+  <text class="edgetext" x="86" y="436">回归失败</text>
+
+  <path class="edge" d="M380,512 L380,544"/>
+
+  <rect class="box" x="180" y="544" width="400" height="64" rx="8"/>
+  <text class="label" x="380" y="570" text-anchor="middle">阶段 4 · 视觉三联对照</text>
+  <text class="small" x="380" y="592" text-anchor="middle">图片 | zip | mg 并排 + 热区裁剪；缺失字体从宽</text>
+
+  <path class="edge" d="M380,608 L380,640"/>
+
+  <polygon class="decision" points="380,640 520,690 380,740 240,690"/>
+  <text class="label" x="380" y="684" text-anchor="middle">zip 也错？</text>
+  <text class="small" x="380" y="706" text-anchor="middle">只有 mg 错 → 回阶段 2</text>
+
+  <path class="back" d="M240,690 C130,690 130,384 176,384"/>
+  <text class="edgetext" x="140" y="672">仅 mg 错</text>
+
+  <text class="edgetext" x="398" y="762">是（共同缺陷）</text>
+  <path class="edge" d="M380,740 L380,780"/>
+
+  <rect class="box" x="180" y="780" width="400" height="64" rx="8"/>
+  <text class="label" x="380" y="806" text-anchor="middle">阶段 5 · importer 取证与修复</text>
+  <text class="small" x="380" y="828" text-anchor="middle">use_figma dump 真实树（get_metadata 会截断）；复现后清理</text>
+
+  <path class="back" d="M580,812 C660,812 660,480 584,480"/>
+  <text class="edgetext" x="626" y="650">修复后再回归</text>
+
+  <path class="edge" d="M380,844 L380,876"/>
+
+  <rect class="box" x="180" y="876" width="400" height="64" rx="8"/>
+  <text class="label" x="380" y="902" text-anchor="middle">阶段 6 · 文档同步 + 交付</text>
+  <text class="small" x="380" y="924" text-anchor="middle">DECODER / JOURNAL / PARITY_STATUS + 前后数字表</text>
+
+  <path class="edge" d="M380,940 L380,972"/>
+
+  <rect class="stop" x="180" y="972" width="400" height="64" rx="8"/>
+  <text class="label" x="380" y="998" text-anchor="middle">停止：剩余均为可接受残差</text>
+  <text class="small" x="380" y="1020" text-anchor="middle">用户用新构建重导入验证；复现问题则回阶段 0</text>
+
+  <path class="back" d="M580,1004 C724,1004 724,52 584,52"/>
+  <text class="edgetext" x="700" y="530">重导入仍有问题</text>
+</svg>
