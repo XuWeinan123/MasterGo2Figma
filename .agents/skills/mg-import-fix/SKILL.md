@@ -77,6 +77,7 @@ node tools/compare_mg_import.js "<file.mg>" "<baseline.zip>"        # --json 可
 
 ## 阶段 5 · 画布验证与交付
 
+- 三个页面同名 frame 各截一张，用 Pillow 拼成 `图片 | zip | mg` 三联图逐屏看；可疑区域裁热区放大再比。
 - **别急着让用户重导入**。用 `use_figma` 在 `_mg` 页上直接把新构建的效果做出来（删掉错误节点／改属性），
   截图后逐点取样比色确认，再交付——这一步能把"改完等下一轮"压缩成同一轮闭环：
   ```python
