@@ -6,6 +6,8 @@
 
 共享类型与工具函数放在 `shared/`（`shared/types.ts` 定义跨端类型，其余为矩阵/矢量/connector 辅助函数与图层规则配置），两端通过相对路径 `../../shared/...` 引用。本地大文件中继服务在 `tools/mastergo_relay_server.py`；`tools/compare_mg_import.js` 用于比对 `.mg` 解码结果与基准 zip；`pythonParser/mg_to_zip.py` 是独立的 Python CLI，复用 `ReceiveFromMasterGo/src/ui/mgPackage.js` 的解码逻辑，可在不启动任何插件的情况下把 `.mg` 直接转成 v2 zip。根目录保留 `README.md` 和 `QUICKSTART.md`；其余长期说明集中在 `docs/`，包括 `docs/MG_DECODER.md`（`.mg` 二进制格式规格）、`docs/MG_DECODER_JOURNAL.md`（逆向过程与方法论）、`docs/MG_DECODER_UNKNOWN_FIELDS.md`（未破解字段清单速查表）、`docs/MG_ZIP_PARITY_STATUS.md`（MG/ZIP 当前一致性状态）和 `docs/PERFORMANCE_OPTIMIZATIONS.md`。截图与示例资源放在 `assets/`。不要手动修改第三方依赖目录或构建缓存。
 
+AI agent 技能统一放在 `.agents/skills/<name>/`（唯一来源），各家工具的技能目录以**软链**指向它，例如 `.claude/skills/mg-import-fix -> ../../.agents/skills/mg-import-fix`。要改技能就改 `.agents/` 下的真实文件，不要把软链换成副本；新增其他工具时照此加软链即可。目前有 `mg-import-fix`（`.mg` 导入还原修复流程，配套 `dump_records.js` / `hexdump_record.js` 两个脚本）。
+
 ## Build, Test, and Development Commands
 
 两个插件分别安装依赖和构建：

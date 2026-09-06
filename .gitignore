@@ -3,3 +3,5 @@ SendToFigma/.DS_Store
 .DS_Store
 mastergo2figma-*.zip
 测试集/
+.claude/worktrees/
+.claude/settings.local.json
